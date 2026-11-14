@@ -8103,18 +8103,20 @@ static void render_menu(void){
         int cx = (int)((h>>8)%620) + 10 + (int)(fsin(G.anim_t*1.2f + (float)i*1.7f)*9.0f);
         draw_carcass(cx, 372 - (int)rise, 5 + (int)((h>>20)%3), (int)((h>>24)%4), G.anim_t*0.8f + (float)i);
     }
-    // dim the top for the title
-    rect_fill(0, 0, VW, 150, COL(20,18,36));
+    // dim the top for the title (band shortened Nov 14, 2026 at
+    // Daniel's word: the tall header was crowding the rows below it
+    // into the records strip — the whole menu stack now starts higher)
+    rect_fill(0, 0, VW, 96, COL(20,18,36));
     // twinkling stars in the title band
     for (int i=0;i<42;i++){
         unsigned h = (unsigned)i*2246822519u + 97u;
-        int sx = (int)((h>>7)%636) + 2, sy = (int)((h>>15)%138) + 5;
+        int sx = (int)((h>>7)%636) + 2, sy = (int)((h>>15)%84) + 4;
         int ph = (int)(G.anim_t*2.0f + (float)((h>>24)%5));
         u32 c = (ph%5==0)? COL(255,250,220) : (ph%5==1)? COL(190,205,255) : COL(90,100,140);
         rect_fill(sx, sy, 2, 2, c);
     }
-    rect_fill(0, 148, VW, 2, COL(255,205,40));
-    glow_ellipse(VW/2, 42, 200, 36, COL(255,214,120), 26);   // a warm halo behind the title (glow-up)
+    rect_fill(0, 94, VW, 2, COL(255,205,40));
+    glow_ellipse(VW/2, 28, 200, 24, COL(255,214,120), 26);   // a warm halo behind the title (glow-up)
     // the title, letter by letter on a slow wave, gold shimmering
     // (the font advances 8px per char times scale — 32px at scale 4)
     { const char *T = "THE SURVIVAL GAME";
@@ -8123,18 +8125,18 @@ static void render_menu(void){
           if (T[i]==' ') continue;
           char ch[2]; ch[0]=T[i]; ch[1]=0;
           float ph2 = G.anim_t*3.0f - (float)i*0.55f;
-          int y = 22 + (int)(fsin(ph2)*3.0f);
+          int y = 8 + (int)(fsin(ph2)*3.0f);
           float t2 = (fsin(ph2)+1.0f)*0.5f;
           draw_text(x0+i*32, y, ch, 4, COL(255, 214 + (int)(34.0f*t2), 64 + (int)(120.0f*t2)));
       } }
     { float tp = (fsin(G.anim_t*2.0f)+1.0f)*0.5f;
-      draw_text_center(VW/2, 66, "SQUASH BUGS. WEAR THE EVIDENCE.", 1, COL(160 + (int)(70.0f*tp), 230 + (int)(20.0f*tp), 255)); }
+      draw_text_center(VW/2, 50, "SQUASH BUGS. WEAR THE EVIDENCE.", 1, COL(160 + (int)(70.0f*tp), 230 + (int)(20.0f*tp), 255)); }
     // menu items (selection also covers the two text fields below them:
     // rows n and n+1 are NAME and HOST IP — keyboard only, no mouse)
     int n=menu_count();
     if (G.menu_sel>=n+MENU_FIELDS) G.menu_sel=0;
     for (int i=0;i<n;i++){
-        int y=160+i*22;
+        int y=108+i*22;
         const char *label=menu_item(i);
         if (i==G.menu_sel){
             rect_fill(0, y-4, VW, 18, COL(255,205,40));   // full-width bar: the whole row is the option
@@ -8142,7 +8144,7 @@ static void render_menu(void){
         } else draw_text_center(VW/2, y, label, 2, COL(235,238,245));
     }
     // name field (+ ip field on native builds)
-    int fy=160+n*22+10;
+    int fy=108+n*22+8;
     int caret = ((int)(G.anim_t*2))%2==0;
     int nx = MENU_SIMPLE? VW/2-82 : VW/2-150;
     draw_text(nx, fy+3, "NAME:", 1, G.menu_sel==n? COL(255,205,40):COL(220,225,235));
@@ -8170,8 +8172,8 @@ static void render_menu(void){
       if (ja && ja[0]){
           char b[96]; char *q=b;
           q=sappend(q, "http://"); q=sappend(q, ja);
-          draw_text_center(VW/2, fy+28, "PLAY WITH FRIENDS - THEY JUST OPEN THIS IN A BROWSER:", 1, COL(150,160,185));
-          draw_text_center(VW/2, fy+42, b, 2, COL(255,214,64));
+          draw_text_center(VW/2, fy+24, "PLAY WITH FRIENDS - THEY JUST OPEN THIS IN A BROWSER:", 1, COL(150,160,185));
+          draw_text_center(VW/2, fy+38, b, 2, COL(255,214,64));
       } }
     // records strip
     { char b[128]; char *q=b;
@@ -8183,7 +8185,7 @@ static void render_menu(void){
     // Nov 6: the bottom of the screen stays clean — the pause menu's
     // CONTROLS panel is the reference, and menus work the same
     // everywhere: move, select, tap.)
-    if (G.store_msg_t>0) draw_text_center(VW/2, 122, G.store_msg, 1, COL(255,130,130));
+    if (G.store_msg_t>0) draw_text_center(VW/2, 68, G.store_msg, 1, COL(255,130,130));
     (void)menu_items;
 }
 static void render_slots(void){
@@ -8235,11 +8237,11 @@ static void menu_input(void){
     if (IN.menu_down){ G.menu_sel=(G.menu_sel+1)%rows; }
     // touch: tap an item to go straight to it, tap a field to select it
     if (IN.tapped){
-        int fy=160+n*22+10;
+        int fy=108+n*22+8;
         if (IN.tap_y>=fy-4 && IN.tap_y<=fy+17){
             G.menu_sel = (MENU_FIELDS==2 && IN.tap_x>=376)? n+1 : n;
         } else for (int i=0;i<n;i++){
-            if (IN.tap_y>=160+i*22-6 && IN.tap_y<=160+i*22+16){ menu_activate(i); return; }
+            if (IN.tap_y>=108+i*22-6 && IN.tap_y<=108+i*22+16){ menu_activate(i); return; }
         }
     }
     if (G.menu_sel<n){
