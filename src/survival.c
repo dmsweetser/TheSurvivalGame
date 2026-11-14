@@ -9843,6 +9843,10 @@ typedef struct {
     int crt_guest;               // 0 = not a race guest; else the host's pi + 1 (this sim only ferries input/view)
     int crt_hfin[2];             // human finish places: [0] host kart, [1] guest kart; 0 until home
     float crt_endt;              // after the first human finishes, seconds before the race closes (-1 = not armed)
+    int crt_kcol[6];             // kart index -> palette index actually worn this race
+    int crt_colsel, crt_colsel2; // waiting-room colour picks (host's own, the guest's)
+    int crt_ready;               // waiting-room ready bits: 1 host, 2 guest
+    int crt_prevk, crt_gprevk;   // held-key history for waiting-room edge detection
     float crt_x[6], crt_y[6], crt_h[6], crt_v[6], crt_prog[6], crt_boost[6];
     int crt_seg[6], crt_place[6], crt_finplace[6];
     float crt_off[6], crt_skill[6];
@@ -10158,7 +10162,7 @@ static void bw_enter_mode(int pi, int mode){
     else if (mode==4){ char *q=S->note; q=sappend(q, "BUDDY CRAFT. "); q=sappend(q, lbl_int()); q=sappend(q, " GATHERS + RESTS. "); q=sappend(q, lbl_fire()); q=sappend(q, " SWINGS. "); q=sappend(q, lbl_wall()); q=sappend(q, " CRAFTS."); *q=0; }
     else if (mode==5){ char *q=S->note; q=sappend(q, "TANK RESCUE. "); q=sappend(q, lbl_fire()); q=sappend(q, " FIRES THE CANNON. FREE CAPTIVES, DROP AT PADS."); *q=0; }
     else if (mode==6){ char *q=S->note; q=sappend(q, "CASTLE. TRAPPED! RUN INTO THINGS TO TAKE OR FIGHT. FIND THE KEY, ESCAPE!"); *q=0; }
-    else if (mode==7){ char *q=S->note; q=sappend(q, S->crt_duo >= 0? "SUPER BUDDY CART. HEAD-TO-HEAD! 3 LAPS. UP IS THE GAS - BEAT YOUR FELLOW HUMAN!" : "SUPER BUDDY CART. 3 LAPS. UP IS THE GAS - STEER, RIDE THE BOOST PADS, WIN!"); *q=0; }
+    else if (mode==7){ char *q=S->note; q=sappend(q, "THE WAITING ROOM. PICK YOUR COLOUR!"); *q=0; }
     else if (mode==1 && b->story_bits==(1<<0)) scpy(S->note, "STORY MODE. PATCH VILLAGE LIES NORTH-WEST.", 72);
     else if (mode==1) scpy(S->note, "BACK TO THE STORY. THE MEADOW REMEMBERS.", 72);
     else scpy(S->note, "BANZAI WORLD. WATCH FOR HACKERS.", 72);
@@ -15157,12 +15161,27 @@ static void crt_places(BwSim *S){
         S->crt_place[i] = pl; }
 }
 static BwIn crt_gin[MAXP];   // a race guest's latest input, keyed by host pi
+// picking the kart cabinet lands you in the WAITING ROOM (state 3):
+// choose your colour, and in local co-op wait for the other player to
+// pick the cart on their own side too — only then are you linked
 static void crt_enter(int pi){
     BwSim *S = &BWS[pi]; Buddy *b = &G.bud[pi];
     crt_build();
-    S->crt_state = 0; S->crt_t = 0; S->crt_count = 3.4f; S->crt_fint = 0;
+    S->crt_state = 3; S->crt_t = 0; S->crt_count = 3.4f; S->crt_fint = 0;
     S->crt_fincount = 0; S->crt_player_place = 0;
     S->crt_duo = -1; S->crt_guest = 0;
+    S->crt_hfin[0] = 0; S->crt_hfin[1] = 0; S->crt_endt = -1.0f;
+    S->crt_colsel = (pi == G.p2_slot && G.my_id != pi)? 1 : 0;
+    S->crt_colsel2 = 1; S->crt_ready = 0; S->crt_prevk = 0; S->crt_gprevk = 0;
+    for (int i = 0; i < 6; i++) S->crt_kcol[i] = i;
+    b->x = CRT_OX + 320; b->y = CRT_OY + 295;
+    b->bw_x = b->x; b->bw_y = b->y;
+}
+// the waiting room is over: lay out the grid and start the countdown
+static void crt_start_race(int pi){
+    BwSim *S = &BWS[pi]; Buddy *b = &G.bud[pi];
+    S->crt_state = 0; S->crt_t = 0; S->crt_count = 3.4f; S->crt_fint = 0;
+    S->crt_fincount = 0; S->crt_player_place = 0;
     S->crt_hfin[0] = 0; S->crt_hfin[1] = 0; S->crt_endt = -1.0f;
     static const float SKILL[5] = { 0.95f, 0.97f, 0.99f, 1.005f, 1.02f };
     static const int SLOT[6] = { 3, 0, 1, 2, 4, 5 };   // your buddy starts 4th: a race, not a parade
@@ -15178,27 +15197,19 @@ static void crt_enter(int pi){
         S->crt_off[i] = (i == 0)? 0 : ((i % 2 == 0)? -1 : 1) * (7.0f + (float)((i * 37) % 9));
         S->crt_skill[i] = (i == 0)? 1.0f : SKILL[i-1] * (0.99f + rng_f() * 0.02f);
     }
+    // colours: the humans wear their waiting-room picks, the rivals
+    // take whatever is left in palette order
+    { int used[6] = { 0, 0, 0, 0, 0, 0 };
+      S->crt_kcol[0] = S->crt_colsel; used[S->crt_colsel] = 1;
+      int start = 1;
+      if (S->crt_duo >= 0){ S->crt_kcol[1] = S->crt_colsel2; used[S->crt_colsel2] = 1; start = 2; }
+      int nxt = 0;
+      for (int i = start; i < 6; i++){ while (used[nxt]) nxt++; S->crt_kcol[i] = nxt; used[nxt] = 1; } }
     b->x = CRT_OX + S->crt_x[0]; b->y = CRT_OY + S->crt_y[0];
     b->bw_x = b->x; b->bw_y = b->y; b->aim = S->crt_h[0];
-    // head-to-head: if the other local player is standing around the mall
-    // with a buddy, they get pulled onto the grid as kart 1 — one race,
-    // two humans, and the loser hears about it at dinner
-    if (G.net_mode == NET_OFF || (G.net_mode == NET_HOST && !any_remote_connected())){
-        int other = (pi == G.my_id)? G.p2_slot : G.my_id;
-        if (other >= 0 && other != pi){
-            Player *op = &G.p[other]; Buddy *ob = &G.bud[other]; BwSim *OS = &BWS[other];
-            if (op->connected && ob->active && !ob->fainted && !ob->in_bw && op->in_mall){
-                S->crt_duo = other;
-                crt_gin[pi] = (BwIn){0};
-                OS->crt_guest = pi + 1; OS->crt_duo = -1;
-                OS->from_arcade = 1; OS->arc_cab = 5; OS->bw_menu = 0; OS->bat.active = 0;
-                arcgate[other] = 0; bwgate[other] = 0;
-                ob->bw_mode = 7; ob->in_bw = 1;
-                ob->x = CRT_OX + S->crt_x[1]; ob->y = CRT_OY + S->crt_y[1];
-                ob->bw_x = ob->x; ob->bw_y = ob->y; ob->aim = S->crt_h[1];
-            }
-        }
-    }
+    if (S->crt_duo >= 0){ Buddy *gb = &G.bud[S->crt_duo];
+        gb->x = CRT_OX + S->crt_x[1]; gb->y = CRT_OY + S->crt_y[1];
+        gb->bw_x = gb->x; gb->bw_y = gb->y; gb->aim = S->crt_h[1]; }
 }
 
 // one kart under human hands (host = kart 0, guest = kart 1)
@@ -15249,11 +15260,59 @@ static void crt_update(int pi, float dt, const BwIn *in){
         crt_gin[host] = *in;
         if (in->exit_){
             BwSim *HS = &BWS[host];
-            if (HS->crt_duo == pi) HS->crt_duo = -1;
+            if (HS->crt_duo == pi){ HS->crt_duo = -1; HS->crt_ready &= ~2; }
             S->crt_guest = 0;
             bw_exit(pi, 0);
             Player *p = &G.p[pi];
-            spawn_floater(p->x, p->y - 26, "YOU LEFT THE RACE", COL(255, 200, 150));
+            spawn_floater(p->x, p->y - 26, HS->crt_state == 3? "YOU LEFT THE WAITING ROOM" : "YOU LEFT THE RACE", COL(255, 200, 150));
+        }
+        return;
+    }
+    if (S->crt_state == 3){
+        // ---- the WAITING ROOM: pick a colour; in local co-op, link with
+        // the other player only when they have picked the cart too, and
+        // start when both are ready. Solo, FIRE starts a solo race.
+        // (crt_t is the room's grace clock: the cabinet-pick press must
+        // never double as the ready press, so FIRE only counts once the
+        // room is a third of a second old — or re-aged at the link.)
+        S->crt_t += dt;
+        if (S->crt_duo < 0 && (G.net_mode == NET_OFF || (G.net_mode == NET_HOST && !any_remote_connected()))){
+            int other = (pi == G.my_id)? G.p2_slot : G.my_id;
+            if (other >= 0 && other != pi){
+                BwSim *OS = &BWS[other]; Buddy *ob = &G.bud[other];
+                if (ob->active && ob->in_bw && ob->bw_mode == 7 && OS->crt_state == 3
+                    && OS->crt_duo < 0 && OS->crt_guest == 0){
+                    S->crt_duo = other; OS->crt_guest = pi + 1;
+                    S->crt_colsel2 = OS->crt_colsel;
+                    S->crt_ready = 0; S->crt_gprevk = 0; crt_gin[pi] = (BwIn){0};
+                    S->crt_t = 0;   // restart the grace clock at the link
+                    sfx(19);
+                }
+            }
+        }
+        int edges = in->keys & ~S->crt_prevk; S->crt_prevk = in->keys;
+        if (edges & K_LEFT){ do { S->crt_colsel = (S->crt_colsel + 5) % 6; } while (S->crt_duo >= 0 && S->crt_colsel == S->crt_colsel2); sfx(6); }
+        if (edges & K_RIGHT){ do { S->crt_colsel = (S->crt_colsel + 1) % 6; } while (S->crt_duo >= 0 && S->crt_colsel == S->crt_colsel2); sfx(6); }
+        if (in->exit_){
+            if (S->crt_duo >= 0){
+                // send the partner back to their own solo waiting room
+                int guest = S->crt_duo; BwSim *GS2 = &BWS[guest];
+                GS2->crt_colsel = S->crt_colsel2;
+                GS2->crt_guest = 0; S->crt_duo = -1;
+            }
+            bw_exit(pi, 0);
+            return;
+        }
+        if (S->crt_duo >= 0){
+            BwIn *g = &crt_gin[pi];
+            int gedges = g->keys & ~S->crt_gprevk; S->crt_gprevk = g->keys;
+            if (gedges & K_LEFT){ do { S->crt_colsel2 = (S->crt_colsel2 + 5) % 6; } while (S->crt_colsel2 == S->crt_colsel); }
+            if (gedges & K_RIGHT){ do { S->crt_colsel2 = (S->crt_colsel2 + 1) % 6; } while (S->crt_colsel2 == S->crt_colsel); }
+            if (g->sel && S->crt_t > 0.35f) S->crt_ready |= 2;
+            if (in->sel && S->crt_t > 0.35f) S->crt_ready |= 1;
+            if (S->crt_ready == 3) crt_start_race(pi);
+        } else if (in->sel && S->crt_t > 0.35f){
+            crt_start_race(pi);
         }
         return;
     }
@@ -15379,6 +15438,50 @@ static void crt_render_view(int sim_pi, int viewer_pi){
 #define KTX(lx) (ox + (int)((lx) * cs))
 #define KTY(ly) (oy + (int)((ly) * cs))
 #define KTS(v) ((int)((v) * cs) < 1 ? 1 : (int)((v) * cs))
+    if (S->crt_state == 3){
+        // ---- the WAITING ROOM
+        static const u32 KCOL2[6] = { COL(230, 60, 50), COL(70, 130, 240), COL(250, 200, 50),
+                                      COL(90, 200, 90), COL(200, 90, 220), COL(240, 140, 40) };
+        static const char *COLNAME[6] = { "RED", "BLUE", "YELLOW", "GREEN", "PURPLE", "ORANGE" };
+        int mycol = (vk == 0)? S->crt_colsel : S->crt_colsel2;
+        rect_fill(vx, vy, vw2, vh2, COL(18, 42, 24));
+        for (int ty2 = 0; ty2 < 12; ty2++) for (int tx2 = 0; tx2 < 20; tx2++)
+            if ((tx2 + ty2) & 1) rect_fill(KTX(tx2*32), KTY(ty2*32), KTS(32) + 1, KTS(32) + 1, COL(22, 52, 28));
+        draw_text_center(vx + vw2/2, vy + 26, "SUPER BUDDY CART", vw2 >= 620? 3 : 2, COL(250, 200, 50));
+        draw_text_center(vx + vw2/2, vy + 62, "THE WAITING ROOM", 2, COL(255, 255, 255));
+        // your kart, big and proud, wearing your pick
+        { int cx = vx + vw2/2, cy = vy + vh2/2 - 6;
+          disc_fill(cx - KTS(48), cy - KTS(35), KTS(17), COL(16, 14, 24));
+          disc_fill(cx + KTS(48), cy - KTS(35), KTS(17), COL(16, 14, 24));
+          disc_fill(cx - KTS(48), cy + KTS(35), KTS(17), COL(16, 14, 24));
+          disc_fill(cx + KTS(48), cy + KTS(35), KTS(17), COL(16, 14, 24));
+          rect_fill(cx - KTS(61), cy - KTS(38), KTS(122), KTS(77), KCOL2[mycol]);
+          rect_line(cx - KTS(61), cy - KTS(38), KTS(122), KTS(77), COL(255, 255, 255));
+          disc_fill(cx, cy, KTS(20), COL(24, 22, 34));
+          disc_fill(cx, cy, KTS(14), COL(255, 235, 200));
+          tri_fill(cx - KTS(92), cy - KTS(16), cx - KTS(92), cy + KTS(16), cx - KTS(70), cy, COL(255, 255, 255));
+          tri_fill(cx + KTS(92), cy - KTS(16), cx + KTS(92), cy + KTS(16), cx + KTS(70), cy, COL(255, 255, 255));
+          draw_text_center(cx, cy + KTS(64), COLNAME[mycol], 2, COL(255, 255, 255)); }
+        draw_text_center(vx + vw2/2, vy + vh2 - 104, "LEFT / RIGHT - PICK YOUR COLOUR", 1, COL(200, 230, 200));
+        if (S->crt_duo >= 0){
+            int imready = (vk == 0)? (S->crt_ready & 1) : (S->crt_ready & 2);
+            int theyready = (vk == 0)? (S->crt_ready & 2) : (S->crt_ready & 1);
+            { char buf[64]; char *q = buf;
+              q = sappend(q, "PARTNER IS HERE, IN THE "); q = sappend(q, COLNAME[(vk == 0)? S->crt_colsel2 : S->crt_colsel]); q = sappend(q, " KART"); *q = 0;
+              draw_text_center(vx + vw2/2, vy + vh2 - 82, buf, 1, COL(255, 240, 200)); }
+            draw_text_center(vx + vw2/2, vy + vh2 - 62, theyready? "PARTNER: READY!" : "PARTNER: STILL PICKING...", 1, theyready? COL(120, 255, 120) : COL(220, 220, 220));
+            draw_text_center(vx + vw2/2, vy + vh2 - 42, imready? "YOU: READY!" : "FIRE WHEN READY", 1, imready? COL(120, 255, 120) : COL(255, 255, 255));
+        } else {
+            draw_text_center(vx + vw2/2, vy + vh2 - 82, "NO PARTNER YET", 1, COL(255, 240, 200));
+            draw_text_center(vx + vw2/2, vy + vh2 - 62, "THE OTHER PLAYER MUST PICK THE CART TOO", 1, COL(220, 220, 220));
+            draw_text_center(vx + vw2/2, vy + vh2 - 42, "FIRE: RACE SOLO   -   LEAVE: BACK OUT", 1, COL(255, 255, 255));
+        }
+        if (S->note_t > 0){
+            rect_fill(vx, vy + vh2 - 22, vw2, 22, COL(10, 12, 10));
+            draw_text_center(vx + vw2/2, vy + vh2 - 15, S->note, 1, COL(220, 255, 220));
+        }
+        return;
+    }
     rect_fill(vx, vy, vw2, vh2, COL(24, 90, 32));
     for (int ty = 0; ty < 12; ty++) for (int tx = 0; tx < 20; tx++)
         if ((tx + ty) & 1) rect_fill(KTX(tx*32), KTY(ty*32), KTS(32) + 1, KTS(32) + 1, COL(30, 104, 38));
@@ -15419,7 +15522,7 @@ static void crt_render_view(int sim_pi, int viewer_pi){
             float wx2 = (w2 < 2)? 9 : -9, wy2 = (w2 % 2 == 0)? 10 : -10;
             disc_fill(KTX(kx + ch*wx2 - sh*wy2), KTY(ky + sh*wx2 + ch*wy2), KTS(4), COL(16, 14, 24));
         }
-        tri_fill(KTX(nx), KTY(ny), KTX(lx), KTY(ly), KTX(rx), KTY(ry), KCOL[i]);
+        tri_fill(KTX(nx), KTY(ny), KTX(lx), KTY(ly), KTX(rx), KTY(ry), KCOL[S->crt_kcol[i]]);
         { float bx2 = kx + ch*(-3), by2 = ky + sh*(-3);
           disc_fill(KTX(bx2), KTY(by2), KTS(6), COL(24, 22, 34));
           disc_fill(KTX(bx2), KTY(by2), KTS(4), i == vk? COL(255, 235, 200) : COL(240, 240, 240)); }

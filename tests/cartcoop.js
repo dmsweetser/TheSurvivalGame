@@ -1,7 +1,7 @@
-// cartcoop.js — SUPER BUDDY CART head-to-head (Nov 14): in local co-op,
-// when P1 launches the kart cabinet and P2 is in the mall with a buddy,
-// P2 is pulled onto the same grid as kart 1: one shared race, both
-// inputs live, both records saved.
+// cartcoop.js — SUPER BUDDY CART head-to-head (Nov 14): the waiting-room
+// flow. Each player must pick the kart cabinet on their OWN side; the
+// two waiting rooms then link, both players ready up, and one shared
+// race runs with both inputs live and both records saved.
 const { chromium } = require('playwright-core');
 const EXE = process.env.HOME + '/.cache/ms-playwright/chromium-1248/chrome-linux64/chrome';
 const URL = 'http://localhost:8903/the-survival-game.html';
@@ -79,8 +79,26 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   ok((await poll('dbg_arcgate', v => v === 1, 5000)) === 1, 'cart cabinet panel opened');
   await key('Space', 200);
   ok((await poll('dbg_bwmode', v => v === 7, 5000)) === 7, 'P1 launched SUPER BUDDY CART');
-  ok((await call('dbg_crtduo')) === p2slot, 'P2 pulled into the same race', await call('dbg_crtduo'));
-  ok((await poll('dbg_bwstate2', v => v === 1, 5000)) === 1, 'P2 is in the race too');
+  ok((await call('dbg_crtstate')) === 3, 'P1 lands in the waiting room', await call('dbg_crtstate'));
+  ok((await call('dbg_crtduo')) === -1, 'nobody is dragged in: no link yet', await call('dbg_crtduo'));
+  ok((await call('dbg_bwstate2')) === 0, 'P2 is NOT in the race yet');
+
+  // P2 must choose the cart on their own side: Arcade door, cabinet, PLAY
+  await call('dbg_tp2', 230, -5976);
+  await btn(1, 1, 180); await sleep(400);
+  await call('dbg_tp2', 256, -11898);
+  await sleep(250);
+  await btn(1, 1, 180); await sleep(400);
+  await btn(1, 0, 180);   // pad A picks PLAY on P2's own panel
+  ok((await poll('dbg_bwstate2', v => v === 1, 5000)) === 1, 'P2 picked the cart too');
+  ok((await poll('dbg_crtduo', v => v === p2slot, 5000)) === p2slot, 'the waiting rooms linked up', await call('dbg_crtduo'));
+  await sleep(300);
+  await page.screenshot({ path: __dirname + '/cart-lobby-duo.png' });
+
+  // both ready up: P1 on Space, P2 on pad A — then the countdown runs
+  await key('Space', 200);
+  await btn(1, 0, 180);
+  ok((await poll('dbg_crtstate', v => v === 0 || v === 1, 8000)) !== 3, 'both ready: the race is starting');
   ok((await poll('dbg_crtstate', v => v === 1, 8000)) === 1, 'countdown finished, racing');
 
   // both drive: P1 on the keyboard, P2 on pad dpad-up

@@ -13,8 +13,8 @@ Also in 1.6:
 - Quitting any cabinet now drops you back in front of that cabinet, whichever row it stands in. No more materialising across the room.
 - Everything from 1.5 rides along: CASTLE, the speed floor, the Walk of Fame at minimum speed only, and the spider's very serious frown.
 
-- One more thing, fresh off the line: HEAD-TO-HEAD. In local co-op, launching the cart pulls the other player onto the grid with you — one race, two humans, four very confused rivals. The first human home starts an eight-second clock for the other one. Your records stay your own; the bragging is shared.
+- One more thing, fresh off the line: HEAD-TO-HEAD, with a WAITING ROOM. Picking the cart now drops you into the waiting room: choose your kart's colour, and in local co-op your partner only joins when they pick the cart on their own side too — nobody gets dragged anywhere. When both of you are in and both hit FIRE, it's one race, two humans, four very confused rivals. The first human home starts an eight-second clock for the other one. Your records stay your own; the bragging is shared. Solo drivers: FIRE starts your race right away.
 
-Tested before it ships: carttest 21/21 (countdown, real driving, a full finish, records saved), cartcoop 20/20 (the pull-in, both karts driving, both records saved), arcadetest 24/24, castletest 25/25, mallfix 28/28, and the Linux build smoke-tested clean.
+Tested before it ships: carttest 22/22 (waiting room, solo start, countdown, real driving, a full finish, records saved), cartcoop 24/24 (both players choosing the cart on their own side, the link, both ready, both karts driving, both records saved), arcadetest 24/24, castletest 25/25, mallfix 28/28, and the Linux build smoke-tested clean.
 
 SQUASH BUGS. WEAR THE EVIDENCE.

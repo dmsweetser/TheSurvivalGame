@@ -45,7 +45,10 @@ function T(name, cond, extra) { if (cond) { pass++; } else { fail++; console.log
   T('cart cabinet panel opened', (await poll('dbg_arcgate', v => v === 1, 3000)) === 1, await call('dbg_arcgate'));
   await key('Space', 300);
   T('SUPER BUDDY CART launched (bw_mode 7)', (await poll('dbg_bwmode', v => v === 7, 4000)) === 7, await call('dbg_bwmode'));
-  T('countdown running', (await call('dbg_crtstate')) === 0, await call('dbg_crtstate'));
+  T('the waiting room comes first', (await call('dbg_crtstate')) === 3, await call('dbg_crtstate'));
+  await cv.screenshot({ path: __dirname + '/cart-lobby.png' });
+  await key('Space', 300);   // FIRE in the waiting room: race solo
+  T('countdown running', (await poll('dbg_crtstate', v => v === 0, 4000)) === 0, await call('dbg_crtstate'));
   T('on the grid behind the line', (await call('dbg_crtprog')) < 0, await call('dbg_crtprog'));
   T('racing after the countdown', (await poll('dbg_crtstate', v => v === 1, 8000)) === 1, await call('dbg_crtstate'));
 
