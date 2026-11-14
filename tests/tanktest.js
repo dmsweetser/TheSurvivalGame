@@ -40,6 +40,22 @@ function T(name, cond, extra) { if (cond) { pass++; } else { fail++; console.log
   T('TANK RESCUE launched (bw_mode 5)', (await poll('dbg_bwmode', v => v === 5, 4000)) === 5, await call('dbg_bwmode'));
   T('level 1', (await call('dbg_tanklvl')) === 1, await call('dbg_tanklvl'));
 
+  // GRENADES (Nov 14): a switchable secondary weapon. Cannon is the
+  // default; F swaps to the pouch with 8 grenades; firing lobs one
+  // (flight shows in the boom counter at +10) and it bursts ahead.
+  T('cannon is the default weapon', (await call('dbg_tankwep')) === 0, await call('dbg_tankwep'));
+  T('grenade pouch starts full (8)', (await call('dbg_tankgren')) === 8, await call('dbg_tankgren'));
+  await key('KeyF', 250);
+  T('F swaps to grenades', (await poll('dbg_tankwep', v => v === 1, 3000)) === 1, await call('dbg_tankwep'));
+  await hold('Space', 700);
+  T('a grenade was lobbed (pouch down, shell in flight or burst)',
+    (await poll('dbg_tankboom', v => v > 0, 3000)) > 0 && (await call('dbg_tankgren')) < 8,
+    'boom=' + (await call('dbg_tankboom')) + ' gren=' + (await call('dbg_tankgren')));
+  await sleep(1200);
+  T('the grenade burst (nothing left flying)', (await call('dbg_tankboom')) < 10, await call('dbg_tankboom'));
+  await key('KeyF', 250);
+  T('F swaps back to the cannon', (await poll('dbg_tankwep', v => v === 0, 3000)) === 0, await call('dbg_tankwep'));
+
   // the mission chain opens on RESCUE, nothing delivered, gun alive
   T('objective opens on RESCUE (0)', (await call('dbg_tankobj')) === 0, await call('dbg_tankobj'));
   T('nothing delivered yet', (await call('dbg_tankdeliv')) === 0, await call('dbg_tankdeliv'));

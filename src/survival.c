@@ -9825,6 +9825,9 @@ typedef struct {
     float tank_cap_x[24], tank_cap_y[24]; int tank_cap_a[24];
     float tank_sh_x[24], tank_sh_y[24], tank_sh_vx[24], tank_sh_vy[24], tank_sh_t[24]; int tank_sh_a[24];
     float tank_es_x[32], tank_es_y[32], tank_es_vx[32], tank_es_vy[32], tank_es_t[32]; int tank_es_a[32];
+    int tank_wep, tank_gren;   // 0 cannon, 1 grenades (Nov 14: switchable secondary)
+    float tank_gr_x[10], tank_gr_y[10], tank_gr_vx[10], tank_gr_vy[10], tank_gr_t[10]; int tank_gr_a[10];
+    float tank_boom_x[6], tank_boom_y[6], tank_boom_t[6];
     unsigned char tank_dead[TANK_W*TANK_LEN], tank_hit[TANK_W*TANK_LEN];   // shot-away tiles + sandbag wear
     // CASTLE (bw_mode 6, Nov 14 2026): the run's whole state
     int cas_room, cas_score, cas_treasures, cas_sword, cas_key, cas_won;
@@ -9844,6 +9847,8 @@ typedef struct {
     int crt_hfin[2];             // human finish places: [0] host kart, [1] guest kart; 0 until home
     float crt_endt;              // after the first human finishes, seconds before the race closes (-1 = not armed)
     int crt_kcol[6];             // kart index -> palette index actually worn this race
+    int crt_species[6], crt_dcolidx[6], crt_nameidx[6];   // the DRIVER in each kart: a real Banzai Buddy (species, coat colour, name)
+    float crt_line[6], crt_slidet[6];                     // AI racing-line lateral (smoothed); human drift charge time
     int crt_colsel, crt_colsel2; // waiting-room colour picks (host's own, the guest's)
     int crt_ready;               // waiting-room ready bits: 1 host, 2 guest
     int crt_prevk, crt_gprevk;   // held-key history for waiting-room edge detection
@@ -14181,6 +14186,9 @@ static void tank_load_level(int pi, int lvl){
 static void tank_enter(int pi){
     BwSim *S=&BWS[pi]; Buddy *b=&G.bud[pi];
     S->tank_score=0; S->tank_lives=3; S->tank_t=0;
+    S->tank_wep=0; S->tank_gren=8;
+    for (int i=0;i<10;i++) S->tank_gr_a[i]=0;
+    for (int i=0;i<6;i++) S->tank_boom_t[i]=0;
     tank_load_level(pi, b->tank_done+1);
     scpy(S->note, "FOLLOW THE YELLOW ARROW: RESCUE, DELIVER, BREAK THROUGH!", 72); S->note_t=3.6f;
 }
@@ -14229,8 +14237,45 @@ static void tank_fire_eshell(BwSim *S, float x, float y, float ang, float spd){
         return;
     }
 }
+static void tank_boom(int pi, float x, float y){
+    BwSim *S=&BWS[pi]; Buddy *b=&G.bud[pi];
+    for (int i=0;i<6;i++) if (S->tank_boom_t[i]<=0){ S->tank_boom_x[i]=x; S->tank_boom_y[i]=y; S->tank_boom_t[i]=0.3f; break; }
+    splat(x, y, COL(255,170,70), 18, 150); splat(x, y, COL(255,120,60), 10, 110); sfx(7);
+    for (int j=0;j<S->tank_en_n;j++){
+        TankEn *e=&S->tank_en[j];
+        if (e->kind<0 || e->kind==3) continue;
+        float dx=e->x-x, dy=e->y-y;
+        if (dx*dx+dy*dy < 62*62){
+            e->hp -= 15;
+            if (e->kind==4) S->tank_boss_hp = e->hp>0? e->hp : 0;
+            if (e->kind==5) S->tank_mid_hp = e->hp>0? e->hp : 0;
+            if (e->hp<=0) tank_kill_en(pi, e);
+        }
+    }
+    for (int ty2=0; ty2<TANK_LEN; ty2++) for (int tx2=0; tx2<TANK_W; tx2++){
+        int t = tank_tile(S, tx2, ty2);
+        if (t!=3 && t!=4) continue;
+        float dx=tx2*BW_TILE+24-x, dy=ty2*BW_TILE+24-y;
+        if (dx*dx+dy*dy < 62*62){
+            int idx=ty2*TANK_W+tx2;
+            if (t==3){ S->tank_dead[idx]=1; S->tank_score+=10; }
+            else { S->tank_hit[idx]+=2; if (S->tank_hit[idx]>=2){ S->tank_dead[idx]=1; S->tank_score+=25; } }
+        }
+    }
+    { float dx=b->x-x, dy=b->y-y; if (dx*dx+dy*dy < 42*42) tank_hurt(pi, 6); }   // mind your own splash
+}
 static void tank_update_shells(int pi, float dt){
     BwSim *S=&BWS[pi]; Buddy *b=&G.bud[pi];
+    // grenades: lobbed, short fuse, area blast at the end of it
+    for (int i=0;i<10;i++) if (S->tank_gr_a[i]){
+        S->tank_gr_t[i]-=dt;
+        S->tank_gr_x[i]+=S->tank_gr_vx[i]*dt; S->tank_gr_y[i]+=S->tank_gr_vy[i]*dt;
+        int t=tank_tile(S, bw_tileof(S->tank_gr_x[i]), bw_tileof(S->tank_gr_y[i]));
+        if (S->tank_gr_t[i]<=0 || t==2 || t==3 || t==4){
+            S->tank_gr_a[i]=0; tank_boom(pi, S->tank_gr_x[i], S->tank_gr_y[i]);
+        }
+    }
+    for (int i=0;i<6;i++) if (S->tank_boom_t[i]>0) S->tank_boom_t[i]-=dt;
     // your shells: over water and the gate, stopped by hard cover
     for (int i=0;i<24;i++) if (S->tank_sh_a[i]){
         S->tank_sh_t[i]-=dt; if (S->tank_sh_t[i]<=0){ S->tank_sh_a[i]=0; continue; }
@@ -14254,7 +14299,7 @@ static void tank_update_shells(int pi, float dt){
             float dx=sx-e->x, dy=sy-e->y;
             if (dx*dx+dy*dy < rr*rr){
                 S->tank_sh_a[i]=0;
-                e->hp -= 5;
+                e->hp -= 6;
                 if (e->kind==4) S->tank_boss_hp = e->hp>0? e->hp : 0;
                 if (e->kind==5) S->tank_mid_hp = e->hp>0? e->hp : 0;
                 splat(sx, sy, COL(255,210,120), 4, 80); sfx(5);
@@ -14271,7 +14316,7 @@ static void tank_update_shells(int pi, float dt){
         int t=tank_tile(S, bw_tileof(sx), bw_tileof(sy));
         if (t==2 || t==3 || t==4){ S->tank_es_a[i]=0; continue; }
         float dx=sx-b->x, dy=sy-b->y;
-        if (dx*dx+dy*dy < 20*20){ S->tank_es_a[i]=0; tank_hurt(pi, 10); }
+        if (dx*dx+dy*dy < 20*20){ S->tank_es_a[i]=0; tank_hurt(pi, 8); }
     }
 }
 static void tank_update_foes(int pi, float dt){
@@ -14285,7 +14330,7 @@ static void tank_update_foes(int pi, float dt){
             if (d2 < 430*430) e->aim = fatan2(dy, dx);
             e->ft -= dt;
             if (e->ft<=0 && d2 < 340*340){
-                float cd = 1.3f - (float)S->tank_lvl*0.05f; if (cd<0.9f) cd=0.9f;
+                float cd = 1.5f - (float)S->tank_lvl*0.05f; if (cd<1.05f) cd=1.05f;
                 e->ft = cd;
                 tank_fire_eshell(S, e->x + fcos(e->aim)*20, e->y + fsin(e->aim)*20, e->aim, 335);
                 sfx(2);
@@ -14294,7 +14339,7 @@ static void tank_update_foes(int pi, float dt){
             e->aim = fatan2(dy, dx);
             e->ft -= dt;
             if (e->ft<=0 && d2 < 540*540){
-                float cd = 1.5f - (float)S->tank_lvl*0.03f; if (cd<1.15f) cd=1.15f;
+                float cd = 1.7f - (float)S->tank_lvl*0.03f; if (cd<1.3f) cd=1.3f;
                 e->ft = cd;
                 for (int s2=-1;s2<=1;s2+=2) tank_fire_eshell(S, e->x + (float)s2*10, e->y + 26, e->aim + (float)s2*0.09f, 320);
                 sfx(2);
@@ -14316,10 +14361,10 @@ static void tank_update_foes(int pi, float dt){
                 else e->y = ny2;
                 e->aim = e->dir>0? PI/2 : -PI/2;
             }
-            if (d2 < 30*30) tank_hurt(pi, 14);   // don't trade paint with a tank
+            if (d2 < 30*30) tank_hurt(pi, 10);   // don't trade paint with a tank
             e->ft -= dt;
             if (e->ft<=0 && d2 < 320*320){
-                e->ft = 1.55f;
+                e->ft = 1.8f;
                 float ang = fatan2(dy, dx);
                 tank_fire_eshell(S, e->x + fcos(ang)*22, e->y + fsin(ang)*22, ang, 330);
                 sfx(2);
@@ -14328,7 +14373,7 @@ static void tank_update_foes(int pi, float dt){
             e->aim = fatan2(dy, dx);
             e->ft -= dt;
             if (e->ft<=0 && d2 < 560*560){
-                float cd = 2.2f - (float)S->tank_lvl*0.04f; if (cd<1.6f) cd=1.6f;
+                float cd = 2.45f - (float)S->tank_lvl*0.04f; if (cd<1.8f) cd=1.8f;
                 e->ft = cd;
                 for (int s2=-1;s2<=1;s2++) tank_fire_eshell(S, e->x, e->y + 42, e->aim + (float)s2*0.22f, 285);
                 sfx(2);
@@ -14419,16 +14464,29 @@ static void tank_update(int pi, float dt, const BwIn *in){
     }
     if (b->x < 26) b->x = 26; if (b->x > TANK_W*BW_TILE-26) b->x = TANK_W*BW_TILE-26;
     if (b->y < 20) b->y = 20; if (b->y > TANK_LEN*BW_TILE-26) b->y = TANK_LEN*BW_TILE-26;
-    // --- the cannon ---
+    // --- weapons: the cannon, or the grenade pouch (WALL button swaps) ---
+    if (in->wall){ S->tank_wep ^= 1; sfx(6);
+        scpy(S->note, S->tank_wep? "GRENADES OUT! LOBBED - AREA BLAST." : "CANNON UP!", 72); S->note_t=1.4f; }
     if ((in->sel_held || in->sel) && S->tank_fire_cd<=0){
-        S->tank_fire_cd = 0.21f;
-        for (int i=0;i<24;i++) if (!S->tank_sh_a[i]){
-            S->tank_sh_a[i]=1; S->tank_sh_t[i]=0.75f;   // Jackal range: you must roll INTO their range to reach them
-            S->tank_sh_x[i]=b->x + S->tank_fx*26; S->tank_sh_y[i]=b->y + S->tank_fy*26;
-            S->tank_sh_vx[i]=S->tank_fx*520; S->tank_sh_vy[i]=S->tank_fy*520;
-            sfx(4);
-            break;
-        }
+        if (S->tank_wep==0){
+            S->tank_fire_cd = 0.21f;
+            for (int i=0;i<24;i++) if (!S->tank_sh_a[i]){
+                S->tank_sh_a[i]=1; S->tank_sh_t[i]=0.75f;   // Jackal range: you must roll INTO their range to reach them
+                S->tank_sh_x[i]=b->x + S->tank_fx*26; S->tank_sh_y[i]=b->y + S->tank_fy*26;
+                S->tank_sh_vx[i]=S->tank_fx*520; S->tank_sh_vy[i]=S->tank_fy*520;
+                sfx(4);
+                break;
+            }
+        } else if (S->tank_gren>0){
+            S->tank_fire_cd = 0.5f; S->tank_gren--;
+            for (int i=0;i<10;i++) if (!S->tank_gr_a[i]){
+                S->tank_gr_a[i]=1; S->tank_gr_t[i]=0.62f;
+                S->tank_gr_x[i]=b->x + S->tank_fx*26; S->tank_gr_y[i]=b->y + S->tank_fy*26;
+                S->tank_gr_vx[i]=S->tank_fx*400; S->tank_gr_vy[i]=S->tank_fy*400;
+                sfx(4);
+                break;
+            }
+        } else if (S->note_t<=0){ scpy(S->note, "OUT OF GRENADES - DELIVER CAPTIVES, GRAB WRENCHES!", 72); S->note_t=1.8f; sfx(6); }
     }
     tank_update_foes(pi, dt);
     tank_update_shells(pi, dt);
@@ -14438,8 +14496,9 @@ static void tank_update(int pi, float dt, const BwIn *in){
         if (e->kind!=3) continue;
         float dx=b->x-e->x, dy=b->y-e->y;
         if (dx*dx+dy*dy < 26*26){
-            e->kind=-1; S->tank_hull += 30; if (S->tank_hull>100) S->tank_hull=100;
-            scpy(S->note, "PATCHED UP! +30 HULL", 72); S->note_t=2.2f; sfx(11);
+            e->kind=-1; S->tank_hull += 40; if (S->tank_hull>100) S->tank_hull=100;
+            S->tank_gren += 2; if (S->tank_gren>12) S->tank_gren=12;
+            scpy(S->note, "PATCHED UP! +40 HULL, +2 GRENADES", 72); S->note_t=2.2f; sfx(11);
         }
     }
     // --- captives: four seats, no standing room ---
@@ -14458,6 +14517,7 @@ static void tank_update(int pi, float dt, const BwIn *in){
         int ttx = bw_tileof(b->x), tty = bw_tileof(b->y);
         if (S->tank_pass>0 && ttx>=11 && ttx<=13 && tty>=pt && tty<pt+2){
             int n = S->tank_pass; S->tank_pass = 0;
+            S->tank_gren += 2*n; if (S->tank_gren>12) S->tank_gren=12;   // the pad crew restocks your pouch
             int was = S->tank_deliv; S->tank_deliv += n;
             b->xp += 6*n; S->tank_score += 150*n;
             if (was < S->tank_quota && S->tank_deliv >= S->tank_quota){
@@ -14611,6 +14671,18 @@ static void tank_render(int pi){
         int x=SX(S->tank_es_x[i]), y=SY(S->tank_es_y[i]);
         disc_fill(x, y, 3, COL(255,90,60)); disc_fill(x, y, 1, COL(255,180,140));
     }
+    // grenades in flight, and their blasts
+    for (int i=0;i<10;i++) if (S->tank_gr_a[i]){
+        int x=SX(S->tank_gr_x[i]), y=SY(S->tank_gr_y[i]);
+        disc_fill(x, y+2, 4, COL(20,30,16));
+        disc_fill(x, y, 4, COL(52,84,44)); disc_fill(x-1, y-1, 1, COL(200,230,180));
+    }
+    for (int i=0;i<6;i++) if (S->tank_boom_t[i]>0){
+        int x=SX(S->tank_boom_x[i]), y=SY(S->tank_boom_y[i]);
+        int rr = (int)((0.3f - S->tank_boom_t[i]) * 260.0f) + 8;
+        circle_out(x, y, rr, COL(255,190,90)); circle_out(x, y, rr*2/3 + 2, COL(255,130,60));
+        disc_fill(x, y, rr/3 + 2, COL(255,220,150));
+    }
     // your tank (gone while it burns)
     if (S->tank_deadt<=0 && !(S->tank_grace>0.6f && ((int)(S->tank_t*14)&1))){
         int x=SX(b->x), y=SY(b->y);
@@ -14644,6 +14716,13 @@ static void tank_render(int pi){
       q=sappend(q, "   LIVES "); q=sapp_int(q, S->tank_lives);
       q=sappend(q, "   ABOARD "); q=sapp_int(q, S->tank_pass); q=sappend(q, "/4");
       *q=0; draw_text(vx+8, vy+6, buf, 1, COL(240,244,250)); }
+    { char buf[96]; char *q=buf;
+      if (S->tank_wep==0){ q=sappend(q, "WEAPON: CANNON  ("); q=sappend(q, lbl_wall()); q=sappend(q, ": GRENADES x"); }
+      else { q=sappend(q, "WEAPON: GRENADE x"); }
+      q=sapp_int(q, S->tank_gren);
+      if (S->tank_wep) { q=sappend(q, "  ("); q=sappend(q, lbl_wall()); q=sappend(q, ": CANNON)"); }
+      else q=sappend(q, ")");
+      *q=0; draw_text(vx+8, vy+24, buf, 1, S->tank_wep? COL(255,190,90) : COL(170,190,200)); }
     { int bw3 = 120, bx = vx+vw2-bw3-10, by = vy+6;
       draw_text(bx-32, by, "HULL", 1, COL(240,244,250));
       rect_fill(bx-1, by-1, bw3+2, 9, COL(8,8,12));
@@ -15080,6 +15159,16 @@ static float CRT_WX[CRT_MAXW], CRT_WY[CRT_MAXW], CRT_CUM[CRT_MAXW + 1];
 static int CRT_N = 0;
 static float CRT_LEN = 0, CRT_OFF = 0;
 static float CRT_PAD[3][2];
+// trackside scenery: trees, tire stacks, one grandstand (Nov 14 overhaul)
+#define CRT_SCN_N 49
+static float CRT_SCX[CRT_SCN_N], CRT_SCY[CRT_SCN_N]; static int CRT_SCT[CRT_SCN_N];
+static void crt_point_at(float ap, float lat, float *x, float *y, float *hx, float *hy);
+static u32 crt_coat_for(int species, int color, int slot){
+    static const u32 NAT[BUDN] = { COL(199,152,94), COL(228,152,72), COL(143,106,68), COL(128,92,58), COL(148,144,138), COL(238,240,242) };
+    if (color == 9) return bud_hsv(0.11f + slot * 0.19f + G.anim_t * 0.22f);
+    Buddy tmp; tmp.species = species % BUDN; tmp.color = color; tmp.active = 1;
+    return bud_coat(&tmp, NAT[species % BUDN]);
+}
 static float crt_wrap(float a){
     if (a > PI) a -= 2*PI; if (a < -PI) a += 2*PI;
     if (a > PI) a -= 2*PI; if (a < -PI) a += 2*PI;
@@ -15123,6 +15212,23 @@ static void crt_build(void){
     CRT_PAD[0][0] = 320; CRT_PAD[0][1] = 70;
     CRT_PAD[1][0] = 530; CRT_PAD[1][1] = 180;
     CRT_PAD[2][0] = 110; CRT_PAD[2][1] = 180;
+    // scenery: a ring of trees and tire stacks outside the road, a few
+    // infield trees, and the grandstand watching the top straight
+    { int n = 0;
+      for (int k = 0; k < 40 && n < CRT_SCN_N - 9; k++){
+          u32 h = hash2(k * 7 + 3, 91, 0xCA27u);
+          float ap = (k + 0.5f) * CRT_LEN / 40.0f + (float)(h % 17) - 8.0f;
+          float lat = (h & 64)? 1.0f : -1.0f;
+          lat *= 56.0f + (float)((h >> 8) % 34);
+          float x, y, hx, hy; crt_point_at(ap, lat, &x, &y, &hx, &hy);
+          if (x < 14 || x > 626 || y < 14 || y > 346) continue;
+          CRT_SCX[n] = x; CRT_SCY[n] = y; CRT_SCT[n] = ((h >> 12) % 6 == 0)? 1 : 0; n++;
+      }
+      static const float INF[8][2] = { {320,180},{240,150},{400,210},{270,225},{370,140},{200,200},{440,160},{320,118} };
+      for (int k = 0; k < 8 && n < CRT_SCN_N - 1; k++){ CRT_SCX[n] = INF[k][0]; CRT_SCY[n] = INF[k][1]; CRT_SCT[n] = 0; n++; }
+      CRT_SCX[n] = 320; CRT_SCY[n] = 14; CRT_SCT[n] = 3; n++;
+      while (n < CRT_SCN_N){ CRT_SCX[n] = -100; CRT_SCY[n] = -100; CRT_SCT[n] = 0; n++; }
+    }
 }
 static void crt_point_at(float ap, float lat, float *x, float *y, float *hx, float *hy){
     ap = ap - (float)(int)(ap / CRT_LEN) * CRT_LEN; if (ap < 0) ap += CRT_LEN;
@@ -15205,6 +15311,22 @@ static void crt_start_race(int pi){
       if (S->crt_duo >= 0){ S->crt_kcol[1] = S->crt_colsel2; used[S->crt_colsel2] = 1; start = 2; }
       int nxt = 0;
       for (int i = start; i < 6; i++){ while (used[nxt]) nxt++; S->crt_kcol[i] = nxt; used[nxt] = 1; } }
+    // the DRIVERS: the humans race as their own buddies — species, coat
+    // and name come straight off the Buddy. The AI seats are fellow
+    // Banzai Buddies out for a spin, one of each species in the stable.
+    { Buddy *hb = &G.bud[pi];
+      S->crt_species[0] = hb->species; S->crt_dcolidx[0] = hb->color; S->crt_nameidx[0] = hb->name_idx;
+      int start = 1;
+      if (S->crt_duo >= 0){ Buddy *gb = &G.bud[S->crt_duo];
+          S->crt_species[1] = gb->species; S->crt_dcolidx[1] = gb->color; S->crt_nameidx[1] = gb->name_idx; start = 2; }
+      static const int AI_SP[6] = { 1, 2, 3, 5, 4, 0 };
+      static const int AI_CL[6] = { 0, 3, 5, 0, 0, 2 };
+      static const int AI_NM[6] = { 7, 22, 40, 51, 58, 17 };
+      for (int i = start; i < 6; i++){ int a = (i - start) % 6;
+          S->crt_species[i] = AI_SP[a]; S->crt_dcolidx[i] = AI_CL[a]; S->crt_nameidx[i] = AI_NM[a];
+          S->crt_line[i] = S->crt_off[i]; S->crt_slidet[i] = 0; }
+      S->crt_slidet[0] = 0; if (S->crt_duo >= 0) S->crt_slidet[1] = 0;
+    }
     b->x = CRT_OX + S->crt_x[0]; b->y = CRT_OY + S->crt_y[0];
     b->bw_x = b->x; b->bw_y = b->y; b->aim = S->crt_h[0];
     { char *q = S->note; q = sappend(q, S->crt_duo >= 0? "HEAD-TO-HEAD! 3 LAPS. UP IS THE GAS - BEAT YOUR FELLOW HUMAN!" : "3 LAPS. UP IS THE GAS - RIDE THE BOOST PADS, WIN!"); *q = 0; S->note_t = 2.4f; }
@@ -15223,7 +15345,7 @@ static void crt_drive_kart(BwSim *S, int i, int keys, float dt){
     float v = S->crt_v[i];
     if (keys & K_UP){
         if (v > vmax){ v -= 150.0f * dt; if (v < vmax) v = vmax; }
-        else { v += 175.0f * dt; if (v > vmax) v = vmax; }
+        else { v += (v < 60.0f? 265.0f : 165.0f) * dt; if (v > vmax) v = vmax; }   // a proper launch, then the usual pull
     } else if (keys & K_DOWN){
         v -= 260.0f * dt; if (v < -58.0f) v = -58.0f;
     } else {
@@ -15236,6 +15358,21 @@ static void crt_drive_kart(BwSim *S, int i, int keys, float dt){
     if (keys & K_RIGHT) steer += 1;
     float sf = v / 55.0f; if (sf > 1) sf = 1; if (sf < -1) sf = -1;
     S->crt_h[i] = crt_wrap(S->crt_h[i] + steer * 2.75f * sf * dt);
+    // DRIFT (Nov 14): hold a hard steer at speed and the rear steps
+    // out — the kart slides wide while the charge builds; let go
+    // after a real slide and the stored-up grip fires you forward.
+    if (steer != 0 && v > 118.0f){
+        S->crt_slidet[i] += dt;
+        if (S->crt_slidet[i] > 0.28f){
+            float lx = fsin(S->crt_h[i]), ly = -fcos(S->crt_h[i]);   // leftward unit
+            float mag = (v - 100.0f) * 0.38f * steer;
+            S->crt_x[i] += lx * mag * dt;
+            S->crt_y[i] += ly * mag * dt;
+        }
+    } else {
+        if (S->crt_slidet[i] > 0.45f && S->crt_boost[i] < 0.38f) S->crt_boost[i] = 0.38f;   // mini-boost on release
+        S->crt_slidet[i] = 0;
+    }
     S->crt_v[i] = v;
     S->crt_x[i] += fcos(S->crt_h[i]) * v * dt;
     S->crt_y[i] += fsin(S->crt_h[i]) * v * dt;
@@ -15358,12 +15495,29 @@ static void crt_update(int pi, float dt, const BwIn *in){
     // ---- the rivals (one fewer when a guest is driving kart 1)
     for (int i = (S->crt_duo >= 0? 2 : 1); i < 6; i++){
         float tx, ty, hx, hy, t2x, t2y, h2x, h2y;
-        crt_point_at(CRT_OFF + S->crt_prog[i] + 48.0f, S->crt_off[i], &tx, &ty, &hx, &hy);
+        // the racing line: lean toward the inside of the bend ahead,
+        // smoothed so the kart flows instead of twitching
+        crt_point_at(CRT_OFF + S->crt_prog[i] + 118.0f, 0, &t2x, &t2y, &h2x, &h2y);
+        crt_point_at(CRT_OFF + S->crt_prog[i] + 48.0f, 0, &tx, &ty, &hx, &hy);
+        { float cross = hx * h2y - hy * h2x;
+          float want = S->crt_off[i] * 0.3f + cross * 20.0f;
+          if (want > 14.0f) want = 14.0f; if (want < -14.0f) want = -14.0f;
+          S->crt_line[i] += (want - S->crt_line[i]) * (dt * 2.2f > 1.0f? 1.0f : dt * 2.2f); }
+        crt_point_at(CRT_OFF + S->crt_prog[i] + 48.0f, S->crt_line[i], &tx, &ty, &hx, &hy);
+        // traffic sense: if a kart is right on your nose, shade away
+        for (int j = 0; j < 6; j++){ if (j == i) continue;
+            float ax = S->crt_x[j] - S->crt_x[i], ay = S->crt_y[j] - S->crt_y[i];
+            float fwd = ax * fcos(S->crt_h[i]) + ay * fsin(S->crt_h[i]);
+            float lat = ax * (-fsin(S->crt_h[i])) + ay * fcos(S->crt_h[i]);
+            if (fwd > 2.0f && fwd < 36.0f && lat > -14.0f && lat < 14.0f){
+                tx += (-fsin(S->crt_h[i])) * (lat > 0? -11.0f : 11.0f);
+                ty += fcos(S->crt_h[i]) * (lat > 0? -11.0f : 11.0f);
+            }
+        }
         float des = fatan2(ty - S->crt_y[i], tx - S->crt_x[i]);
         float dh = crt_wrap(des - S->crt_h[i]);
         float turn = 3.3f * dt; if (dh > turn) dh = turn; if (dh < -turn) dh = -turn;
         S->crt_h[i] = crt_wrap(S->crt_h[i] + dh);
-        crt_point_at(CRT_OFF + S->crt_prog[i] + 118.0f, S->crt_off[i], &t2x, &t2y, &h2x, &h2y);
         float curve = ffabs(crt_wrap(fatan2(h2y, h2x) - fatan2(hy, hx)));
         float tv = 158.0f * S->crt_skill[i] * (1.0f - (curve > 0.5f? 0.30f : curve * 0.30f));
         float rubber = S->crt_prog[0] - S->crt_prog[i];
@@ -15395,7 +15549,11 @@ static void crt_update(int pi, float dt, const BwIn *in){
             float push = (21.0f - d) / 2.0f, ux = dx / d, uy = dy / d;
             S->crt_x[i] -= ux * push; S->crt_y[i] -= uy * push;
             S->crt_x[j] += ux * push; S->crt_y[j] += uy * push;
-            S->crt_v[i] *= 0.985f; S->crt_v[j] *= 0.985f; }
+            // trade a little pace instead of both karts just dying:
+            // the pair settles toward a shared speed, nobody stalls
+            float dv = (S->crt_v[j] - S->crt_v[i]) * 0.12f;
+            S->crt_v[i] += dv; S->crt_v[j] -= dv;
+            S->crt_v[i] *= 0.995f; S->crt_v[j] *= 0.995f; }
     }
     // ---- bounds, progress, finishes
     for (int i = 0; i < 6; i++){
@@ -15430,6 +15588,54 @@ static void crt_update(int pi, float dt, const BwIn *in){
         gb->x = CRT_OX + S->crt_x[1]; gb->y = CRT_OY + S->crt_y[1];
         gb->bw_x = gb->x; gb->bw_y = gb->y; gb->aim = S->crt_h[1]; }
 }
+// the driver of a kart, drawn from behind at screen position (cx,
+// seat_y) with the kart w px wide: the buddy's own back, head, the
+// species giveaways — and, of course, the glasses.
+static void crt_draw_driver(int cx, int seat_y, int w, int species, u32 coat){
+    int hr = w * 19 / 100; if (hr < 3) hr = 3;
+    u32 dark = col_shade(coat, 0.64f);
+    int hx = cx, hy = seat_y - hr/2;
+    if (species == 3)   // platypus: the flat tail rides behind the seat
+        ellipse_fill(hx, seat_y + w*20/100, hr + hr/3, hr/2 + 1, dark);
+    rect_fill(cx - w*23/100, seat_y, w*46/100, w*23/100, dark);   // shoulders and back
+    if (species == 5){   // KITCHEN SINK: basin silhouette, faucet on top
+        rect_fill(hx - hr, hy - hr/2, hr*2, hr + hr/2, coat);
+        rect_line(hx - hr, hy - hr/2, hr*2, hr + hr/2, dark);
+        rect_fill(hx + hr/4, hy - hr - hr/3, hr/5 + 1, hr/2 + hr/3, COL(178,184,190));
+        rect_fill(hx - hr/3, hy - hr - hr/3, hr*2/3 + hr/4, hr/5 + 1, COL(178,184,190));
+        disc_fill(hx - hr/2, hy - hr/4, hr/4 + 1, COL(178,184,190));
+        disc_fill(hx + hr/2, hy - hr/4, hr/4 + 1, COL(178,184,190));
+    } else if (species == 4){   // PET ROCK: a crag that drives
+        rect_fill(hx - hr, hy - hr*3/4, hr*2, hr + hr*3/4, coat);
+        if (w >= 15){
+            line_thick(hx - hr/2, hy - hr/3, hx, hy + hr/4, 1, dark);
+            line_thick(hx + hr/3, hy - hr/2, hx + hr/2, hy + hr/5, 1, dark);
+        }
+    } else {
+        disc_fill(hx, hy, hr, dark);
+        disc_fill(hx, hy, hr - (hr/6 + 1), coat);
+        if (species == 0){   // PUPPY: floppy ears, mid-flop
+            ellipse_fill(hx - hr - hr/5, hy + hr/6, hr/2, hr*3/4, dark);
+            ellipse_fill(hx + hr + hr/5, hy + hr/6, hr/2, hr*3/4, dark);
+        } else if (species == 1){   // KITTY: pointy ears, don't care
+            tri_fill(hx - hr, hy - hr/3, hx - hr/3, hy - hr/3, hx - hr*3/4, hy - hr - hr/4, coat);
+            tri_fill(hx + hr/3, hy - hr/3, hx + hr, hy - hr/3, hx + hr*3/4, hy - hr - hr/4, coat);
+        } else if (species == 2){   // MOOSE: the antlers are the tell
+            u32 ant = COL(214,186,138);
+            int lw = w >= 30? 3 : 1;
+            line_thick(hx - hr*3/4, hy - hr*3/4, hx - hr - hr/2, hy - hr - hr/3, lw, ant);
+            line_thick(hx - hr - hr/3, hy - hr - hr/5, hx - hr - hr/2, hy - hr*3/4, lw > 1? 2 : 1, ant);
+            line_thick(hx + hr*3/4, hy - hr*3/4, hx + hr + hr/2, hy - hr - hr/3, lw, ant);
+            line_thick(hx + hr + hr/3, hy - hr - hr/5, hx + hr + hr/2, hy - hr*3/4, lw > 1? 2 : 1, ant);
+        }
+    }
+    if (w >= 15){   // the famous glasses, oversized as is traditional
+        int gr = hr * 2 / 5; if (gr < 2) gr = 2;
+        circle_out(hx - hr/2, hy, gr, COL(20,18,26));
+        circle_out(hx + hr/2, hy, gr, COL(20,18,26));
+        line_thick(hx - hr/2 + gr, hy, hx + hr/2 - gr, hy, 1, COL(20,18,26));
+    }
+}
 static void crt_render_view(int sim_pi, int viewer_pi){
     BwSim *S = &BWS[sim_pi]; Buddy *b = &G.bud[viewer_pi];
     int vk = (viewer_pi == sim_pi)? 0 : 1;   // the kart this viewer is driving
@@ -15458,8 +15664,7 @@ static void crt_render_view(int sim_pi, int viewer_pi){
           disc_fill(cx + KTS(48), cy + KTS(35), KTS(17), COL(16, 14, 24));
           rect_fill(cx - KTS(61), cy - KTS(38), KTS(122), KTS(77), KCOL2[mycol]);
           rect_line(cx - KTS(61), cy - KTS(38), KTS(122), KTS(77), COL(255, 255, 255));
-          disc_fill(cx, cy, KTS(20), COL(24, 22, 34));
-          disc_fill(cx, cy, KTS(14), COL(255, 235, 200));
+          crt_draw_driver(cx, cy - KTS(28), KTS(118), b->species, crt_coat_for(b->species, b->color, viewer_pi));
           tri_fill(cx - KTS(92), cy - KTS(16), cx - KTS(92), cy + KTS(16), cx - KTS(70), cy, COL(255, 255, 255));
           tri_fill(cx + KTS(92), cy - KTS(16), cx + KTS(92), cy + KTS(16), cx + KTS(70), cy, COL(255, 255, 255));
           draw_text_center(cx, cy + KTS(64), COLNAME[mycol], 2, COL(255, 255, 255)); }
@@ -15543,6 +15748,20 @@ static void crt_render_view(int sim_pi, int viewer_pi){
             u32 rd = par? COL(62, 62, 70) : COL(56, 56, 64);
             tri_fill(rsx[j], rsy[j], lsx[j], lsy[j], lsx[j + 1], lsy[j + 1], rd);
             tri_fill(rsx[j], rsy[j], lsx[j + 1], lsy[j + 1], rsx[j + 1], rsy[j + 1], rd);
+            if (((startseg + j) % 3) == 0 && rf[j] < 340.0f){
+                // the centre dashes: painted speed, rushing at you
+                float cxj = (rsx[j] + lsx[j]) * 0.5f, cyj = (rsy[j] + lsy[j]) * 0.5f;
+                float cxn = (rsx[j+1] + lsx[j+1]) * 0.5f, cyn = (rsy[j+1] + lsy[j+1]) * 0.5f;
+                float ex = (float)(rsx[j] - lsx[j]), ey = (float)(rsy[j] - lsy[j]);
+                float el = fsqrt(ex*ex + ey*ey); if (el < 1.0f) el = 1.0f;
+                float exn = (float)(rsx[j+1] - lsx[j+1]), eyn = (float)(rsy[j+1] - lsy[j+1]);
+                float eln = fsqrt(exn*exn + eyn*eyn); if (eln < 1.0f) eln = 1.0f;
+                float hw = el * 0.030f; if (hw < 1.0f) hw = 1.0f;
+                float hwn = eln * 0.030f; if (hwn < 1.0f) hwn = 1.0f;
+                float ux = ex / el, uy = ey / el, uxn = exn / eln, uyn = eyn / eln;
+                tri_fill((int)(cxj - ux*hw), (int)(cyj - uy*hw), (int)(cxj + ux*hw), (int)(cyj + uy*hw), (int)(cxn + uxn*hwn), (int)(cyn + uyn*hwn), COL(228, 228, 210));
+                tri_fill((int)(cxj - ux*hw), (int)(cyj - uy*hw), (int)(cxn + uxn*hwn), (int)(cyn + uyn*hwn), (int)(cxn - uxn*hwn), (int)(cyn - uyn*hwn), COL(228, 228, 210));
+            }
         }
         // the checkered start line, when it is in view
         { float fx, fy, fhx, fhy; crt_point_at(CRT_OFF, 0, &fx, &fy, &fhx, &fhy);
@@ -15562,6 +15781,21 @@ static void crt_render_view(int sim_pi, int viewer_pi){
                   tri_fill(ax, ay, bx, by, cx2, cy2, cc);
                   tri_fill(ax, ay, cx2, cy2, dx2, dy2, cc);
               }
+              // the start gantry: two poles and the banner over the line
+              { int gx[2], gy[2], gt[2]; float gf[2]; int ok = 1;
+                for (int p2 = 0; p2 < 2; p2++){
+                    float la = p2? 44.0f : -44.0f;
+                    CRT_PROJ(fx + nx * la, fy + ny * la, gf[p2], gx[p2], gy[p2]);
+                    if (gf[p2] < 6.0f) ok = 0;
+                    gt[p2] = gy[p2] - (int)(30.0f * F / gf[p2]);
+                }
+                if (ok){
+                    for (int p2 = 0; p2 < 2; p2++) rect_fill(gx[p2] - 2, gt[p2], 4, gy[p2] - gt[p2], COL(52, 54, 64));
+                    int bh = (int)(9.0f * F / ff); if (bh < 3) bh = 3;
+                    tri_fill(gx[0], gt[0], gx[1], gt[1], gx[1], gt[1] + bh, COL(198, 52, 48));
+                    tri_fill(gx[0], gt[0], gx[1], gt[1] + bh, gx[0], gt[0] + bh, COL(198, 52, 48));
+                    if (gx[1] - gx[0] > 210) draw_text_center((gx[0] + gx[1]) / 2, (gt[0] + gt[1]) / 2 + bh/2 - 3, "SUPER BUDDY CART", 1, COL(255, 244, 220));
+                } }
           } }
         // boost pads lying on the road
         for (int pd = 0; pd < 3; pd++){
@@ -15585,19 +15819,62 @@ static void crt_render_view(int sim_pi, int viewer_pi){
             if (ff < 150.0f) draw_text_center(psx, psy - 4, ">>", 1, COL(255, 255, 255));
         }
       }
-    // rival karts as billboards, far to near
-    { float kf[6]; int ksx[6], ksy[6], ord[6];
-      for (int i = 0; i < 6; i++){ ord[i] = i;
-          if (i == vk){ kf[i] = -1.0f; ksx[i] = 0; ksy[i] = 0; continue; }
-          CRT_PROJ(S->crt_x[i], S->crt_y[i], kf[i], ksx[i], ksy[i]); }
-      for (int a = 0; a < 6; a++) for (int c2 = a + 1; c2 < 6; c2++)
-          if (kf[ord[c2]] > kf[ord[a]]){ int t = ord[a]; ord[a] = ord[c2]; ord[c2] = t; }
-      for (int oi = 0; oi < 6; oi++){ int i = ord[oi];
-        if (i == vk || kf[i] < 26.0f || kf[i] > 760.0f) continue;
-        int kw = (int)(17.0f * F / kf[i]); if (kw < 3) kw = 3;
+    // everything with depth — trackside scenery and rival karts —
+    // in one far-to-near pass, so trees occlude and are occluded
+    // exactly like the karts they stand beside
+    { enum { MAXIT = 6 + CRT_SCN_N };
+      float itf[MAXIT]; int itk[MAXIT], itx[MAXIT], itsx[MAXIT], itsy[MAXIT], itn = 0;
+      for (int sn = 0; sn < CRT_SCN_N; sn++){
+          if (CRT_SCX[sn] < -50.0f) continue;
+          float f; int sx, sy; CRT_PROJ(CRT_SCX[sn], CRT_SCY[sn], f, sx, sy);
+          if (f < 9.0f || f > 880.0f) continue;
+          itf[itn] = f; itk[itn] = 1; itx[itn] = sn; itsx[itn] = sx; itsy[itn] = sy; itn++;
+      }
+      for (int i = 0; i < 6; i++){ if (i == vk) continue;
+          float f; int sx, sy; CRT_PROJ(S->crt_x[i], S->crt_y[i], f, sx, sy);
+          if (f < 26.0f || f > 760.0f) continue;
+          itf[itn] = f; itk[itn] = 0; itx[itn] = i; itsx[itn] = sx; itsy[itn] = sy; itn++;
+      }
+      for (int a = 1; a < itn; a++){ float tf = itf[a]; int tk = itk[a], tx2 = itx[a], tsx = itsx[a], tsy = itsy[a]; int b2 = a - 1;
+          while (b2 >= 0 && itf[b2] < tf){ itf[b2+1] = itf[b2]; itk[b2+1] = itk[b2]; itx[b2+1] = itx[b2]; itsx[b2+1] = itsx[b2]; itsy[b2+1] = itsy[b2]; b2--; }
+          itf[b2+1] = tf; itk[b2+1] = tk; itx[b2+1] = tx2; itsx[b2+1] = tsx; itsy[b2+1] = tsy; }
+      for (int oi = 0; oi < itn; oi++){
+        float f = itf[oi]; int sx = itsx[oi], base = itsy[oi];
+        if (itk[oi] == 1){
+            int sn = itx[oi], tp = CRT_SCT[sn];
+            if (tp == 0){   // a tree
+                int th = (int)(30.0f * F / f); if (th < 3) continue;
+                if (sx < vx - th || sx > vx + vw2 + th) continue;
+                rect_fill(sx - th/16 - 1, base - th*38/100, th/8 + 2, th*38/100, COL(96, 66, 40));
+                u32 g1 = (sn & 1)? COL(34, 116, 52) : COL(28, 100, 44);
+                disc_fill(sx, base - th*52/100, th*30/100, g1);
+                disc_fill(sx, base - th*80/100, th*22/100, col_shade(g1, 1.18f));
+            } else if (tp == 1){   // a tire stack
+                int tw = (int)(13.0f * F / f); if (tw < 3) continue;
+                if (sx < vx - tw || sx > vx + vw2 + tw) continue;
+                int thh = tw/3; if (thh < 1) thh = 1;
+                rect_fill(sx - tw/2, base - thh, tw, thh, COL(38, 38, 44));
+                rect_fill(sx - tw/2, base - thh*2, tw, thh, COL(226, 226, 226));
+                rect_fill(sx - tw/2, base - thh*3, tw, thh, (sn & 1)? COL(205, 50, 45) : COL(38, 38, 44));
+            } else {   // the grandstand, watching the top straight
+                int gw = (int)(175.0f * F / f); if (gw < 12) continue;
+                int gh = (int)(42.0f * F / f);
+                if (sx < vx - gw/2 || sx > vx + vw2 + gw/2) continue;
+                rect_fill(sx - gw/2, base - gh, gw, gh, COL(116, 126, 148));
+                for (int r2 = 0; r2 < 4; r2++) for (int c3 = 0; c3 < gw/9; c3++){
+                    u32 h = hash2(sn * 31 + c3, r2 * 7 + 1, 0x57A0u);
+                    static const u32 CROWD[5] = { COL(240,200,90), COL(230,90,80), COL(120,180,240), COL(240,240,240), COL(120,220,140) };
+                    rect_fill(sx - gw/2 + 3 + c3 * 9, base - gh + 5 + r2 * (gh/5), 4, 4, CROWD[h % 5]);
+                }
+                rect_fill(sx - gw/2 - 4, base - gh - gh/6 - 2, gw + 8, gh/6 + 2, COL(64, 70, 88));
+                if (gw > 300) draw_text_center(sx, base - gh - gh/6 + gh/12 - 3, "GRAND PRIX", 1, COL(255, 240, 200));
+            }
+            continue;
+        }
+        int i = itx[oi];
+        int kw = (int)(17.0f * F / f); if (kw < 3) kw = 3;
         if (kw > vw2 * 2 / 5) kw = vw2 * 2 / 5;
         int kh2 = (int)(kw * 0.66f); if (kh2 < 2) kh2 = 2;
-        int sx = ksx[i], base = ksy[i];
         if (sx < vx - kw || sx > vx + vw2 + kw) continue;
         ellipse_fill(sx, base, kw/2 + 1, kh2/4 + 1, COL(20, 40, 22));
         if (S->crt_boost[i] > 0)
@@ -15606,12 +15883,12 @@ static void crt_render_view(int sim_pi, int viewer_pi){
         rect_fill(sx + kw/2 - kw/4, base - kh2/2, kw/4 + 1, kh2/2, COL(16, 14, 24));
         rect_fill(sx - kw/2, base - kh2, kw, kh2 * 3/4, KCOL[S->crt_kcol[i]]);
         rect_line(sx - kw/2, base - kh2, kw, kh2 * 3/4, COL(16, 14, 24));
-        { int hr = kw/6 + 1;
-          disc_fill(sx, base - kh2 - hr/3, hr, COL(24, 22, 34));
-          disc_fill(sx, base - kh2 - hr/3, hr * 3/4 + 1, COL(255, 235, 200)); }
-        if (S->crt_duo >= 0 && i == 1 - vk){
-            draw_text_center(sx, base - kh2 - kw/3 - 12, vk == 0? "P2" : "P1", 1, COL(255, 255, 255));
-            tri_fill(sx - 5, base - kh2 - kw/3 - 2, sx + 5, base - kh2 - kw/3 - 2, sx, base - kh2 - kw/3 + 5, COL(255, 255, 255));
+        crt_draw_driver(sx, base - kh2 + kh2/8, kw, S->crt_species[i], crt_coat_for(S->crt_species[i], S->crt_dcolidx[i], i));
+        if (f < 300.0f){
+            int ty2 = base - kh2 - kw*42/100 - 10;
+            if (S->crt_duo >= 0 && i == 1 - vk)
+                tri_fill(sx - 5, ty2 - 2, sx + 5, ty2 - 2, sx, ty2 + 5, COL(255, 255, 255));
+            draw_text_center(sx, ty2, BUD_ELF[S->crt_nameidx[i] % BUD_NAMES_N], 1, COL(255, 255, 255));
         }
       } }
     // your own kart, big at the bottom of the screen, from behind
@@ -15629,9 +15906,7 @@ static void crt_render_view(int sim_pi, int viewer_pi){
       rect_fill(cxp + ow/2 - ow/5, base - oh/3, ow/5, oh/3, COL(16, 14, 24));
       rect_fill(cxp - ow/2 + ow/10, base - oh, ow * 4/5, oh * 3/4, KCOL[S->crt_kcol[vk]]);
       rect_line(cxp - ow/2 + ow/10, base - oh, ow * 4/5, oh * 3/4, COL(16, 14, 24));
-      rect_fill(cxp - ow/6, base - oh - oh/8, ow/3, oh/4, COL(24, 22, 34));
-      disc_fill(cxp, base - oh - oh/8, ow/7, COL(70, 48, 32));
-      disc_fill(cxp, base - oh - oh/8 + ow/14, ow/9, COL(255, 235, 200));
+      crt_draw_driver(cxp, base - oh + oh/8, ow, S->crt_species[vk], crt_coat_for(S->crt_species[vk], S->crt_dcolidx[vk], vk));
     }
     // minimap in the corner: the whole flat circuit, SMK-style.
     // (positioned from the CLIP rect, not the view rect: in split
@@ -16441,6 +16716,10 @@ __attribute__((export_name("dbg_tankpass"))) int exp_dbg_tankpass(void){ int id 
 __attribute__((export_name("dbg_tankhull"))) int exp_dbg_tankhull(void){ int id = G.my_id>=0? G.my_id : 0; return BWS[id].tank_hull; }
 __attribute__((export_name("dbg_tankdone"))) int exp_dbg_tankdone(void){ int id = G.my_id>=0? G.my_id : 0; return G.bud[id].tank_done; }
 __attribute__((export_name("dbg_tankshells"))) int exp_dbg_tankshells(void){ int id = G.my_id>=0? G.my_id : 0; int n=0; for (int i=0;i<24;i++) if (BWS[id].tank_sh_a[i]) n++; return n; }
+__attribute__((export_name("dbg_tankwep"))) int exp_dbg_tankwep(void){ int id = G.my_id>=0? G.my_id : 0; return BWS[id].tank_wep; }
+__attribute__((export_name("dbg_tankgren"))) int exp_dbg_tankgren(void){ int id = G.my_id>=0? G.my_id : 0; return BWS[id].tank_gren; }
+__attribute__((export_name("dbg_tankboom"))) int exp_dbg_tankboom(void){ int id = G.my_id>=0? G.my_id : 0; int n=0; for (int i=0;i<6;i++) if (BWS[id].tank_boom_t[i]>0) n++; for (int i=0;i<10;i++) if (BWS[id].tank_gr_a[i]) n+=10; return n; }
+__attribute__((export_name("dbg_crtdrv"))) int exp_dbg_crtdrv(int k){ int id = G.my_id>=0? G.my_id : 0; if (k<0||k>5) return -1; return BWS[id].crt_species[k]*100 + BWS[id].crt_dcolidx[k]*10 + BWS[id].crt_nameidx[k]%10; }
 __attribute__((export_name("dbg_tankobj"))) int exp_dbg_tankobj(void){ int id = G.my_id>=0? G.my_id : 0; return BWS[id].tank_obj; }
 __attribute__((export_name("dbg_tankdeliv"))) int exp_dbg_tankdeliv(void){ int id = G.my_id>=0? G.my_id : 0; return BWS[id].tank_deliv; }
 __attribute__((export_name("dbg_tankmid"))) int exp_dbg_tankmid(void){ int id = G.my_id>=0? G.my_id : 0; return BWS[id].tank_mid_hp; }

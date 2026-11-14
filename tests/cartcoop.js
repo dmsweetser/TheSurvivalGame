@@ -46,13 +46,18 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   await page.reload();
   await page.waitForFunction(() => window.__TSG && window.__TSG.dbg_state() === 0, null, { timeout: 20000 });
 
-  // co-op on: in the keyboard-flavoured layout the rows are START, HOW TO
-  // PLAY, DIFFICULTY, ZEN, EDDIE, 2P CO-OP, NAME — five downs from the top
-  for (let i = 0; i < 5; i++) await key('ArrowDown', 160);
-  ok((await call('dbg_menusel')) === 5, 'menu on the co-op row', await call('dbg_menusel'));
+  // co-op on: the co-op row sits at menu_base_count() — one above the
+  // last row (NAME) — but its index depends on the menu's pad/keyboard
+  // flavour latch (SETTINGS row hidden or not), which races the shell's
+  // pad reporting at boot. Navigate by the live menu count instead of
+  // a fixed number of downs: coop index = dbg_menucount - 1 either way.
+  const mc = await call('dbg_menucount');
+  const coopRow = mc - 1;
+  for (let i = 0; i < coopRow; i++) await key('ArrowDown', 160);
+  ok((await call('dbg_menusel')) === coopRow, 'menu on the co-op row', await call('dbg_menusel'));
   await key('Space', 300);
   ok((await call('dbg_coop')) === 1, 'co-op toggled on', await call('dbg_coop'));
-  for (let i = 0; i < 5; i++) await key('ArrowUp', 160);
+  for (let i = 0; i < coopRow; i++) await key('ArrowUp', 160);
   await key('Space', 500);
   if ((await call('dbg_state')) !== 1) { await key('Enter', 500); }
   ok((await call('dbg_state')) === 1, 'co-op run started');

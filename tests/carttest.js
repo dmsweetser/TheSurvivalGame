@@ -50,6 +50,13 @@ function T(name, cond, extra) { if (cond) { pass++; } else { fail++; console.log
   await key('Space', 300);   // FIRE in the waiting room: race solo
   T('countdown running', (await poll('dbg_crtstate', v => v === 0, 4000)) === 0, await call('dbg_crtstate'));
   T('on the grid behind the line', (await call('dbg_crtprog')) < 0, await call('dbg_crtprog'));
+  // the drivers ARE the buddies (Nov 14 overhaul): kart 0 is P1's own
+  // puppy (species 0, natural coat 0); every AI seat wears a buddy too
+  { const d0 = await call('dbg_crtdrv', 0);
+    T('kart 0 is driven by your own buddy (puppy, natural coat)', ((d0 / 100) | 0) === 0 && (((d0 / 10) | 0) % 10) === 0, 'drv0=' + d0); }
+  { let allBuddies = true; const sp = new Set();
+    for (let k = 0; k < 6; k++){ const d = await call('dbg_crtdrv', k); const s = (d / 100) | 0; if (s < 0 || s > 5) allBuddies = false; sp.add(s); }
+    T('every kart has a buddy driver, species varied', allBuddies && sp.size >= 4, 'species=' + [...sp].join(',')); }
   T('racing after the countdown', (await poll('dbg_crtstate', v => v === 1, 8000)) === 1, await call('dbg_crtstate'));
 
   // drive for real: gas only, down the bottom straight
