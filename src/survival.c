@@ -734,6 +734,7 @@ typedef struct {
     float calm;                       // seconds since last hurt (drives the regen)
     float stuck_t, grease_t; int grease_s;   // anti-stuck grease (Nov 10): slide around props
     int tank_done;                    // TANK RESCUE record: deepest level cleared; saved as td
+    int cas_best;                     // CASTLE record: best escape score; saved as cb
     float roll;                       // the pet rock's rolling angle
     float steady_t;                   // pet rock's ROCK STEADY: unhurtable while > 0
     float tx, ty;                     // render interpolation target (client)
@@ -2069,14 +2070,14 @@ static int station_at(Player *p){
 // in_arcade marking the room for collision, rendering and buddies.
 // ---------------------------------------------------------------------------
 #define ARC_CY (-12000)
-static const int ARC_SX[4] = { -219, -73, 73, 219 };   // cabinet centres along the north wall (cabinets widened Nov 11 so the longest name, SUPER BUDDY RUN at 120px, fits the 128px cabinet)
-static const char *ARC_NAME[4] = { "ENTRANCES", "SUPER BUDDY RUN", "BUDDY CRAFT", "TANK RESCUE" };
-static const int ARC_MODE[4] = { 2, 3, 4, 5 };         // the bw_mode each cabinet launches
+static const int ARC_SX[5] = { -292, -146, 0, 146, 292 };   // cabinet centres along the north wall (cabinets widened Nov 11 so the longest name, SUPER BUDDY RUN at 120px, fits the 128px cabinet; a fifth cabinet, CASTLE, joined Nov 14 and the room grew east-west to hold all five)
+static const char *ARC_NAME[5] = { "ENTRANCES", "SUPER BUDDY RUN", "BUDDY CRAFT", "TANK RESCUE", "CASTLE" };
+static const int ARC_MODE[5] = { 2, 3, 4, 5, 6 };         // the bw_mode each cabinet launches
 static int arcgate[MAXP], arcgate_sel[MAXP], arc_cab[MAXP];   // the cabinet panel (per player)
 static int bw_arc_src[MAXP], bw_arc_cab[MAXP];         // pending arcade origin for bw_enter_mode
 static int cabinet_at(Player *p){
     if (!p->in_arcade) return -1;
-    for (int s=0;s<4;s++){
+    for (int s=0;s<5;s++){
         float dx=p->x - ARC_SX[s], dy=p->y - (ARC_CY-108);
         if (dx*dx + dy*dy < 74*74) return s;
     }
@@ -2086,12 +2087,12 @@ static int arcade_door_at(Player *p){   // the mall's east-wall door
     return p->in_mall && !p->in_arcade && p->x>192 && p->y>MALL_CY-14 && p->y<MALL_CY+66;
 }
 static int arcade_exit_at(Player *p){   // the arcade's west-wall mat
-    return p->in_arcade && p->x<-192 && p->y>ARC_CY-14 && p->y<ARC_CY+66;
+    return p->in_arcade && p->x<-300 && p->y>ARC_CY-14 && p->y<ARC_CY+66;
 }
 static void arcade_enter(int pi){
     Player *p=&G.p[pi];
     p->in_arcade=1; p->station=-1;
-    p->x=-244; p->y=ARC_CY+24; p->aim=0;
+    p->x=-330; p->y=ARC_CY+24; p->aim=0;
     splat(p->x, p->y, COL(140,240,255), 10, 90);
     sfx(19);
 }
@@ -2132,6 +2133,10 @@ static void craft_render(int pi);
 static void tank_enter(int pi);
 static void tank_update(int pi, float dt, const BwIn *in);
 static void tank_render(int pi);
+static void cas_enter(int pi);
+static void cas_update(int pi, float dt, const BwIn *in);
+static void cas_render(int pi);
+static int cas_solid(int pi, float x, float y);
 static void bw_draw_note(int pi);
 static void bw_update(int pi, float dt, const BwIn *in);   // ditto, below
 static void bw_fill_p1(BwIn *bin, float dt);   // P1 input pack (touch-unified), below
@@ -2249,10 +2254,10 @@ static void mall_collide(Player *p){
 // arcade interior collision: same room shape as the mall, with the
 // four cabinets standing along the north wall where counters would be
 static void arcade_collide(Player *p){
-    if (p->x < -284) p->x = -284; if (p->x > 284) p->x = 284;
+    if (p->x < -356) p->x = -356; if (p->x > 356) p->x = 356;
     if (p->y < ARC_CY-164) p->y = ARC_CY-164;
     if (p->y > ARC_CY+158) p->y = ARC_CY+158;
-    for (int s=0;s<4;s++){
+    for (int s=0;s<5;s++){
         float hx=66, hy0=ARC_CY-158, hy1=ARC_CY-126, rad=11;
         if (p->x > ARC_SX[s]-hx-rad && p->x < ARC_SX[s]+hx+rad && p->y > hy0-rad && p->y < hy1+rad){
             float dyr = (hy1+rad) - p->y, dyl = p->y - (hy0-rad);
@@ -4615,7 +4620,7 @@ static void draw_arcade(void){
     int gw = (int)(VW/cz/64) + 4, gh = (int)(VH/cz/64) + 4, ts = (int)(64*cz) + 1;
     for (int gy=gy0; gy<gy0+gh; gy++) for (int gx=gx0; gx<gx0+gw; gx++){
         float wx = gx*64+32, wy = gy*64+32;
-        if (wx<-330 || wx>330 || wy<ARC_CY-230 || wy>ARC_CY+230) continue;
+        if (wx<-410 || wx>410 || wy<ARC_CY-230 || wy>ARC_CY+230) continue;
         u32 c = col_shade(((gx+gy)&1)? COL(52,40,84) : COL(46,36,74), 0.96f + hash_f(gx, gy, 91)*0.07f);
         int tx = SX(gx*64), tyy = SY(gy*64);
         rect_fill(tx, tyy, ts, ts, c);
@@ -4623,19 +4628,19 @@ static void draw_arcade(void){
     }
     draw_text_center(SX(0), SY(ARC_CY+58), "THE ARCADE", 2, COL(140,255,255));
     { u32 wallc = COL(30,24,48);
-      rect_fill(SX(-308), SY(ARC_CY-192), (int)(616*cz), (int)(26*cz), wallc);
-      rect_fill(SX(-308), SY(ARC_CY-170), (int)(616*cz), 2, COL(120,240,255));
-      rect_fill(SX(-308), SY(ARC_CY+162), (int)(616*cz), (int)(26*cz), wallc);
-      rect_fill(SX(-308), SY(ARC_CY+162), (int)(616*cz), 2, COL(240,120,220));
-      rect_fill(SX(-308), SY(ARC_CY-192), (int)(24*cz), (int)(160*cz), wallc);
-      rect_fill(SX(-308), SY(ARC_CY+52), (int)(24*cz), (int)(136*cz), wallc);
-      rect_fill(SX(284), SY(ARC_CY-192), (int)(24*cz), (int)(380*cz), wallc); }
-    { int mx0=SX(-282), my0=SY(ARC_CY+6), mw=(int)(40*cz), mh=(int)(38*cz);
+      rect_fill(SX(-386), SY(ARC_CY-192), (int)(772*cz), (int)(26*cz), wallc);
+      rect_fill(SX(-386), SY(ARC_CY-170), (int)(772*cz), 2, COL(120,240,255));
+      rect_fill(SX(-386), SY(ARC_CY+162), (int)(772*cz), (int)(26*cz), wallc);
+      rect_fill(SX(-386), SY(ARC_CY+162), (int)(772*cz), 2, COL(240,120,220));
+      rect_fill(SX(-386), SY(ARC_CY-192), (int)(24*cz), (int)(160*cz), wallc);
+      rect_fill(SX(-386), SY(ARC_CY+52), (int)(24*cz), (int)(136*cz), wallc);
+      rect_fill(SX(362), SY(ARC_CY-192), (int)(24*cz), (int)(380*cz), wallc); }
+    { int mx0=SX(-360), my0=SY(ARC_CY+6), mw=(int)(40*cz), mh=(int)(38*cz);
       rect_fill(mx0, my0, mw, mh, COL(52,96,60)); rect_line(mx0, my0, mw, mh, COL(120,240,255));
-      draw_text_center(SX(-262), SY(ARC_CY+20), "EXIT", 1, COL(240,255,240)); }
+      draw_text_center(SX(-340), SY(ARC_CY+20), "EXIT", 1, COL(240,255,240)); }
     draw_text_center(SX(0), SY(ARC_CY-186), "ARCADE", 2, COL(255,140,230));
-    static const u32 CABCOL[4] = { COL(240,140,40), COL(84,190,84), COL(70,130,230), COL(200,70,60) };
-    for (int s=0;s<4;s++){
+    static const u32 CABCOL[5] = { COL(240,140,40), COL(84,190,84), COL(70,130,230), COL(200,70,60), COL(120,220,130) };
+    for (int s=0;s<5;s++){
         int cx = SX(ARC_SX[s]);
         { int py2 = SY(ARC_CY-112);
           ellipse_fill(cx, py2, (int)(68*cz), (int)(17*cz), COL(60,50,96));
@@ -4661,12 +4666,21 @@ static void draw_arcade(void){
             rect_fill(sx0+(int)(12*cz), sy0+(int)(20*cz), (int)(6*cz), (int)(16*cz), COL(120,84,44));
             disc_fill(sx0+(int)(15*cz), sy0+(int)(14*cz), (int)(10*cz), COL(70,160,80));
             rect_fill(sx0+sw-(int)(24*cz), sy0+sh-(int)(14*cz), (int)(13*cz), (int)(13*cz), COL(150,104,58)); rect_line(sx0+sw-(int)(24*cz), sy0+sh-(int)(14*cz), (int)(13*cz), (int)(13*cz), OUTLINE);
-        } else {
+        } else if (s==3) {
             rect_fill(sx0+sw/2-(int)(13*cz), sy0+(int)(16*cz), (int)(26*cz), (int)(16*cz), COL(96,110,60));
             rect_fill(sx0+sw/2-(int)(2*cz), sy0+(int)(4*cz), (int)(4*cz), (int)(14*cz), COL(70,80,44));
             disc_fill(sx0+sw/2, sy0+(int)(20*cz), (int)(6*cz), COL(70,80,44));
             rect_fill(sx0+sw/2-(int)(17*cz), sy0+(int)(14*cz), (int)(4*cz), (int)(20*cz), COL(50,54,40));
             rect_fill(sx0+sw/2+(int)(13*cz), sy0+(int)(14*cz), (int)(4*cz), (int)(20*cz), COL(50,54,40));
+        } else {
+            // CASTLE: a little stone tower with a flag, DOS-green
+            rect_fill(sx0+sw/2-(int)(11*cz), sy0+(int)(16*cz), (int)(22*cz), (int)(22*cz), COL(96,110,96));
+            rect_fill(sx0+sw/2-(int)(13*cz), sy0+(int)(12*cz), (int)(5*cz), (int)(6*cz), COL(96,110,96));
+            rect_fill(sx0+sw/2-(int)(3*cz), sy0+(int)(12*cz), (int)(5*cz), (int)(6*cz), COL(96,110,96));
+            rect_fill(sx0+sw/2+(int)(8*cz), sy0+(int)(12*cz), (int)(5*cz), (int)(6*cz), COL(96,110,96));
+            rect_fill(sx0+sw/2-(int)(1*cz), sy0+(int)(24*cz), (int)(3*cz), (int)(14*cz), COL(30,36,30));
+            rect_fill(sx0+sw/2-(int)(1*cz), sy0+(int)(2*cz), (int)(2*cz), (int)(10*cz), COL(200,200,210));
+            tri_fill(sx0+sw/2+(int)(1*cz), sy0+(int)(2*cz), sx0+sw/2+(int)(1*cz), sy0+(int)(8*cz), sx0+sw/2+(int)(11*cz), sy0+(int)(5*cz), COL(120,220,130));
         }
         rect_fill(x0+(int)(8*cz), y0+(int)(76*cz), cw-(int)(16*cz), (int)(14*cz), COL(38,34,56)); rect_line(x0+(int)(8*cz), y0+(int)(76*cz), cw-(int)(16*cz), (int)(14*cz), OUTLINE);
         disc_fill(x0+(int)(24*cz), y0+(int)(83*cz), 3, COL(240,90,80));
@@ -5203,7 +5217,7 @@ static void render_hud(void){
     rect_line(254, 5, 214, 46, COL(84,78,112));
     if (me->in_mall && me->in_arcade){
         draw_text_center(361, 7, "THE ARCADE", 1, COL(255,255,255));
-        draw_text_center(361, 19, "FOUR FINE GAMES", 1, COL(200,210,230));
+        draw_text_center(361, 19, "FIVE FINE GAMES", 1, COL(200,210,230));
         draw_text_center(361, 31, "SAFE ZONE - NO BUGS", 1, COL(150,230,150));
     } else if (me->in_mall){
         draw_text_center(361, 7, "THE BUG MALL", 1, COL(255,255,255));
@@ -6124,6 +6138,7 @@ static void do_save(void){
                     *p++=' '; *p=0; p = put_key(p, "sb"); p = put_int(p, bd->ent_sub_best);
                     *p++=' '; *p=0; p = put_key(p, "pd"); p = put_int(p, bd->plat_done);
                     *p++=' '; *p=0; p = put_key(p, "td"); p = put_int(p, bd->tank_done);
+                    *p++=' '; *p=0; p = put_key(p, "cb"); p = put_int(p, bd->cas_best);
                     *p++=' '; *p=0; p = put_key(p, "cx"); p = put_int(p, (int)bd->craft_x);
                     *p++=' '; *p=0; p = put_key(p, "cy"); p = put_int(p, (int)bd->craft_y);
                     *p++=' '; *p=0; p = put_key(p, "cm"); p = put_int(p, bd->craft_wood + bd->craft_stone*1000 + bd->craft_fiber*1000000);
@@ -6377,7 +6392,7 @@ static void continue_run(int slot){
                 }
                 // optional key= tokens (bank / hat stand / mall / buddy)
                 { int bsp=0, bxp=0, b1=0, b2=0, b3=0, bsk=0, bfn=0, bnm=-1, bcl=0, bnv=0, bwo=0, bwn=0, ben=100, bgx=0, bgy=56, bgz=0, ber=0, bgf=0;
-                  int bsm=0, bsq=0, bsi=0, bsq2=0, bsb=0, bpd=0, btd=0, bcx=0, bcy=0, bcm=0, bcn=0, bcg=0, bct=0, bcf=0;
+                  int bsm=0, bsq=0, bsi=0, bsq2=0, bsb=0, bpd=0, btd=0, bcb=0, bcx=0, bcy=0, bcm=0, bcn=0, bcg=0, bct=0, bcf=0;
                   int tcw_bn=0, tcw_x[48], tcw_y[48], tcw_k[48], tcw_h[48];
                   int tcd_gn=0, tcd_g[96];
                   while (*q==' '){
@@ -6428,6 +6443,7 @@ static void continue_run(int slot){
                       else if (kk[0]=='s' && kk[1]=='b') bsb=vv;
                       else if (kk[0]=='p' && kk[1]=='d') bpd=vv;
                       else if (kk[0]=='t' && kk[1]=='d') btd=vv;
+                      else if (kk[0]=='c' && kk[1]=='b') bcb=vv;
                       else if (kk[0]=='c' && kk[1]=='x') bcx=vv;
                       else if (kk[0]=='c' && kk[1]=='y') bcy=vv;
                       else if (kk[0]=='c' && kk[1]=='m') bcm=vv;
@@ -6462,6 +6478,7 @@ static void continue_run(int slot){
                       bd->ent_sub_best = bsb;
                       bd->plat_done = bpd<0? 0 : bpd;
                       bd->tank_done = btd<0? 0 : btd;
+                      bd->cas_best = bcb<0? 0 : bcb;
                       bd->craft_x = bcx; bd->craft_y = bcy;
                       bd->craft_wood = bcm % 1000; bd->craft_stone = (bcm/1000) % 1000; bd->craft_fiber = bcm / 1000000;
                       bd->craft_car = bcn % 1000; bd->craft_pies = (bcn/1000) % 1000; bd->craft_stews = bcn / 1000000;
@@ -9655,6 +9672,7 @@ static int bw_ridge_pass_zone(float x, float y){
 static int bw_outside_world(float x, float y){ return x<BW_WX0 || x>BW_WX1 || y<BW_WY0 || y>BW_WY1; }
 static int bw_solid_b(Buddy *b, float x, float y){
     if (b->bw_mode==2) return ent_solid((int)(b - G.bud), x, y);
+    if (b->bw_mode==6) return cas_solid((int)(b - G.bud), x, y);
     if (bw_outside_world(x, y)) return 1;
     if (b->bw_mode==1 && bw_ridge_pass_zone(x, y)) return bw_site_solid(b, x, y);
     return bw_solid_xy(x, y, (u32)b->bw_seed) || bw_site_solid(b, x, y)
@@ -9762,6 +9780,12 @@ typedef struct {
     float tank_sh_x[24], tank_sh_y[24], tank_sh_vx[24], tank_sh_vy[24], tank_sh_t[24]; int tank_sh_a[24];
     float tank_es_x[32], tank_es_y[32], tank_es_vx[32], tank_es_vy[32], tank_es_t[32]; int tank_es_a[32];
     unsigned char tank_dead[TANK_W*TANK_LEN], tank_hit[TANK_W*TANK_LEN];   // shot-away tiles + sandbag wear
+    // CASTLE (bw_mode 6, Nov 14 2026): the run's whole state
+    int cas_room, cas_score, cas_treasures, cas_sword, cas_key, cas_won;
+    float cas_hitcd, cas_notecd, cas_wont;
+    float cas_mx[16], cas_my[16], cas_mwt[16];
+    int cas_mtype[16], cas_mhp[16], cas_mroom[16], cas_malive[16];
+    unsigned char cas_taken[20];   // item ids: 0-12 treasures, 13 sword, 14 key, 15-16 tonics
 } BwSim;
 static BwSim BWS[MAXP];
 static int bw_defeated_has(BwSim *S, int key){ for (int i=0;i<S->defeated_n;i++) if (S->defeated[i]==key) return 1; return 0; }
@@ -10065,12 +10089,14 @@ static void bw_enter_mode(int pi, int mode){
     else if (mode==3){ plat_enter(pi); }
     else if (mode==4){ craft_enter(pi); }
     else if (mode==5){ tank_enter(pi); }
+    else if (mode==6){ cas_enter(pi); }
     else { b->x = b->bw_x; b->y = b->bw_y; }
     b->in_bw = 1;   // the DEV stays parked at the gate in the mall
     if (mode==2){ char *q=S->note; q=sappend(q, "ENTRANCES. A COZY HOTEL. "); q=sappend(q, lbl_int()); q=sappend(q, " OPENS DOORS + DRAWERS. MIND THE ZIP BUG."); *q=0; }
     else if (mode==3){ char *q=S->note; q=sappend(q, "SUPER BUDDY RUN. "); q=sappend(q, lbl_fire()); q=sappend(q, " JUMPS. STOMP BUGS. PLANT THE FLAG!"); *q=0; }
     else if (mode==4){ char *q=S->note; q=sappend(q, "BUDDY CRAFT. "); q=sappend(q, lbl_int()); q=sappend(q, " GATHERS + RESTS. "); q=sappend(q, lbl_fire()); q=sappend(q, " SWINGS. "); q=sappend(q, lbl_wall()); q=sappend(q, " CRAFTS."); *q=0; }
     else if (mode==5){ char *q=S->note; q=sappend(q, "TANK RESCUE. "); q=sappend(q, lbl_fire()); q=sappend(q, " FIRES THE CANNON. FREE CAPTIVES, DROP AT PADS."); *q=0; }
+    else if (mode==6){ char *q=S->note; q=sappend(q, "CASTLE. TRAPPED! RUN INTO THINGS TO TAKE OR FIGHT. FIND THE KEY, ESCAPE!"); *q=0; }
     else if (mode==1 && b->story_bits==(1<<0)) scpy(S->note, "STORY MODE. PATCH VILLAGE LIES NORTH-WEST.", 72);
     else if (mode==1) scpy(S->note, "BACK TO THE STORY. THE MEADOW REMEMBERS.", 72);
     else scpy(S->note, "BANZAI WORLD. WATCH FOR HACKERS.", 72);
@@ -10140,7 +10166,7 @@ static void arc_gate_try(int pi){
 }
 static void arc_gate_draw(int pi, int vx, int vy, int vw2, int vh2){
     Buddy *b=&G.bud[pi];
-    int cab = arc_cab[pi]&3;
+    int cab = arc_cab[pi]%5;
     int w = vw2<340? vw2-16 : 320, h = 132;
     int x = vx + (vw2-w)/2, y = vy + (vh2-h)/2;
     if (y < vy+4) y = vy+4;
@@ -10148,11 +10174,12 @@ static void arc_gate_draw(int pi, int vx, int vy, int vw2, int vh2){
     draw_text_center(x+w/2, y+10, ARC_NAME[cab], 2, COL(140,255,255));
     { char buf[64]; char *q=buf; q=sappend(q, BUD_ELF[b->name_idx%BUD_NAMES_N]); q=sappend(q, " THE "); q=sappend(q, BUD_NAME[b->species%BUDN]); q=sappend(q, " GRABS THE CONTROLS"); *q=0;
       draw_text_center(x+w/2, y+32, buf, 1, COL(200,214,200)); }
-    static const char *DESC[4] = {
+    static const char *DESC[5] = {
         "A COZY HOTEL OF DOORS. HIDE IN THE BUSHES. MIND THE ZIP BUG.",
         "A SIDE-SCROLLING RUN. STOMP BUGS. PLANT THE FLAG.",
         "AN ENDLESS WILD. CHOP, MINE, CRAFT, BUILD.",
-        "DRIVE THE TANK. FREE THE CAPTIVES. BREAK THE BOSS." };
+        "DRIVE THE TANK. FREE THE CAPTIVES. BREAK THE BOSS.",
+        "TRAPPED IN A CASTLE! 13 TREASURES, ONE KEY, ONE GATE." };
     for (int r=0;r<2;r++){
         int ry = y + 52 + r*20;
         const char *nm = r==0? "PLAY" : "LEAVE";
@@ -10167,7 +10194,7 @@ static void arc_gate_draw(int pi, int vx, int vy, int vw2, int vh2){
 }
 static void arc_gate_pick(int pi){
     if (arcgate_sel[pi]==0){
-        int cab = arc_cab[pi]&3;
+        int cab = arc_cab[pi]%5;
         arcgate[pi]=0;
         bw_arc_src[pi]=1; bw_arc_cab[pi]=cab;
         bw_enter_mode(pi, ARC_MODE[cab]);
@@ -10201,13 +10228,13 @@ static void p1_view_rect(int *x, int *y, int *w, int *h){
 static void bw_exit(int pi, int fainted){
     BwSim *S = &BWS[pi];
     Player *p=&G.p[pi]; Buddy *b=&G.bud[pi];
-    if (b->bw_mode==2 || b->bw_mode==3 || b->bw_mode==5){ b->bw_x = 0; b->bw_y = 56; }
+    if (b->bw_mode==2 || b->bw_mode==3 || b->bw_mode==5 || b->bw_mode==6){ b->bw_x = 0; b->bw_y = 56; }
     else if (b->bw_mode==4){ b->craft_x = b->x; b->craft_y = b->y; }
     else { b->bw_x = b->x; b->bw_y = b->y; }
     S->bat.active = 0;
     S->bw_menu = 0;
     b->in_bw = 0;
-    if (S->from_arcade){ p->x = ARC_SX[S->arc_cab&3]; p->y = ARC_CY-100; }   // back to your cabinet
+    if (S->from_arcade){ p->x = ARC_SX[S->arc_cab%5]; p->y = ARC_CY-100; }   // back to your cabinet
     else { p->x = BW_SX; p->y = MALL_CY+96; }
     S->from_arcade = 0;
     p->aim = -PI/2;
@@ -10219,7 +10246,7 @@ static void bw_exit(int pi, int fainted){
 // --- the frame ---------------------------------------------------------------
 static void bw_roam_refresh(Buddy *b){
     BwSim *S = &BWS[(int)(b - G.bud)];
-    if (b->bw_mode==2) return;
+    if (b->bw_mode==2 || b->bw_mode==6) return;
     u32 seed=(u32)b->bw_seed;
     int cx0=bw_cellof(b->x), cy0=bw_cellof(b->y);
     int want_cell[BW_ROAMN]; int nw=0;
@@ -10520,6 +10547,7 @@ static void bw_update(int pi, float dt, const BwIn *in){
     if (b->bw_mode==3){ plat_update(pi, dt, in); return; }
     if (b->bw_mode==4){ craft_update(pi, dt, in); return; }
     if (b->bw_mode==5){ tank_update(pi, dt, in); return; }
+    if (b->bw_mode==6){ cas_update(pi, dt, in); return; }
     float mx=0, my=0; int k=in->keys;
     if (k&K_UP) my-=1; if (k&K_DOWN) my+=1; if (k&K_LEFT) mx-=1; if (k&K_RIGHT) mx+=1;
     if (mx!=0 || my!=0){
@@ -14598,6 +14626,376 @@ static void tank_render(int pi){
     }
 }
 
+// ---------------------------------------------------------------------------
+// CASTLE (bw_mode 6, Nov 14 2026) — a love letter to Castle Adventure
+// (Kevin Bales, 1984), the DOS game Krista loves: you are trapped in a
+// deserted castle; gather the treasures, mind the monsters, find the
+// gate key and escape through the gate in the courtyard where you
+// started. Twenty rooms (the original had 83), thirteen treasures,
+// fifteen monsters, and the same 1550-point perfect game: 13 x 100
+// for treasures, 15 x 10 for monsters, 100 for escaping. Bump combat,
+// like the original: run into a monster to fight it — but only a
+// sword makes your bumps count. Rooms are one screen each, joined by
+// doors, in a pocket of world space far away from Banzai World.
+// ---------------------------------------------------------------------------
+#define CAS_OX 20000.0f
+#define CAS_OY 20000.0f
+#define CAS_X0 28
+#define CAS_X1 612
+#define CAS_Y0 56
+#define CAS_Y1 332
+static const unsigned char CAS_DOORS[20] = {   // bits: N=1, E=2, S=4, W=8
+    6, 14, 14, 14, 12,
+    7, 15, 15, 15, 13,
+    7, 15, 15, 15, 13,
+    3, 11, 11, 10, 9
+};
+static const char *CAS_NAMES[20] = {
+    "THE WEST TOWER", "THE THRONE ROOM", "THE VAULT", "THE EAST TOWER", "THE BATTLEMENT",
+    "THE ARMORY", "THE LIBRARY", "THE GREAT HALL", "THE CHAPEL", "THE GALLERY",
+    "THE DUNGEON", "THE CRYPT", "THE CROSSING", "THE KITCHEN", "THE STORE ROOM",
+    "THE CELLAR", "THE WELL ROOM", "THE COURTYARD", "THE GATEHOUSE", "THE STABLE"
+};
+// one stone block per room (x, y, w, h in room-local coords; w=0: none)
+static const short CAS_PIL[20][4] = {
+    {0,0,0,0}, {296,120,48,48}, {0,0,0,0}, {0,0,0,0}, {120,120,40,120},
+    {0,0,0,0}, {150,150,60,24}, {286,110,68,68}, {0,0,0,0}, {480,150,60,24},
+    {120,200,90,30}, {286,140,68,40}, {0,0,0,0}, {460,110,70,40}, {140,120,50,50},
+    {0,0,0,0}, {296,150,48,48}, {0,0,0,0}, {150,200,80,26}, {470,210,60,30}
+};
+// items by id: 0-12 treasures, 13 sword, 14 key, 15-16 tonics
+static const unsigned char CAS_ITEM_ROOM[17] = { 0, 1, 2, 2, 4, 6, 8, 11, 13, 15, 16, 18, 19, 5, 10, 13, 15 };
+static const unsigned char CAS_ITEM_KIND[17] = { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 2, 3, 3 };
+// monsters: (room, type) — 0 bat, 1 snake, 2 ogre, 3 demon
+static const unsigned char CAS_MON[15][2] = {
+    {1,3}, {2,3}, {3,0}, {5,1}, {7,2}, {7,2}, {9,0}, {10,2},
+    {11,0}, {11,0}, {12,1}, {12,1}, {13,1}, {14,2}, {19,0}
+};
+static const int CAS_MHP[4] = { 1, 2, 3, 4 };
+static const float CAS_MSPD[4] = { 96.0f, 72.0f, 50.0f, 60.0f };
+static const int CAS_MDMG[4] = { 4, 6, 10, 14 };
+// spots a room's things can sit at (room-local)
+static const short CAS_SPOT[6][2] = { {170,140}, {470,140}, {320,150}, {170,262}, {470,262}, {320,268} };
+static void cas_item_pos(int id, float *x, float *y){
+    int room = CAS_ITEM_ROOM[id], k = 0;
+    for (int i=0;i<id;i++) if (CAS_ITEM_ROOM[i]==room) k++;
+    *x = CAS_OX + CAS_SPOT[(room + k) % 6][0];
+    *y = CAS_OY + CAS_SPOT[(room + k) % 6][1];
+}
+static int cas_in_gap_ns(float lx){ return lx>=288 && lx<=352; }
+static int cas_in_gap_ew(float ly){ return ly>=162 && ly<=226; }
+static int cas_solid(int pi, float x, float y){
+    BwSim *S = &BWS[pi];
+    float lx = x - CAS_OX, ly = y - CAS_OY;
+    int room = S->cas_room;
+    const short *P = CAS_PIL[room];
+    if (P[2]>0 && lx>=P[0] && lx<P[0]+P[2] && ly>=P[1] && ly<P[1]+P[3]) return 1;
+    if (lx < CAS_X0) return (cas_in_gap_ew(ly) && (CAS_DOORS[room]&8))? 0 : 1;
+    if (lx > CAS_X1) return (cas_in_gap_ew(ly) && (CAS_DOORS[room]&2))? 0 : 1;
+    if (ly < CAS_Y0) return (cas_in_gap_ns(lx) && (CAS_DOORS[room]&1))? 0 : 1;
+    if (ly > CAS_Y1) return (cas_in_gap_ns(lx) && (CAS_DOORS[room]&4))? 0 : 1;
+    return 0;
+}
+static void cas_note(BwSim *S, const char *t, float dur){ scpy(S->note, t, 72); S->note_t = dur; }
+static void cas_enter(int pi){
+    BwSim *S = &BWS[pi]; Buddy *b = &G.bud[pi];
+    S->cas_room = 17; S->cas_score = 0; S->cas_treasures = 0;
+    S->cas_sword = 0; S->cas_key = 0; S->cas_won = 0;
+    S->cas_hitcd = 0; S->cas_notecd = 0; S->cas_wont = 0;
+    for (int i=0;i<20;i++) S->cas_taken[i] = 0;
+    for (int i=0;i<15;i++){
+        int room = CAS_MON[i][0], type = CAS_MON[i][1], k = 0;
+        for (int j=0;j<i;j++) if (CAS_MON[j][0]==room) k++;
+        S->cas_mroom[i] = room; S->cas_mtype[i] = type;
+        S->cas_mhp[i] = CAS_MHP[type]; S->cas_malive[i] = 1;
+        S->cas_mx[i] = CAS_OX + CAS_SPOT[(room + 2 + k) % 6][0];
+        S->cas_my[i] = CAS_OY + CAS_SPOT[(room + 2 + k) % 6][1];
+        S->cas_mwt[i] = (float)(i % 5) * 0.7f;
+    }
+    b->x = CAS_OX + 320; b->y = CAS_OY + 252;
+    b->bw_x = b->x; b->bw_y = b->y;
+    b->aim = -PI/2;
+}
+static void cas_update(int pi, float dt, const BwIn *in){
+    BwSim *S = &BWS[pi]; Buddy *b = &G.bud[pi];
+    if (S->cas_won){
+        S->cas_wont -= dt;
+        if (S->cas_wont <= 0){
+            int sc = S->cas_score;
+            if (sc > b->cas_best) b->cas_best = sc;
+            bw_exit(pi, 0);
+            Player *p = &G.p[pi];
+            char buf[64]; char *q = buf;
+            q = sappend(q, "YOU ESCAPED THE CASTLE! SCORE ");
+            q = sapp_int(q, sc); *q = 0;
+            spawn_floater(p->x, p->y - 26, buf, COL(255, 220, 120));
+        }
+        return;
+    }
+    if (in->exit_){ bw_exit(pi, 0); return; }
+    if (S->cas_hitcd > 0) S->cas_hitcd -= dt;
+    if (S->cas_notecd > 0) S->cas_notecd -= dt;
+    // movement at a fixed castle pace
+    float mx = 0, my = 0; int k2 = in->keys;
+    if (k2&K_UP) my -= 1; if (k2&K_DOWN) my += 1;
+    if (k2&K_LEFT) mx -= 1; if (k2&K_RIGHT) mx += 1;
+    if (mx != 0 || my != 0){
+        float d = fsqrt(mx*mx + my*my); mx /= d; my /= d;
+        b->aim = fatan2(my, mx);
+        float nx = b->x + mx * 150.0f * dt, ny = b->y + my * 150.0f * dt;
+        if (!bw_solid_b(b, nx, b->y)) b->x = nx;
+        if (!bw_solid_b(b, b->x, ny)) b->y = ny;
+        b->walk_ph += dt * 9;
+    }
+    b->bw_x = b->x; b->bw_y = b->y;
+    float lx = b->x - CAS_OX, ly = b->y - CAS_OY;
+    int room = S->cas_room, col = room % 5, row = room / 5, nroom = -1;
+    if (lx < 8 && (CAS_DOORS[room]&8) && col > 0) nroom = room - 1;
+    else if (lx > 632 && (CAS_DOORS[room]&2) && col < 4) nroom = room + 1;
+    else if (ly < 36 && (CAS_DOORS[room]&1) && row > 0) nroom = room - 5;
+    else if (ly > 352 && (CAS_DOORS[room]&4) && row < 3) nroom = room + 5;
+    if (nroom >= 0){
+        S->cas_room = nroom;
+        if (nroom == room - 1){ b->x = CAS_OX + 596; b->y = CAS_OY + 194; }
+        else if (nroom == room + 1){ b->x = CAS_OX + 44; b->y = CAS_OY + 194; }
+        else if (nroom == room - 5){ b->x = CAS_OX + 320; b->y = CAS_OY + 316; }
+        else { b->x = CAS_OX + 320; b->y = CAS_OY + 72; }
+        b->bw_x = b->x; b->bw_y = b->y;
+        cas_note(S, CAS_NAMES[nroom], 1.5f);
+        sfx(19);
+        return;
+    }
+    // the gate, in the courtyard where you started
+    if (room == 17 && ly > 306 && lx >= 282 && lx <= 358){
+        if (S->cas_key){
+            S->cas_won = 1; S->cas_wont = 2.6f; S->cas_score += 100;
+            cas_note(S, "THE GATE CREAKS OPEN... YOU ARE FREE!", 2.6f);
+            qnote(0, 0, 60, 80, 6); qnote(0.12f, 0, 64, 80, 6); qnote(0.24f, 0, 67, 80, 6); qnote(0.36f, 0, 72, 90, 10);
+            return;
+        } else if (S->cas_notecd <= 0){
+            S->cas_notecd = 2.0f;
+            cas_note(S, "THE GATE IS LOCKED FAST. SOMEWHERE THERE IS A KEY.", 2.0f);
+            sfx(16);
+        }
+    }
+    // pickups: run into a thing to take it, like the original
+    for (int id=0; id<17; id++){
+        if (S->cas_taken[id] || CAS_ITEM_ROOM[id] != room) continue;
+        float ix, iy; cas_item_pos(id, &ix, &iy);
+        float dx = b->x - ix, dy = b->y - iy;
+        if (dx*dx + dy*dy < 24*24){
+            S->cas_taken[id] = 1;
+            if (CAS_ITEM_KIND[id] == 0){
+                S->cas_treasures++; S->cas_score += 100;
+                char buf[48]; char *q = buf;
+                q = sappend(q, "TREASURE! "); q = sapp_int(q, S->cas_treasures); q = sappend(q, " OF 13."); *q = 0;
+                cas_note(S, buf, 1.8f);
+                qnote(0, 0, 76, 70, 3); qnote(0.07f, 0, 81, 70, 3); qnote(0.14f, 0, 88, 80, 5);
+            } else if (CAS_ITEM_KIND[id] == 1){
+                S->cas_sword = 1; cas_note(S, "YOU TAKE THE SWORD. NOW YOUR BUMPS COUNT.", 2.2f); sfx(19);
+            } else if (CAS_ITEM_KIND[id] == 2){
+                S->cas_key = 1; cas_note(S, "THE GATE KEY! THE COURTYARD GATE WILL OPEN NOW.", 2.2f); sfx(19);
+            } else {
+                b->hp += 30; if (b->hp > b->maxhp) b->hp = b->maxhp;
+                cas_note(S, "A TONIC! +30 HP.", 1.6f); sfx(19);
+            }
+            splat(ix, iy, COL(255, 220, 120), 8, 70);
+        }
+    }
+    // the room's monsters
+    for (int i=0;i<15;i++){
+        if (!S->cas_malive[i] || S->cas_mroom[i] != room) continue;
+        float *mxp = &S->cas_mx[i], *myp = &S->cas_my[i];
+        float dx = b->x - *mxp, dy = b->y - *myp;
+        float d2 = dx*dx + dy*dy;
+        S->cas_mwt[i] -= dt;
+        float vx2 = 0, vy2 = 0;
+        if (d2 < 210*210 && d2 > 1){
+            float d = fsqrt(d2); vx2 = dx/d; vy2 = dy/d;
+        } else if (S->cas_mwt[i] <= 0){
+            S->cas_mwt[i] = 1.2f + (float)((unsigned)(i*37 + (int)(G.anim_t*2.0f)) % 10) * 0.13f;
+            unsigned h = (unsigned)i * 2654435761u + (unsigned)(int)(G.anim_t * 1.7f) * 40503u;
+            vx2 = (float)((int)(h % 3) - 1); vy2 = (float)((int)((h >> 8) % 3) - 1);
+        }
+        if (vx2 != 0 || vy2 != 0){
+            float sp = CAS_MSPD[S->cas_mtype[i]];
+            float nx2 = *mxp + vx2 * sp * dt, ny2 = *myp + vy2 * sp * dt;
+            if (!cas_solid(pi, nx2, *myp)) *mxp = nx2;
+            if (!cas_solid(pi, *mxp, ny2)) *myp = ny2;
+            dx = b->x - *mxp; dy = b->y - *myp; d2 = dx*dx + dy*dy;
+        }
+        // bump combat: an exchange, both ways, like the original
+        if (d2 < 23*23 && S->cas_hitcd <= 0){
+            S->cas_hitcd = 0.65f;
+            if (S->cas_sword){
+                S->cas_mhp[i]--;
+                qnote(0, 3, 34, 80, 2);
+                if (S->cas_mhp[i] <= 0){
+                    S->cas_malive[i] = 0; S->cas_score += 10;
+                    splat(*mxp, *myp, COL(200, 90, 90), 10, 80);
+                    cas_note(S, "IT DIES. +10.", 1.2f);
+                } else {
+                    float kx = *mxp - dx * 0.5f, ky = *myp - dy * 0.5f;
+                    if (kx < CAS_OX + 40) kx = CAS_OX + 40; if (kx > CAS_OX + 600) kx = CAS_OX + 600;
+                    if (ky < CAS_OY + 68) ky = CAS_OY + 68; if (ky > CAS_OY + 320) ky = CAS_OY + 320;
+                    if (!cas_solid(pi, kx, ky)){ *mxp = kx; *myp = ky; }
+                    cas_note(S, "YOU HIT IT!", 0.9f);
+                }
+            } else {
+                cas_note(S, "BARE HANDS DO NOTHING. YOU NEED A SWORD!", 1.6f);
+            }
+            b->hp -= CAS_MDMG[S->cas_mtype[i]];
+            { float kx = b->x - dx * 0.35f, ky = b->y - dy * 0.35f;
+              if (!cas_solid(pi, kx, ky)){ b->x = kx; b->y = ky; } }
+            if (b->hp <= 0){ b->hp = 0; b->fainted = 1; bw_exit(pi, 1); return; }
+        }
+    }
+}
+static void cas_render(int pi){
+    BwSim *S = &BWS[pi]; Buddy *b = &G.bud[pi];
+    int vx = G.view_x0, vy = G.view_y0, vw2 = G.view_w>0? G.view_w : VW, vh2 = G.view_h>0? G.view_h : VH;
+    float cs = (float)vw2 / 640.0f; { float csy = (float)vh2 / 360.0f; if (csy < cs) cs = csy; }
+    int ox = vx + (int)((vw2 - 640*cs) / 2), oy = vy + (int)((vh2 - 360*cs) / 2);
+    int room = S->cas_room;
+#define CRX(lx) (ox + (int)((lx) * cs))
+#define CRY(ly) (oy + (int)((ly) * cs))
+#define CRS(v) ((int)((v) * cs) < 1 ? 1 : (int)((v) * cs))
+    rect_fill(vx, vy, vw2, vh2, COL(6, 8, 6));
+    // floor: a dim checker, text-mode green
+    for (int ty = 0; ty < 12; ty++) for (int tx = 0; tx < 20; tx++)
+        if ((tx + ty) & 1) rect_fill(CRX(tx*32), CRY(ty*32), CRS(32) + 1, CRS(32) + 1, COL(13, 19, 13));
+    // the stone walls, with mortar lines
+    { u32 wc = COL(74, 88, 74), wl = COL(52, 64, 52);
+      rect_fill(CRX(0), CRY(0), CRS(640), CRS(CAS_Y0), wc);
+      rect_fill(CRX(0), CRY(CAS_Y1), CRS(640), CRS(360 - CAS_Y1), wc);
+      rect_fill(CRX(0), CRY(0), CRS(CAS_X0), CRS(360), wc);
+      rect_fill(CRX(CAS_X1), CRY(0), CRS(640 - CAS_X1), CRS(360), wc);
+      for (int bx = 0; bx < 640; bx += 32){ rect_fill(CRX(bx), CRY(0), 1, CRS(CAS_Y0), wl); rect_fill(CRX(bx), CRY(CAS_Y1), 1, CRS(360 - CAS_Y1), wl); }
+      for (int by = 0; by < 360; by += 32){ rect_fill(CRX(0), CRY(by), CRS(CAS_X0), 1, wl); rect_fill(CRX(CAS_X1), CRY(by), CRS(640 - CAS_X1), 1, wl); }
+      rect_fill(CRX(0), CRY(CAS_Y0), CRS(640), 2, COL(120, 220, 130));
+      // doors: dark openings with a wooden leaf swung in
+      if (CAS_DOORS[room]&1){ rect_fill(CRX(288), CRY(0), CRS(64), CRS(CAS_Y0), COL(4, 4, 4)); rect_fill(CRX(288), CRY(CAS_Y0 - 12), CRS(10), CRS(12), COL(120, 84, 44)); }
+      if (CAS_DOORS[room]&4){ rect_fill(CRX(288), CRY(CAS_Y1), CRS(64), CRS(360 - CAS_Y1), COL(4, 4, 4)); rect_fill(CRX(342), CRY(CAS_Y1), CRS(10), CRS(12), COL(120, 84, 44)); }
+      if (CAS_DOORS[room]&8){ rect_fill(CRX(0), CRY(162), CRS(CAS_X0), CRS(64), COL(4, 4, 4)); rect_fill(CRX(CAS_X0 - 12), CRY(162), CRS(12), CRS(10), COL(120, 84, 44)); }
+      if (CAS_DOORS[room]&2){ rect_fill(CRX(CAS_X1), CRY(162), CRS(640 - CAS_X1), CRS(64), COL(4, 4, 4)); rect_fill(CRX(CAS_X1), CRY(216), CRS(12), CRS(10), COL(120, 84, 44)); }
+      // the courtyard gate: iron bars on the south wall (never a door)
+      if (room == 17){
+          int lift = S->cas_won? CRS(16) : 0;
+          rect_fill(CRX(288), CRY(CAS_Y1), CRS(64), CRS(360 - CAS_Y1), COL(4, 4, 4));
+          for (int bx = 292; bx < 350; bx += 8) rect_fill(CRX(bx), CRY(CAS_Y1) - lift, CRS(3), CRS(360 - CAS_Y1), COL(150, 150, 160));
+          rect_fill(CRX(288), CRY(CAS_Y1 + 10) - lift, CRS(64), CRS(3), COL(150, 150, 160));
+          if (!S->cas_key) disc_fill(CRX(320), CRY(346), CRS(5), COL(255, 205, 40));
+      }
+    }
+    // the room's stone block
+    { const short *P = CAS_PIL[room];
+      if (P[2] > 0){ rect_fill(CRX(P[0]), CRY(P[1]), CRS(P[2]), CRS(P[3]), COL(64, 76, 64)); rect_line(CRX(P[0]), CRY(P[1]), CRS(P[2]), CRS(P[3]), COL(96, 110, 96)); } }
+    // items
+    for (int id = 0; id < 17; id++){
+        if (S->cas_taken[id] || CAS_ITEM_ROOM[id] != room) continue;
+        float fx, fy; cas_item_pos(id, &fx, &fy);
+        int cx = CRX(fx - CAS_OX), cy = CRY(fy - CAS_OY);
+        int bob = (int)(fsin(G.anim_t * 3.0f + (float)id * 1.7f) * 2.0f);
+        cy += CRS(bob);
+        if (CAS_ITEM_KIND[id] == 0){           // a treasure: gold and glinting
+            disc_fill(cx, cy, CRS(8), COL(255, 205, 40));
+            tri_fill(cx - CRS(8), cy, cx, cy - CRS(10), cx + CRS(8), cy, COL(255, 230, 130));
+            disc_fill(cx - CRS(3), cy - CRS(3), CRS(2), COL(255, 250, 220));
+        } else if (CAS_ITEM_KIND[id] == 1){    // the sword
+            rect_fill(cx - CRS(2), cy - CRS(13), CRS(4), CRS(18), COL(215, 220, 230));
+            rect_fill(cx - CRS(6), cy + CRS(5), CRS(12), CRS(3), COL(255, 205, 40));
+            rect_fill(cx - CRS(2), cy + CRS(8), CRS(4), CRS(6), COL(120, 84, 44));
+        } else if (CAS_ITEM_KIND[id] == 2){    // the gate key
+            disc_fill(cx - CRS(4), cy - CRS(4), CRS(5), COL(255, 205, 40));
+            rect_fill(cx, cy - CRS(1), CRS(13), CRS(3), COL(255, 205, 40));
+            rect_fill(cx + CRS(9), cy + CRS(2), CRS(3), CRS(5), COL(255, 205, 40));
+        } else {                               // a tonic
+            rect_fill(cx - CRS(5), cy - CRS(6), CRS(10), CRS(14), COL(200, 70, 70));
+            rect_fill(cx - CRS(2), cy - CRS(10), CRS(4), CRS(4), COL(200, 200, 210));
+            rect_fill(cx - CRS(5), cy - CRS(1), CRS(10), CRS(2), COL(240, 150, 150));
+        }
+    }
+    // monsters
+    for (int i = 0; i < 15; i++){
+        if (!S->cas_malive[i] || S->cas_mroom[i] != room) continue;
+        int cx = CRX(S->cas_mx[i] - CAS_OX), cy = CRY(S->cas_my[i] - CAS_OY);
+        int ty = S->cas_mtype[i];
+        if (ty == 0){           // bat
+            int flap = (int)(fsin(G.anim_t * 10.0f + (float)i * 2.0f) * CRS(5));
+            tri_fill(cx, cy, cx - CRS(16), cy - CRS(6) - flap, cx - CRS(13), cy + CRS(5), COL(96, 84, 150));
+            tri_fill(cx, cy, cx + CRS(16), cy - CRS(6) - flap, cx + CRS(13), cy + CRS(5), COL(96, 84, 150));
+            disc_fill(cx, cy, CRS(6), COL(56, 48, 84));
+            disc_fill(cx - CRS(2), cy - CRS(2), CRS(1) + 1, COL(255, 90, 90)); disc_fill(cx + CRS(2), cy - CRS(2), CRS(1) + 1, COL(255, 90, 90));
+        } else if (ty == 1){    // snake
+            for (int sg = 0; sg < 3; sg++){
+                int sx2 = cx + (sg - 1) * CRS(9), sy2 = cy + (int)(fsin(G.anim_t * 6.0f + (float)(i + sg) * 1.3f) * CRS(3));
+                disc_fill(sx2, sy2, CRS(6), COL(80, 180, 80));
+            }
+            disc_fill(cx + CRS(8), cy - CRS(2), CRS(1) + 1, COL(255, 220, 120));
+        } else if (ty == 2){    // ogre
+            rect_fill(cx - CRS(11), cy - CRS(6), CRS(22), CRS(20), COL(122, 142, 70));
+            disc_fill(cx, cy - CRS(12), CRS(8), COL(150, 168, 96));
+            rect_fill(cx - CRS(16), cy - CRS(4), CRS(5), CRS(14), COL(122, 142, 70));
+            rect_fill(cx + CRS(11), cy - CRS(4), CRS(5), CRS(14), COL(122, 142, 70));
+            disc_fill(cx - CRS(3), cy - CRS(13), CRS(1) + 1, COL(30, 26, 20)); disc_fill(cx + CRS(3), cy - CRS(13), CRS(1) + 1, COL(30, 26, 20));
+        } else {                // demon
+            rect_fill(cx - CRS(10), cy - CRS(8), CRS(20), CRS(22), COL(172, 62, 52));
+            tri_fill(cx - CRS(10), cy - CRS(8), cx - CRS(13), cy - CRS(18), cx - CRS(4), cy - CRS(11), COL(240, 220, 180));
+            tri_fill(cx + CRS(10), cy - CRS(8), cx + CRS(13), cy - CRS(18), cx + CRS(4), cy - CRS(11), COL(240, 220, 180));
+            disc_fill(cx - CRS(3), cy - CRS(3), CRS(1) + 1, COL(255, 220, 90)); disc_fill(cx + CRS(3), cy - CRS(3), CRS(1) + 1, COL(255, 220, 90));
+        }
+        if (S->cas_mhp[i] < CAS_MHP[ty])   // hurt pips
+            for (int hp2 = 0; hp2 < S->cas_mhp[i]; hp2++)
+                rect_fill(cx - CRS(8) + hp2 * CRS(6), cy - CRS(24), CRS(4), CRS(3), COL(255, 120, 120));
+    }
+    // the adventurer (the buddy, in a green cloak — a nod to a clover)
+    { int cx = CRX(b->x - CAS_OX), cy = CRY(b->y - CAS_OY) + (int)(fsin(b->walk_ph) * cs * 1.5f);
+      ellipse_fill(cx, cy + CRS(13), CRS(11), CRS(4), COL(0, 0, 0));
+      tri_fill(cx - CRS(10), cy + CRS(14), cx, cy - CRS(4), cx + CRS(10), cy + CRS(14), COL(52, 142, 72));
+      rect_fill(cx - CRS(7), cy - CRS(2), CRS(14), CRS(14), COL(52, 142, 72));
+      disc_fill(cx, cy - CRS(8), CRS(6), COL(240, 200, 164));
+      tri_fill(cx - CRS(7), cy - CRS(9), cx, cy - CRS(17), cx + CRS(7), cy - CRS(9), COL(38, 110, 54));
+      if (S->cas_sword){
+          int hx = cx + (int)(fcos(b->aim) * CRS(13)), hy = cy + (int)(fsin(b->aim) * CRS(13));
+          line_thick(cx, cy, hx, hy, CRS(3), COL(215, 220, 230));
+          disc_fill(cx + (int)(fcos(b->aim) * CRS(8)), cy + (int)(fsin(b->aim) * CRS(8)), CRS(2), COL(255, 205, 40));
+      }
+      if (S->cas_hitcd > 0.35f){ rect_line(cx - CRS(13), cy - CRS(20), CRS(26), CRS(36), COL(255, 90, 90)); }   // hurt flash frame
+    }
+    // HUD, written on the top wall
+    { char buf[80]; char *q;
+      draw_text(CRX(40), CRY(10), "CASTLE", 1, COL(255, 205, 40));
+      draw_text_center(CRX(320), CRY(10), CAS_NAMES[room], 1, COL(190, 235, 190));
+      q = buf; q = sappend(q, "SCORE "); q = sapp_int(q, S->cas_score); *q = 0;
+      draw_text(CRX(600) - (int)(slen(buf) * 8 * cs), CRY(10), buf, 1, COL(235, 238, 245));
+      draw_text(CRX(40), CRY(30), "HP", 1, COL(190, 235, 190));
+      rect_fill(CRX(66), CRY(30), CRS(110), CRS(8), COL(40, 44, 40));
+      { int hw = b->maxhp > 0? (int)(110.0f * b->hp / b->maxhp) : 0; if (hw < 0) hw = 0;
+        if (hw > 0) rect_fill(CRX(66), CRY(30), CRS(hw), CRS(8), (b->hp * 3 < b->maxhp)? COL(230, 80, 80) : COL(110, 220, 120)); }
+      q = buf; q = sappend(q, "TREASURES "); q = sapp_int(q, S->cas_treasures); q = sappend(q, "/13"); *q = 0;
+      draw_text_center(CRX(320), CRY(30), buf, 1, COL(255, 220, 120));
+      { int ix = CRX(470);
+        if (S->cas_sword){ draw_text(ix, CRY(30), "SWORD", 1, COL(215, 220, 230)); ix += (int)(48 * cs); }
+        if (S->cas_key) draw_text(ix, CRY(30), "KEY", 1, COL(255, 205, 40)); }
+    }
+    if (S->cas_won){
+        rect_fill(CRX(120), CRY(120), CRS(400), CRS(110), COL(16, 20, 16));
+        rect_line(CRX(120), CRY(120), CRS(400), CRS(110), COL(255, 205, 40));
+        draw_text_center(CRX(320), CRY(142), "YOU ESCAPED THE CASTLE!", 2, COL(255, 220, 120));
+        { char buf[64]; char *q = buf;
+          q = sappend(q, "SCORE "); q = sapp_int(q, S->cas_score);
+          q = sappend(q, "   BEST "); q = sapp_int(q, S->cas_score > b->cas_best? S->cas_score : b->cas_best); *q = 0;
+          draw_text_center(CRX(320), CRY(182), buf, 1, COL(235, 238, 245)); }
+    }
+    if (S->note_t > 0){
+        rect_fill(vx, vy + vh2 - 22, vw2, 22, COL(10, 12, 10));
+        draw_text_center(vx + vw2/2, vy + vh2 - 15, S->note, 1, COL(220, 255, 220));
+    }
+#undef CRX
+#undef CRY
+#undef CRS
+}
+
 static void bw_render_modes(int pi){
     BwSim *S = &BWS[pi];
     Buddy *b=&G.bud[pi];
@@ -14606,6 +15004,7 @@ static void bw_render_modes(int pi){
     if (b->bw_mode==3){ plat_render(pi); return; }
     if (b->bw_mode==4){ craft_render(pi); return; }
     if (b->bw_mode==5){ tank_render(pi); return; }
+    if (b->bw_mode==6){ cas_render(pi); return; }
     u32 seed=(u32)b->bw_seed;
     G.camx=b->x; G.camy=b->y;
     // the view: full screen solo, or this player's split half in co-op
@@ -15289,6 +15688,15 @@ __attribute__((export_name("dbg_bwent2"))) void exp_dbg_bwent2(void){ int id = G
 __attribute__((export_name("dbg_inarcade"))) int exp_dbg_inarcade(void){ int id = G.my_id>=0? G.my_id : 0; return G.p[id].in_arcade; }
 __attribute__((export_name("dbg_arcade"))) void exp_dbg_arcade(void){ int id = G.my_id>=0? G.my_id : 0; if (!G.p[id].in_mall) mall_enter(id); arcade_enter(id); }
 __attribute__((export_name("dbg_cabinet"))) int exp_dbg_cabinet(void){ int id = G.my_id>=0? G.my_id : 0; return cabinet_at(&G.p[id]); }
+__attribute__((export_name("dbg_casroom"))) int exp_dbg_casroom(void){ int id = G.my_id>=0? G.my_id : 0; return BWS[id].cas_room; }
+__attribute__((export_name("dbg_casscore"))) int exp_dbg_casscore(void){ int id = G.my_id>=0? G.my_id : 0; return BWS[id].cas_score; }
+__attribute__((export_name("dbg_castreasures"))) int exp_dbg_castreasures(void){ int id = G.my_id>=0? G.my_id : 0; return BWS[id].cas_treasures; }
+__attribute__((export_name("dbg_casitems"))) int exp_dbg_casitems(void){ int id = G.my_id>=0? G.my_id : 0; return (BWS[id].cas_sword? 1 : 0) + (BWS[id].cas_key? 2 : 0) + (BWS[id].cas_won? 4 : 0); }
+__attribute__((export_name("dbg_casgive"))) int exp_dbg_casgive(int what){ int id = G.my_id>=0? G.my_id : 0; if (what==1) BWS[id].cas_sword = 1; else if (what==2) BWS[id].cas_key = 1; return BWS[id].cas_sword + BWS[id].cas_key*2; }
+__attribute__((export_name("dbg_casmon"))) int exp_dbg_casmon(void){ int id = G.my_id>=0? G.my_id : 0; int n = 0; for (int i=0;i<15;i++) if (BWS[id].cas_malive[i] && BWS[id].cas_mroom[i]==BWS[id].cas_room) n++; return n; }
+__attribute__((export_name("dbg_casbest"))) int exp_dbg_casbest(void){ int id = G.my_id>=0? G.my_id : 0; return G.bud[id].cas_best; }
+__attribute__((export_name("dbg_casx"))) int exp_dbg_casx(void){ int id = G.my_id>=0? G.my_id : 0; return (int)(G.bud[id].x - 20000.0f); }
+__attribute__((export_name("dbg_casy"))) int exp_dbg_casy(void){ int id = G.my_id>=0? G.my_id : 0; return (int)(G.bud[id].y - 20000.0f); }
 __attribute__((export_name("dbg_arcgate"))) int exp_dbg_arcgate(void){ int id = G.my_id>=0? G.my_id : 0; return arcgate[id]; }
 __attribute__((export_name("dbg_jet"))) int exp_dbg_jet(void){ int id = G.my_id>=0? G.my_id : 0; return G.p[id].bean_jet>0? 1 : (G.p[id].jet_fall>0? 2 : 0); }
 __attribute__((export_name("dbg_givebean"))) void exp_dbg_givebean(void){ int id = G.my_id>=0? G.my_id : 0; G.p[id].beans++; }
