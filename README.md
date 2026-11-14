@@ -82,7 +82,8 @@ MIDI (winmm) in the exe, a software synth on Linux/Mac.
 - `HANDOVER.md` — the operator's guide: architecture, release
   checklists, channel status, house rules.
 
-Play it: https://dmsweetser.itch.io/the-survival-game
+Play it in the browser: https://dmsweetser.github.io/TheSurvivalGame/
+Also on itch: https://dmsweetser.itch.io/the-survival-game
 
 The Whales Only vanity items are verified with signed codes; the
 verification (public) key ships in the game, and the signing key lives
