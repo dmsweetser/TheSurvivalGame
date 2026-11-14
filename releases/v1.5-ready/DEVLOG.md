@@ -9,7 +9,7 @@ CASTLE — a tribute to *Castle Adventure*, the 1984 DOS classic, built for a ce
 Also in 1.5:
 
 - The title screen's header got trimmed down, so the whole menu breathes and the records at the bottom aren't crowded any more.
-- Heavy hats have a floor now. However tall your carcass tower gets, your crawl never drops below a dignified trudge — rather slow, never *extra painfully slow*. And yes, the WALK OF FAME still rains: fame doesn't care how fast you're going.
+- Heavy hats have a floor now. However tall your carcass tower gets, your crawl never drops below a dignified trudge — rather slow, never *extra painfully slow*. And the WALK OF FAME is earned properly now: it only rains when your hat has you pinned at that minimum crawl. Just slow doesn't cut it — you have to be at the bottom.
 - The Android icon's spider got a thicker frown. He was always grumpy; now you can tell from across the home screen.
 
 Tested before it ships: castletest 25/25 (the full escape, key and sword and all), speedfloor 5/5, woftest 12/12, arcadetest 24/24, mallfix 28/28.

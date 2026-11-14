@@ -1104,29 +1104,29 @@ static const char *hat_tier_name(int n, float kg){
     if (kg<160.0f)   return "CROWN OF CARCASSES";
     return "THE LEGACY SYSTEM";
 }
-static float player_speed(Player *p){
-    // Espresso Legs. Nov 9 rebalance (Daniel): "cap the unburdened
-    // speed upgrade max so I'm not zooming everywhere — it should
-    // continue to have a benefit burdened, and make the burdened
-    // benefit more substantial per level." So: the bare-speed bonus
-    // now CAPS at +40% (207 px/s — where a level-10 build already
-    // cruises) no matter how Endless the levels get, and the
-    // upgrade's endless value moved into the load curve instead:
-    // each level raises by 50% (was 35%) the weight the curve
-    // shrugs off, so every level claws back a bigger share of the
-    // hat's penalty than it used to, forever. Level 0 is untouched:
-    // same base, same curve as always.
+// Espresso Legs. Nov 9 rebalance (Daniel): "cap the unburdened
+// speed upgrade max so I'm not zooming everywhere — it should
+// continue to have a benefit burdened, and make the burdened
+// benefit more substantial per level." So: the bare-speed bonus
+// now CAPS at +40% (207 px/s — where a level-10 build already
+// cruises) no matter how Endless the levels get, and the
+// upgrade's endless value moved into the load curve instead:
+// each level raises by 50% (was 35%) the weight the curve
+// shrugs off, so every level claws back a bigger share of the
+// hat's penalty than it used to, forever. Level 0 is untouched:
+// same base, same curve as always.
+static float speed_curve(Player *p){   // the raw burden curve, pre-floor
     float bmul = 1.0f + 0.04f*p->upg[4]; if (bmul>1.40f) bmul=1.40f;
-    float base = 148.0f * bmul;
     float cap = 55.0f * (1.0f + 0.50f*p->upg[4]);
-    float load = 1.0f/(1.0f + p->carried/cap);   // heavy hat = slow dev
-    float sp = base*load;
+    return 148.0f * bmul / (1.0f + p->carried/cap);   // heavy hat = slow dev
+}
+static float player_speed(Player *p){
+    float sp = speed_curve(p);
     // the floor (Daniel, Nov 14): however heavy the hat gets, the
     // crawl never drops below 40 px/s — rather slow, never extra
     // painfully slow. (The old curve sank toward ~28 under a full
-    // 240 hat and toward nothing beyond it.) Still well under the
-    // 64 px/s WALK OF FAME line, so the fame still rains. Sprint
-    // multiplies after the floor, so it still helps at the bottom.
+    // 240 hat and toward nothing beyond it.) Sprint multiplies
+    // after the floor, so it still helps at the bottom.
     if (sp < 40.0f) sp = 40.0f;
     if (p->cur_keys & K_SPRINT) sp *= 1.22f;
     return sp;
@@ -2628,10 +2628,16 @@ static void update_players(float dt){
                     spawn_particle(p->x + (float)rng_range(-8,8), p->y + (float)rng_range(0,9),
                                    COL(255,230,140), 26, 0.7f, 2); }
             }
-            if (p->in_mall && !p->in_arcade && sp < 64.0f){
+            if (p->in_mall && !p->in_arcade && speed_curve(p) <= 40.0f){
                 // WALK OF FAME (Daniel, Nov 14, 2026): crawling through
                 // the mall under a big hat is a parade, not a slog —
                 // confetti rains and the marquee flashes while you creep.
+                // Gate tightened later the same day at Daniel's word:
+                // ONLY at the minimum speed — the burden curve pinned
+                // to the 40 px/s floor (a ~150KG+ hat at level 0). A
+                // merely slow walk (curve between 40 and the old 64
+                // line) earns no parade. Sprinting while pinned still
+                // counts: the curve is what is pinned, not the stride.
                 p->wof = 0.3f;
                 wof_spark_t[i] -= dt*sp;
                 if (wof_spark_t[i]<=0){ wof_spark_t[i]=6;

@@ -1,6 +1,9 @@
-// WALK OF FAME (Nov 14, 2026): crawling through the Bug Mall under a
-// big hat triggers confetti + the flashing marquee; walking normally,
-// standing still, or crawling outside the mall does not.
+// WALK OF FAME (Nov 14, 2026): crawling through the Bug Mall AT THE
+// MINIMUM SPEED (burden curve pinned to the 40 px/s floor) triggers
+// confetti + the flashing marquee. A merely slow walk (curve between
+// 40 and the old 64 line), walking normally, standing still, or
+// crawling outside the mall does not — Daniel tightened the gate to
+// "only at the minimum speed" the same day.
 const { chromium } = require('playwright-core');
 const EXE = process.env.HOME + '/.cache/ms-playwright/chromium-1248/chrome-linux64/chrome';
 const URL = 'http://localhost:8903/the-survival-game.html';
@@ -26,10 +29,12 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   if ((await call('dbg_state')) !== 1) await key('Enter', 400);
   ok((await call('dbg_state')) === 1, 'run started');
 
-  // heavy hat: 14 feeds x 10 kg = 140 kg -> crawl speed ~42 px/s
+  // heavy hat: 14 feeds x 10 kg = 140 kg -> curve ~41.7 px/s: a real
+  // crawl, but NOT pinned to the 40 floor yet
   for (let i = 0; i < 14; i++) await call('dbg_feed');
   ok((await call('dbg_carried')) >= 130, 'hat is heavy', await call('dbg_carried'));
-  ok((await call('dbg_speed')) < 640, 'speed is a crawl', await call('dbg_speed'));
+  const sp140 = await call('dbg_speed');
+  ok(sp140 > 400 && sp140 < 640, 'speed is a crawl above the floor', sp140);
 
   // into the mall
   await call('dbg_tp', 0, 80);
@@ -37,12 +42,22 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   await key('KeyE', 300);
   ok((await call('dbg_mall')) === 1, 'entered the mall');
 
-  // strut across the open mid-mall floor: the parade should start
+  // NEW GATE: merely slow in the mall earns NO parade any more
   await call('dbg_tp', -60, -5980);
   await sleep(200);
   await page.keyboard.down('ArrowRight');
   await sleep(900);
-  ok((await call('dbg_wof')) === 1, 'WALK OF FAME active while crawling in the mall');
+  ok((await call('dbg_wof')) === 0, 'no parade above the minimum speed');
+  await page.keyboard.up('ArrowRight');
+
+  // pile on to 200 kg: the curve (~31.9) pins to the 40 floor
+  for (let i = 0; i < 6; i++) await call('dbg_feed');
+  ok((await call('dbg_speed')) === 400, 'speed pinned at the 40 floor', await call('dbg_speed'));
+
+  // strut across the open mid-mall floor: NOW the parade starts
+  await page.keyboard.down('ArrowRight');
+  await sleep(900);
+  ok((await call('dbg_wof')) === 1, 'WALK OF FAME active at the minimum speed in the mall');
   const cv = await page.$('canvas');
   await cv.screenshot({ path: __dirname + '/wof-on.png' });
   await sleep(400);
