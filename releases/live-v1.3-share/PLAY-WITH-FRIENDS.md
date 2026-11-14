@@ -104,7 +104,7 @@ on, then START or CONTINUE as usual:
 ## Just you?
 
 - Run the app and press START — solo works exactly the same way.
-- Or play the browser version at https://dmsweetser.itch.io/the-survival-game
+- Or play the browser version at https://dmsweetser.github.io/TheSurvivalGame/
   (single player in the browser; hosting needs the app above).
 - On Android: install `TheSurvivalGame.apk` (you may need to allow
   installs from your browser/files app). It's the full game, single

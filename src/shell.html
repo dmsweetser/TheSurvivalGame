@@ -421,7 +421,7 @@ escbtn.addEventListener('click', ()=>{ audio_init(); if (EX) EX.pulse_key(42); }
 if (window.matchMedia && matchMedia('(pointer: coarse)').matches) escbtn.style.display = 'block';
 
 // ---------- share your score (game over) ----------
-const ITCH_URL = 'https://dmsweetser.itch.io/the-survival-game';
+const GAME_URL = 'https://dmsweetser.github.io/TheSurvivalGame/';
 function readShareInfo(){
   const fallback = { name: 'DEV', hat: 0, kills: 0, secs: 0, zen: 0 };
   if (!EX || !EX.share_info || !MEM) return fallback;
@@ -480,7 +480,7 @@ function buildCard(){
     g.fillStyle = '#8b93a8'; g.font = '32px Verdana, sans-serif';
     g.fillText('PLAY IT FREE:', 50, 556);
     g.fillStyle = '#ffd640'; g.font = '700 42px Verdana, sans-serif';
-    g.fillText('dmsweetser.itch.io/the-survival-game', 48, 602);
+    g.fillText('dmsweetser.github.io/TheSurvivalGame', 48, 602);
     c.toBlob((b) => resolve(b), 'image/png');
   });
 }
@@ -499,7 +499,7 @@ async function saveCard(btn){
   const blob = await buildCard();
   if (!blob) return;
   if (window.AndroidShare) { // WebView can't download blobs: share instead
-    window.AndroidShare.share(shareText(readShareInfo()) + ' ' + ITCH_URL, await blobToB64(blob));
+    window.AndroidShare.share(shareText(readShareInfo()) + ' ' + GAME_URL, await blobToB64(blob));
     return;
   }
   const a = document.createElement('a');
@@ -509,7 +509,7 @@ async function saveCard(btn){
   if (btn) flashBtn(btn, 'SAVED!');
 }
 async function copyShareText(btn){
-  const t = shareText(readShareInfo()) + ' ' + ITCH_URL;
+  const t = shareText(readShareInfo()) + ' ' + GAME_URL;
   try { await navigator.clipboard.writeText(t); }
   catch (e) {
     const ta = document.createElement('textarea');
@@ -524,20 +524,20 @@ async function doShare(btn){
   const text = shareText(i);
   if (window.AndroidShare) {
     const blob = await buildCard();
-    if (blob) { window.AndroidShare.share(text + ' ' + ITCH_URL, await blobToB64(blob)); return; }
+    if (blob) { window.AndroidShare.share(text + ' ' + GAME_URL, await blobToB64(blob)); return; }
   }
   try {
     const blob = await buildCard();
     if (blob && navigator.canShare) {
       const file = new File([blob], 'survival-game-score.png', { type: 'image/png' });
       if (navigator.canShare({ files: [file] })) {
-        await navigator.share({ files: [file], title: 'THE SURVIVAL GAME', text: text, url: ITCH_URL });
+        await navigator.share({ files: [file], title: 'THE SURVIVAL GAME', text: text, url: GAME_URL });
         return;
       }
     }
   } catch (e) { if (e && e.name === 'AbortError') return; }
   if (navigator.share) {
-    try { await navigator.share({ title: 'THE SURVIVAL GAME', text: text, url: ITCH_URL }); return; }
+    try { await navigator.share({ title: 'THE SURVIVAL GAME', text: text, url: GAME_URL }); return; }
     catch (e) { if (e && e.name === 'AbortError') return; }
   }
   await saveCard(null);

@@ -76,14 +76,13 @@ MIDI (winmm) in the exe, a software synth on Linux/Mac.
 - `android/` — the Android wrapper (APK + Play AAB packaging).
 - `releases/v1.4-ready/` — the current finished builds and their
   devlog (Tank Rescue rework, the WALK OF FAME, and the co-op menu
-  fix); `releases/play-live-v1.3/` is the currently-live itch pack.
+  fix); `releases/live-v1.3-share/` is the older v1.3 share pack, kept for history.
 - `packets/` — Google Play and Steam store packets, plus the Whales
   Only Stripe product/payment-link IDs (public identifiers only).
 - `HANDOVER.md` — the operator's guide: architecture, release
   checklists, channel status, house rules.
 
-Play it in the browser: https://dmsweetser.github.io/TheSurvivalGame/
-Also on itch: https://dmsweetser.itch.io/the-survival-game
+Play it in the browser (downloads for Windows/Linux/Mac/Android are on the same page): https://dmsweetser.github.io/TheSurvivalGame/
 
 The Whales Only vanity items are verified with signed codes; the
 verification (public) key ships in the game, and the signing key lives
