@@ -1,0 +1,13 @@
+"AppBuild"
+{
+	"AppID" "YOUR_APP_ID"
+	"Desc" "The Survival Game - initial release"
+	"BuildOutput" "output"
+	"ContentRoot" "content"
+	"SetLive" ""
+
+	"Depots"
+	{
+		"YOUR_DEPOT_ID" "depot_build_TEMPLATE.vdf"
+	}
+}

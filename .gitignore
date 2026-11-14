@@ -1,0 +1,17 @@
+# keys and signing material — never commit
+*.keystore
+*.jks
+*keys*.json
+.env
+
+# build intermediates and outputs
+src/*.wasm
+src/webbuild.h
+android/build/
+android/build-aab/
+android/aab-logs/
+__pycache__/
+*.log
+
+# test dependencies
+tests/node_modules/

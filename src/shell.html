@@ -1,0 +1,656 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>THE SURVIVAL GAME</title>
+<style>
+  html,body{margin:0;padding:0;background:#14121f;height:100%;overflow:hidden;
+    font-family:Verdana,system-ui,sans-serif;color:#dfe6f2;}
+  #wrap{display:flex;flex-direction:column;align-items:center;justify-content:center;height:100%;}
+  canvas{background:#000;image-rendering:auto;
+    border:3px solid #3a3654;border-radius:8px;touch-action:none;}
+  #err{color:#ff8080;font-size:13px;max-width:80ch;text-align:center;}
+  #load{margin-top:10px;font-size:14px;letter-spacing:2px;color:#ffd640;text-align:center;animation:loadpulse 1.1s ease-in-out infinite;}
+  @keyframes loadpulse{0%,100%{opacity:.45;letter-spacing:2px}50%{opacity:1;letter-spacing:4px}}
+  #escbtn{display:none;position:fixed;top:10px;right:10px;z-index:10;width:52px;height:52px;
+    border-radius:50%;border:2px solid #565078;background:rgba(24,22,38,.82);color:#dfe6f2;
+    font-size:22px;line-height:1;cursor:pointer;-webkit-tap-highlight-color:transparent;}
+  #sharebar{display:none;gap:10px;margin-top:10px;flex-wrap:wrap;justify-content:center;}
+  #sharebar button{font-family:Verdana,system-ui,sans-serif;font-size:15px;font-weight:bold;
+    padding:11px 18px;border-radius:10px;border:2px solid #565078;cursor:pointer;
+    background:#ffd640;color:#241f10;}
+  #sharebar button.alt{background:#2a2742;color:#dfe6f2;}
+  #kb{position:fixed;left:2px;bottom:2px;width:12px;height:12px;opacity:.02;border:0;padding:0;
+    font-size:16px;background:transparent;color:transparent;pointer-events:none;z-index:1;}
+</style>
+</head>
+<body>
+<div id="wrap">
+  <canvas id="cv" width="1280" height="720" tabindex="0"></canvas>
+  <input id="kb" type="text" autocomplete="off" autocorrect="off" autocapitalize="none" spellcheck="false" aria-hidden="true">
+  <button id="escbtn" aria-label="Back or pause">&#10005;</button>
+  <div id="sharebar">
+    <button id="sharebtn" type="button">SHARE YOUR SCORE</button>
+    <button id="savecard" type="button" class="alt">SAVE THE PHOTO</button>
+    <button id="copytxt" type="button" class="alt">COPY THE TEXT</button>
+  </div>
+  <div id="load">LOADING THE SURVIVAL GAME...</div>
+  <div id="err"></div>
+</div>
+<script>
+"use strict";
+// ---------- wasm bootstrap (payload injected by build.py) ----------
+const WASM64 = "__WASM64__";
+function b64bytes(s){ const bin = atob(s); const u = new Uint8Array(bin.length);
+  for (let i=0;i<bin.length;i++) u[i]=bin.charCodeAt(i); return u; }
+let MEM=null, EX=null;
+const cv = document.getElementById('cv');
+const KB = document.getElementById('kb');
+const ctx = cv.getContext('2d');
+const off = document.createElement('canvas'); off.width=1280; off.height=720;
+const octx = off.getContext('2d');
+const img = octx.createImageData(1280,720);
+
+// ---------- audio: tiny WebAudio chiptune voices ----------
+let AC=null, master=null;
+function audio_init(){
+  if (AC) return;
+  try{
+    AC = new (window.AudioContext||window.webkitAudioContext)();
+    master = AC.createGain(); master.gain.value = 0.5; master.connect(AC.destination);
+  }catch(e){ AC=null; }
+}
+const NOTE_OFFS = [];
+function js_note(ch, note, vel, instr){
+  if (!AC || vel<=0) return;
+  const t = AC.currentTime;
+  const f = 440*Math.pow(2,(note-69)/12);
+  const g = AC.createGain(); g.connect(master);
+  const v = Math.min(1, vel/110);
+  let dur = 0.16;
+  if (instr===3){ // noise
+    const len = Math.max(1,(AC.sampleRate*0.12)|0);
+    const buf = AC.createBuffer(1, len, AC.sampleRate);
+    const d = buf.getChannelData(0);
+    for (let i=0;i<len;i++) d[i]=(Math.random()*2-1)*(1-i/len);
+    const src = AC.createBufferSource(); src.buffer=buf;
+    const flt = AC.createBiquadFilter(); flt.type='highpass'; flt.frequency.value=900;
+    src.connect(flt); flt.connect(g);
+    g.gain.setValueAtTime(v*0.7, t); g.gain.exponentialRampToValueAtTime(0.001, t+0.13);
+    src.start(t); return;
+  }
+  if (instr===4){ // WHALES ONLY: KAZOO MODE — twin detuned saws + vibrato through a lowpass
+    const o1 = AC.createOscillator(), o2 = AC.createOscillator();
+    o1.type = 'sawtooth'; o2.type = 'sawtooth';
+    o1.frequency.value = f; o2.frequency.value = f*1.004;
+    const lfo = AC.createOscillator(), lg = AC.createGain();
+    lfo.frequency.value = 5.5; lg.gain.value = f*0.012;
+    lfo.connect(lg); lg.connect(o1.frequency); lg.connect(o2.frequency);
+    const flt = AC.createBiquadFilter(); flt.type = 'lowpass'; flt.frequency.value = 2400;
+    if (ch===1) dur = 0.24;
+    g.gain.setValueAtTime(v*(ch===0?0.26:0.32), t);
+    g.gain.exponentialRampToValueAtTime(0.001, t+dur);
+    o1.connect(flt); o2.connect(flt); flt.connect(g);
+    o1.start(t); o2.start(t); lfo.start(t);
+    o1.stop(t+dur+0.02); o2.stop(t+dur+0.02); lfo.stop(t+dur+0.02);
+    return;
+  }
+  const o = AC.createOscillator();
+  o.type = instr===1? 'triangle' : 'square';
+  o.frequency.value = f;
+  if (ch===1) dur=0.24;
+  g.gain.setValueAtTime(v*(ch===0?0.30:0.36), t);
+  g.gain.exponentialRampToValueAtTime(0.001, t+dur);
+  o.connect(g); o.start(t); o.stop(t+dur+0.02);
+}
+
+// ---------- storage ----------
+function js_save(slot, ptr, len){
+  try{ localStorage.setItem(slot? 'tsg_save'+slot : 'tsg_save', new TextDecoder().decode(new Uint8Array(MEM.buffer, ptr, len))); }catch(e){}
+}
+function js_load(slot, ptr, cap){
+  try{
+    const s = localStorage.getItem(slot? 'tsg_save'+slot : 'tsg_save'); if (!s) return -1;
+    const u = new TextEncoder().encode(s);
+    const n = Math.min(u.length, cap);
+    new Uint8Array(MEM.buffer, ptr, n).set(u.subarray(0,n));
+    return n;
+  }catch(e){ return -1; }
+}
+
+// ---------- networking over the LAN relay (see server.js) ----------
+// Relay framing: client->relay raw; relay->host [srcId, ...pkt];
+// host->relay [destId|0xFF, ...pkt]; relay->client raw.
+// recv_q items are {data:Uint8Array, src:int} so src travels with its packet.
+let ws=null, ws_queue=[], recv_q=[], pending_src=0, is_host=false;
+function js_net_start(mode, addr_ptr){
+  const addr = addr_ptr? read_str(addr_ptr) : "";
+  try{ if (ws) { ws.close(); } }catch(e){}
+  recv_q=[]; ws_queue=[]; is_host = (mode===1);
+  let url;
+  if (mode===1){
+    const host = addr && addr.length>3 ? addr : location.host;
+    url = "ws://" + host + "/?role=host";
+  } else {
+    let a = addr;
+    if (!a) a = location.host;                       // served by a host: join it
+    else if (!a.includes(":")) a = a + ":" + (location.port||"8379");
+    url = "ws://" + a + "/?role=client";
+  }
+  try{
+    const sock = new WebSocket(url); ws = sock; sock.binaryType = "arraybuffer";
+    sock.onopen = ()=>{ for (const m of ws_queue) sock.send(m); ws_queue=[]; };
+    sock.onmessage = (ev)=>{
+      const u = new Uint8Array(ev.data);
+      if (is_host){ if (u.length>=1) recv_q.push({ data: u.subarray(1), src: u[0] }); }
+      else recv_q.push({ data: u, src: 0 });
+    };
+    sock.onclose = ()=>{ if (ws===sock) ws=null; };   // a stale socket must not clobber its replacement
+    return 0;
+  }catch(e){ return -1; }
+}
+function js_net_stop(){ try{ if (ws) ws.close(); }catch(e){} ws=null; recv_q=[]; }
+function js_net_send(ptr, len, dest){
+  if (!MEM) return;
+  const raw = new Uint8Array(MEM.buffer, ptr, len).slice();
+  let msg = raw;
+  if (is_host){ msg = new Uint8Array(len+1); msg[0] = dest<0? 0xFF : dest; msg.set(raw,1); }
+  if (ws && ws.readyState===1) ws.send(msg);
+  else if (ws) ws_queue.push(msg);
+}
+function js_net_recv(ptr, cap){
+  if (!recv_q.length) return 0;
+  const item = recv_q.shift();
+  pending_src = item.src;
+  const n = Math.min(item.data.length, cap);
+  new Uint8Array(MEM.buffer, ptr, n).set(item.data.subarray(0,n));
+  return n;
+}
+function js_net_src(){ return pending_src; }
+function read_str(ptr){
+  const u = new Uint8Array(MEM.buffer, ptr, 256);
+  let s=""; for (let i=0;i<256 && u[i];i++) s+=String.fromCharCode(u[i]);
+  return s;
+}
+
+// ---------- input: this shell reports PHYSICAL keys; the game core turns
+// them into actions through the player's bindings (Settings screen). -----
+// physical key ids (must match the C core): A-Z 0-25, digits 0-9 26-35,
+// UP 36 DOWN 37 LEFT 38 RIGHT 39 SPACE 40 ENTER 41 ESC 42 SHIFT 43 BKSP 44
+let rawLo = 0, rawHi = 0;
+function send_raw(){ if (EX) EX.set_raw(rawLo|0, rawHi|0); }
+function pk_set(pk, down){
+  if (pk < 32){ const b = 1<<pk; if (down) rawLo |= b; else rawLo &= ~b; }
+  else { const b = 1<<(pk-32); if (down) rawHi |= b; else rawHi &= ~b; }
+}
+function pk_from_event(e){
+  const c = e.code || "";
+  if (c.indexOf('Key')===0 && c.length===4) return c.charCodeAt(3)-65;
+  if (c.indexOf('Digit')===0 && c.length===6) return 26 + (c.charCodeAt(5)-48);
+  if (c.indexOf('Numpad')===0){
+    const rest = c.slice(6);
+    if (rest.length===1 && rest>='0' && rest<='9') return 26 + (rest.charCodeAt(0)-48);
+    if (rest==='Enter') return 41;
+    if (e.key==='ArrowUp') return 36; if (e.key==='ArrowDown') return 37;
+    if (e.key==='ArrowLeft') return 38; if (e.key==='ArrowRight') return 39;
+    return -1;
+  }
+  switch (c){
+    case 'ArrowUp': return 36; case 'ArrowDown': return 37;
+    case 'ArrowLeft': return 38; case 'ArrowRight': return 39;
+    case 'Space': return 40; case 'Enter': return 41; case 'Escape': return 42;
+    case 'ShiftLeft': case 'ShiftRight': return 43; case 'Backspace': return 44;
+  }
+  // fallback for environments that report no useful code (some emulator
+  // browsers): go by the key value alone
+  const k = e.key || "";
+  if (k.length===1){
+    const u = k.toUpperCase();
+    if (u>='A' && u<='Z') return u.charCodeAt(0)-65;
+    if (k>='0' && k<='9') return 26 + (k.charCodeAt(0)-48);
+    if (k===' ') return 40;
+  }
+  switch (k){
+    case 'ArrowUp': return 36; case 'ArrowDown': return 37;
+    case 'ArrowLeft': return 38; case 'ArrowRight': return 39;
+    case 'Enter': return 41; case 'Escape': case 'Esc': return 42;
+    case 'Shift': return 43; case 'Backspace': return 44;
+  }
+  return -1;
+}
+const pkDown = {}, pkTimers = {};
+addEventListener('keydown', (e)=>{
+  audio_init(); if (AC && AC.state==='suspended') AC.resume();
+  if (!EX) return;
+  // while the soft-keyboard field holds focus, it delivers printable
+  // characters and Backspace itself (through its input event below) —
+  // forwarding them here too would type everything twice. Menu keys
+  // (arrows, Enter, Escape) still flow through the normal path.
+  if (document.activeElement===KB && e.key && (e.key.length===1 || e.key==='Backspace')) return;
+  // printable characters are typed text: the menu's name field reads them
+  // when selected; gameplay ignores them entirely.
+  if (e.key && e.key.length===1 && e.code!=='Space') EX.evt_char(e.key.charCodeAt(0));
+  const pk = pk_from_event(e);
+  if (pk>=0){
+    // one edge per physical press: a press counts when the key was up —
+    // including "up but still inside the release latch" (fast re-tap)
+    const wasUp = !pkDown[pk] || !!pkTimers[pk];
+    if (pkTimers[pk]){ clearTimeout(pkTimers[pk]); pkTimers[pk] = 0; }
+    if (wasUp) EX.press(pk);
+    pkDown[pk] = true;
+    pk_set(pk, true); send_raw();
+    if (!e.ctrlKey && !e.metaKey) e.preventDefault();
+  }
+});
+// pasting an unlock code types it into the game, a few chars per frame
+// (the menu name field ignores anything outside its own mode)
+const TYPEQ = [];
+addEventListener('paste', (e)=>{
+  if (e.target===KB) return;   // a paste INTO the field: its input event delivers it (checking focus instead would swallow pastes aimed at the page while the field happens to be up)
+  let t = '';
+  try{ t = (e.clipboardData || window.clipboardData).getData('text') || ''; }catch(_){}
+  for (const ch of t) TYPEQ.push(ch.charCodeAt(0));
+  if (t) e.preventDefault();
+});
+// the soft keyboard's text field: the game raises it (through the
+// text_mode poll in the frame loop) whenever a menu field or the
+// unlock-code entry owns typing — most importantly on phones, where
+// there is no physical keyboard and nothing else would summon one.
+function kb_backspace(){
+  if (!EX) return;
+  EX.press(44);
+  if (pkTimers[44]){ clearTimeout(pkTimers[44]); pkTimers[44] = 0; }
+  pkDown[44] = true; pk_set(44, true); send_raw();
+  pkTimers[44] = setTimeout(()=>{ pk_set(44, false); pkDown[44] = false; pkTimers[44] = 0; send_raw(); }, 120);
+}
+let kbVal = '';
+let kbLive = 0;   // the text_mode() of the live keyboard session, 0 = none
+let BSQ = 0;      // backspaces owed to the game, pulsed one per frame
+// Deliver whatever the field holds now that the game has not seen
+// yet. This is a reconcile, not a prefix diff: phone keyboards do
+// not only append — autocorrect and IME commits REPLACE earlier
+// text, some WebViews reset the value behind the page's back, and
+// an 'input' event can be dropped mid-composition. The old
+// append-only diff desynced permanently the first time any of that
+// happened (keyboard up, keystrokes going nowhere — Daniel, Nov 9).
+// Common prefix stays, the divergent tail is backspaced out of the
+// game, and the new tail is typed in — so any state the field can
+// reach converges into the game. Runs on 'input' AND once a frame
+// while a field owns typing, so even a swallowed event heals.
+function kb_sync(){
+  if (!EX) return;
+  const v = KB.value;
+  if (v === kbVal) return;
+  let p = 0;
+  const m = Math.min(v.length, kbVal.length);
+  while (p < m && v.charCodeAt(p) === kbVal.charCodeAt(p)) p++;
+  // deletions queue up (BSQ): the game eats ONE backspace edge per
+  // frame, so a burst fired in a single tick would collapse into a
+  // single deletion and desync the tail. The frame loop pulses them
+  // out one per frame, ahead of any queued characters.
+  BSQ += kbVal.length - p;
+  // spaces never type: the desktop path never offered them, and a
+  // space inside a name would break the save summary's format
+  for (const ch of v.slice(p)){ const c = ch.charCodeAt(0); if (c>=33 && c<127) TYPEQ.push(c); }
+  kbVal = v;
+  if (kbVal.length > 400){ KB.value = kbVal.slice(-320); kbVal = KB.value; }
+}
+KB.addEventListener('input', kb_sync);
+addEventListener('keyup', (e)=>{
+  if (!EX) return;
+  const pk = pk_from_event(e);
+  if (pk>=0){
+    // latch the release ~120ms so a fast tap still registers as held on
+    // at least one game frame, even at low fps
+    if (pkTimers[pk]) clearTimeout(pkTimers[pk]);
+    pkTimers[pk] = setTimeout(()=>{ pk_set(pk, false); pkDown[pk] = false; pkTimers[pk] = 0; send_raw(); }, 120);
+    e.preventDefault();
+  }
+});
+// the game only hears keys while its frame has focus — grab it eagerly.
+// While a text field owns typing, touches steer focus TO the keyboard
+// input (also on pointerup/click: some browsers only raise the soft
+// keyboard for a focus() issued inside a real gesture handler). While
+// no field owns typing the input is disabled outright, so no tap can
+// ever summon the keyboard during play (Daniel, Nov 9).
+function kb_grab(){
+  try{
+    if (EX && EX.text_mode && EX.text_mode()){ KB.disabled = false; KB.focus(); }
+    else cv.focus();
+  }catch(_){}
+}
+addEventListener('pointerdown', kb_grab, true);
+addEventListener('pointerup', ()=>{ try{ if (EX && EX.text_mode && EX.text_mode() && document.activeElement!==KB) kb_grab(); }catch(_){} }, true);
+addEventListener('click', ()=>{ try{ if (EX && EX.text_mode && EX.text_mode() && document.activeElement!==KB) kb_grab(); }catch(_){} }, true);
+KB.disabled = true;   // inert until the game hands it a text field
+
+// ---------- gamepads: standard-mapping pads speak in game actions -----
+// action ids match the C core: UP0 DOWN1 LEFT2 RIGHT3 FIRE4 INTERACT5
+// WALL6 PAUSE7 SPRINT8 WPREV14 WNEXT15 ESC16 ENTER17 BEAN18
+// First connected pad drives player 1, the second drives player 2
+// (local co-op). The core is told how many pads exist so it can offer
+// the 2P option only when two controllers are really there.
+const padPrev = {}, padPrev2 = {};
+function pad_set(a, down){
+  if (!EX || padPrev[a] === down) return;
+  padPrev[a] = down;
+  EX.act(a, down?1:0);
+}
+function pad2_set(a, down){
+  if (!EX || !EX.act2 || padPrev2[a] === down) return;
+  padPrev2[a] = down;
+  EX.act2(a, down?1:0);
+}
+function apply_pad(gp, set){
+  const b = i => !!(gp.buttons[i] && gp.buttons[i].pressed);
+  const ax = i => gp.axes[i] || 0;
+  set(0, b(12) || ax(1) < -0.45);
+  set(1, b(13) || ax(1) > 0.45);
+  set(2, b(14) || ax(0) < -0.45);
+  set(3, b(15) || ax(0) > 0.45);
+  set(4, b(0) || b(7));        // A / RT: fire
+  set(5, b(1));                // B: interact
+  set(6, b(2));                // X: wall
+  set(7, b(9));                // Start: pause
+  set(16, b(8));               // Back: esc / back
+  set(8, b(6) || b(10));       // LT / stick click: sprint
+  set(14, b(4));               // LB: previous weapon
+  set(15, b(5));               // RB: next weapon
+  set(18, b(3));               // Y: the Backfire Bean
+}
+function clear_pad(prev, set){ for (const a in prev) if (prev[a]) set(+a, false); }
+let lastPadCount = -1;
+function poll_pad(){
+  if (!EX || !navigator.getGamepads) return;
+  const pads = [];
+  for (const g of navigator.getGamepads()) if (g && g.connected) pads.push(g);
+  if (EX.pads && pads.length !== lastPadCount){ lastPadCount = pads.length; EX.pads(pads.length); }
+  // while gamepads are plugged in, the line under the game speaks gamepad
+  if (pads[0]) apply_pad(pads[0], pad_set); else clear_pad(padPrev, pad_set);
+  if (pads[1]) apply_pad(pads[1], pad2_set); else clear_pad(padPrev2, pad2_set);
+}
+// ---------- display sizing: letterbox the 640x360 frame into the window.
+// In the Android app (#apk) leave a small margin around the edges; the
+// hint line under the canvas counts against the height when it's shown.
+const APK = location.hash.indexOf('apk') >= 0;
+function fit(){
+  const hint = document.getElementById('hint');
+  if (APK && hint) hint.style.display = 'none';
+  let ah = window.innerHeight;
+  if (hint && !APK && hint.offsetParent !== null) ah -= hint.offsetHeight + 16;
+  let s = Math.min(window.innerWidth / 640, ah / 360);
+  if (APK) s *= 0.94;
+  if (!(s > 0)) s = 1;
+  cv.style.width = Math.floor(640 * s) + 'px';
+  cv.style.height = Math.floor(360 * s) + 'px';
+}
+window.addEventListener('resize', fit);
+window.addEventListener('orientationchange', ()=> setTimeout(fit, 60));
+fit();
+if (window.matchMedia && matchMedia('(pointer: coarse)').matches){
+  const hint = document.getElementById('hint');
+  if (hint) hint.textContent = 'THE SURVIVAL GAME — drag to move + shoot, tap to select + buy. At the Bug Bounty store, tap to enter, tap a row to buy. Co-op: a friend hosts from the app — you join from this browser.';
+}
+
+// ---------- touch (mobile): every finger is forwarded to the game core,
+// which owns both control schemes (drag, and the virtual d-pad) ----------
+const escbtn = document.getElementById('escbtn');
+function fb_pos(t){
+  const r = cv.getBoundingClientRect();
+  return [ Math.round((t.clientX - r.left) * 640 / r.width),
+           Math.round((t.clientY - r.top) * 360 / r.height) ];
+}
+function send_touch(e, phase){
+  if (!EX || !EX.touch_point) return;
+  for (const t of e.changedTouches){
+    const p = fb_pos(t);
+    EX.touch_point(t.identifier, p[0], p[1], phase);
+  }
+}
+cv.addEventListener('touchstart', (e)=>{
+  audio_init(); if (AC && AC.state==='suspended') AC.resume();
+  escbtn.style.display = 'block';
+  send_touch(e, 0);
+  e.preventDefault();
+}, { passive: false });
+cv.addEventListener('touchmove', (e)=>{ send_touch(e, 1); e.preventDefault(); }, { passive: false });
+cv.addEventListener('touchend', (e)=>{ send_touch(e, 2); e.preventDefault(); }, { passive: false });
+cv.addEventListener('touchcancel', (e)=>{ send_touch(e, 2); e.preventDefault(); }, { passive: false });
+escbtn.addEventListener('click', ()=>{ audio_init(); if (EX) EX.pulse_key(42); });
+if (window.matchMedia && matchMedia('(pointer: coarse)').matches) escbtn.style.display = 'block';
+
+// ---------- share your score (game over) ----------
+const ITCH_URL = 'https://dmsweetser.itch.io/the-survival-game';
+function readShareInfo(){
+  const fallback = { name: 'DEV', hat: 0, kills: 0, secs: 0, zen: 0 };
+  if (!EX || !EX.share_info || !MEM) return fallback;
+  try {
+    const ptr = EX.share_info();
+    const bytes = new Uint8Array(MEM.buffer, ptr, 160);
+    let s = '';
+    for (let i = 0; i < bytes.length && bytes[i]; i++) s += String.fromCharCode(bytes[i]);
+    const p = s.split('|');
+    if (p.length < 5) return fallback;
+    return { name: p[0] || 'DEV', hat: +p[1] || 0, kills: +p[2] || 0, secs: +p[3] || 0, zen: +p[4] || 0 };
+  } catch (e) { return fallback; }
+}
+function shareText(i){
+  return 'I squashed ' + i.kills + ' bugs and wore a ' + i.hat + ' KG carcass hat in THE SURVIVAL GAME' +
+    (i.zen ? ' (zen mode — giant, slow bugs)' : '') + '. Play it free:';
+}
+function buildCard(){
+  return new Promise((resolve) => {
+    const i = readShareInfo();
+    const c = document.createElement('canvas'); c.width = 1200; c.height = 630;
+    const g = c.getContext('2d');
+    g.imageSmoothingEnabled = false;
+    try { g.filter = 'blur(5px) brightness(0.85)'; } catch (e) {}
+    g.drawImage(off, -8, -30, 1216, 691);                   // last frame, blurred so the card text owns the card
+    try { g.filter = 'none'; } catch (e) {}
+    g.imageSmoothingEnabled = true;
+    const grad = g.createLinearGradient(0, 0, 1200, 0);
+    grad.addColorStop(0, 'rgba(10,8,22,0.90)'); grad.addColorStop(0.72, 'rgba(10,8,22,0.72)'); grad.addColorStop(1, 'rgba(10,8,22,0.45)');
+    g.fillStyle = grad; g.fillRect(0, 0, 1200, 630);
+    g.fillStyle = '#14121f'; g.fillRect(0, 500, 1200, 130);
+    // you, as you fell: the game-over screen's portrait (the DEV wearing
+    // the hat he died in), cropped sharp out of the last frame — logical
+    // x 108..232, y 30..286 on the 640x360 stage = x2 on the canvas
+    g.fillStyle = '#1b1830'; g.fillRect(946, 58, 250, 514);
+    try { g.drawImage(off, 208, 60, 232, 512, 958, 66, 226, 498); } catch (e) {}
+    g.strokeStyle = '#ffd640'; g.lineWidth = 3; g.strokeRect(946, 58, 250, 514);
+    g.shadowColor = 'rgba(0,0,0,0.8)'; g.shadowBlur = 6; g.shadowOffsetY = 3;
+    g.fillStyle = '#ffd640'; g.font = '700 68px Verdana, sans-serif';
+    g.fillText('THE SURVIVAL GAME', 48, 112);
+    g.fillStyle = '#a0e6ff'; g.font = '30px Verdana, sans-serif';
+    g.fillText('SQUASH BUGS. WEAR THE EVIDENCE.', 50, 158);
+    g.fillStyle = '#ffffff'; g.font = '700 54px Verdana, sans-serif';
+    let line = i.name + ' wore a ' + i.hat + ' KG carcass hat';
+    while (g.measureText(line).width > 1100 && g.font.indexOf('54px') >= 0) g.font = '700 44px Verdana, sans-serif';
+    g.fillText(line, 48, 276);
+    const mm = Math.floor(i.secs / 60), ss = ('0' + (i.secs % 60)).slice(-2);
+    g.fillStyle = '#dfe6f2'; g.font = '44px Verdana, sans-serif';
+    g.fillText('and squashed ' + i.kills + ' bugs in ' + mm + ':' + ss, 50, 344);
+    if (i.zen){
+      g.fillStyle = '#3a3654'; g.fillRect(48, 378, 452, 52);
+      g.fillStyle = '#ffd640'; g.font = '700 28px Verdana, sans-serif';
+      g.fillText('ZEN MODE - GIANT, SLOW BUGS', 64, 413);
+    }
+    g.shadowBlur = 0; g.shadowOffsetY = 0;
+    g.fillStyle = '#8b93a8'; g.font = '32px Verdana, sans-serif';
+    g.fillText('PLAY IT FREE:', 50, 556);
+    g.fillStyle = '#ffd640'; g.font = '700 42px Verdana, sans-serif';
+    g.fillText('dmsweetser.itch.io/the-survival-game', 48, 602);
+    c.toBlob((b) => resolve(b), 'image/png');
+  });
+}
+function blobToB64(blob){
+  return new Promise((resolve) => {
+    const r = new FileReader();
+    r.onload = () => resolve(String(r.result).split(',')[1] || '');
+    r.readAsDataURL(blob);
+  });
+}
+function flashBtn(btn, msg){
+  const old = btn.textContent; btn.textContent = msg;
+  setTimeout(() => { btn.textContent = old; }, 1800);
+}
+async function saveCard(btn){
+  const blob = await buildCard();
+  if (!blob) return;
+  if (window.AndroidShare) { // WebView can't download blobs: share instead
+    window.AndroidShare.share(shareText(readShareInfo()) + ' ' + ITCH_URL, await blobToB64(blob));
+    return;
+  }
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob); a.download = 'survival-game-score.png';
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 4000);
+  if (btn) flashBtn(btn, 'SAVED!');
+}
+async function copyShareText(btn){
+  const t = shareText(readShareInfo()) + ' ' + ITCH_URL;
+  try { await navigator.clipboard.writeText(t); }
+  catch (e) {
+    const ta = document.createElement('textarea');
+    ta.value = t; document.body.appendChild(ta); ta.select();
+    try { document.execCommand('copy'); } catch (_) {}
+    ta.remove();
+  }
+  if (btn) flashBtn(btn, 'COPIED!');
+}
+async function doShare(btn){
+  const i = readShareInfo();
+  const text = shareText(i);
+  if (window.AndroidShare) {
+    const blob = await buildCard();
+    if (blob) { window.AndroidShare.share(text + ' ' + ITCH_URL, await blobToB64(blob)); return; }
+  }
+  try {
+    const blob = await buildCard();
+    if (blob && navigator.canShare) {
+      const file = new File([blob], 'survival-game-score.png', { type: 'image/png' });
+      if (navigator.canShare({ files: [file] })) {
+        await navigator.share({ files: [file], title: 'THE SURVIVAL GAME', text: text, url: ITCH_URL });
+        return;
+      }
+    }
+  } catch (e) { if (e && e.name === 'AbortError') return; }
+  if (navigator.share) {
+    try { await navigator.share({ title: 'THE SURVIVAL GAME', text: text, url: ITCH_URL }); return; }
+    catch (e) { if (e && e.name === 'AbortError') return; }
+  }
+  await saveCard(null);
+  await copyShareText(null);
+  if (btn) flashBtn(btn, 'PHOTO SAVED + TEXT COPIED');
+}
+document.getElementById('sharebtn').addEventListener('click', (e) => doShare(e.currentTarget));
+document.getElementById('savecard').addEventListener('click', (e) => saveCard(e.currentTarget));
+document.getElementById('copytxt').addEventListener('click', (e) => copyShareText(e.currentTarget));
+
+// ---------- Whales Only: browser hand-off for unlock codes ----------
+// After paying, the payment page links back here with ?whale=<code>:
+// stash it (survives a reload), clean the URL, hand it to the game.
+let WHALE_PENDING = '';
+try{
+  const u = new URL(location.href);
+  const wc = u.searchParams.get('whale');
+  if (wc){ WHALE_PENDING = wc; try{ localStorage.setItem('tsg_whale_pending', wc); }catch(_){}
+           u.searchParams.delete('whale'); history.replaceState(null, '', u.toString()); }
+  else { try{ WHALE_PENDING = localStorage.getItem('tsg_whale_pending') || ''; }catch(_){} }
+}catch(_){}
+function js_open_url(ptr){
+  try{ window.open(read_str(ptr), '_blank'); }catch(_){}
+}
+function js_whale_poll(ptr, cap){
+  if (!WHALE_PENDING) return 0;
+  const s = WHALE_PENDING; WHALE_PENDING = '';
+  try{ localStorage.removeItem('tsg_whale_pending'); }catch(_){}
+  const b = new TextEncoder().encode(s);
+  const n = Math.min(b.length, cap-1);
+  const mem = new Uint8Array(MEM.buffer);
+  for (let i=0;i<n;i++) mem[ptr+i] = b[i];
+  mem[ptr+n] = 0;
+  return n;
+}
+
+// ---------- boot ----------
+async function boot(){
+  let bytes;
+  try{
+    const gz = b64bytes(WASM64);
+    const ds = new DecompressionStream('gzip');
+    bytes = new Uint8Array(await new Response(new Blob([gz]).stream().pipeThrough(ds)).arrayBuffer());
+  }catch(e){ document.getElementById('load').style.display='none'; document.getElementById('err').textContent = "Could not load the game payload: "+e; return; }
+  const env = {
+    js_now: ()=> performance.now()/1000,
+    js_note, js_save, js_load,
+    js_net_start, js_net_stop, js_net_send, js_net_recv, js_net_src,
+    js_open_url, js_whale_poll,
+  };
+  let inst;
+  try{ inst = await WebAssembly.instantiate(bytes, { env }); }
+  catch(e){ document.getElementById('load').style.display='none'; document.getElementById('err').textContent = "Could not start the game: "+e; return; }
+  EX = inst.instance.exports; MEM = EX.memory;
+  window.__TSG = EX;
+  // touch-first device (or the Android app)? tell the game to present its
+  // mobile UI: no key-binding screen, tap-based instructions.
+  if (EX.set_mobile && (APK || (window.matchMedia && matchMedia('(pointer: coarse)').matches))) EX.set_mobile(1);
+  fit();
+  // served by a native host's built-in server? then this page is a guest
+  // in that host's game — join it straight away, no menu, no choices.
+  if (window.TSG_HOSTED && EX.autostart) EX.autostart();
+  let firstFrame = true;
+  function loop(){
+    poll_pad();
+    // owed backspaces first (one edge per frame), then typed chars —
+    // the order the reconcile computed them in
+    if (BSQ>0){ BSQ--; kb_backspace(); }
+    else for (let i=0;i<12 && TYPEQ.length;i++) EX.evt_char(TYPEQ.shift());
+    // the soft keyboard is a SESSION, owned by the game's text field:
+    // when a field takes typing, start from a clean, enabled input so
+    // nothing stale can desync it; heal its value into the game every
+    // frame; when the field lets go, blur it, clear it and disable it
+    // so it can never be focused — or summon a keyboard — during play
+    // (Daniel, Nov 9: keyboard kept popping up all through the run).
+    if (EX.text_mode){
+      const tm = EX.text_mode();
+      if (tm && !kbLive){
+        kbLive = tm;
+        KB.disabled = false; KB.value = ''; kbVal = '';
+        try{ KB.focus({preventScroll:true}); }catch(_){ try{ KB.focus(); }catch(__){} }
+      } else if (!tm && kbLive){
+        kbLive = 0;
+        if (document.activeElement===KB) KB.blur();
+        KB.value = ''; kbVal = ''; KB.disabled = true;
+        BSQ = 0; TYPEQ.length = 0;   // nothing owed crosses sessions
+      }
+      if (kbLive){
+        if (document.activeElement!==KB){ try{ KB.focus({preventScroll:true}); }catch(_){ try{ KB.focus(); }catch(__){} } }
+        kb_sync();
+      }
+    }
+    try{ EX.frame(); }
+    catch(e){ document.getElementById('load').style.display='none'; document.getElementById('err').textContent = "The game hit a snag: "+e; return; }
+    if (firstFrame){ firstFrame = false; document.getElementById('load').style.display='none'; }
+    const fb = EX.fb();
+    img.data.set(new Uint8Array(MEM.buffer, fb, 1280*720*4));
+    octx.putImageData(img, 0, 0);
+    ctx.imageSmoothingEnabled = true;         // smooth upscale to display size
+    ctx.imageSmoothingQuality = 'high';
+    ctx.drawImage(off, 0, 0, 1280, 720);
+    // game over? show the share bar (its buttons live below the canvas)
+    if (EX.dbg_state){
+      const over = EX.dbg_state() === 3;
+      const bar = document.getElementById('sharebar');
+      if (bar && (bar.style.display === 'flex') !== over) bar.style.display = over ? 'flex' : 'none';
+    }
+    requestAnimationFrame(loop);
+  }
+  try{ cv.focus(); }catch(_){}
+  requestAnimationFrame(loop);
+}
+boot();
+</script>
+</body>
+</html>

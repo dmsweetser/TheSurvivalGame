@@ -1,0 +1,25 @@
+const { chromium } = require('playwright-core');
+const EXE = process.env.HOME + '/.cache/ms-playwright/chromium-1248/chrome-linux64/chrome';
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+(async () => {
+  const browser = await chromium.launch({ executablePath: EXE, args: ['--no-sandbox'] });
+  const page = await browser.newPage({ viewport: { width: 1000, height: 640 } });
+  const call = (fn, ...a) => page.evaluate(([f, x]) => window.__TSG[f](...x), [fn, a]);
+  const key = async (code, ms = 120, wait = 0) => { await page.keyboard.down(code); await sleep(ms); await page.keyboard.up(code); await sleep(wait); };
+  await page.goto('http://localhost:8903/the-survival-game.html');
+  await page.waitForFunction(() => window.__TSG && window.__TSG.dbg_state() === 0, null, { timeout: 20000 });
+  await page.evaluate(() => localStorage.clear());
+  await page.reload();
+  await page.waitForFunction(() => window.__TSG && window.__TSG.dbg_state() === 0, null, { timeout: 20000 });
+  console.log('menu track:', await call('dbg_track'));
+  await key('Space', 400);
+  if ((await call('dbg_state')) !== 1) await key('Enter', 400);
+  await sleep(600);
+  console.log('fresh run track (no override ever set):', await call('dbg_track'));
+  await call('dbg_setthreat', 80);
+  console.log('override 8.0 track:', await call('dbg_track'));
+  await call('dbg_setthreat', -1);
+  await sleep(300);
+  console.log('after clearing override, track:', await call('dbg_track'));
+  await browser.close();
+})().catch(e => { console.error('ERR', e.message); process.exit(1); });

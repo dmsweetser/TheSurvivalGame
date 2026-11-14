@@ -1,0 +1,143 @@
+{
+ "account": "acct_1RBc7LIyTocie9gt",
+ "livemode": true,
+ "products": {
+  "golden_carcass": {
+   "product_id": "prod_VYYOR88WwZpNp9",
+   "price_id": "price_1UXRHSIyTocie9gtRIJ0iC6O",
+   "name": "Whales Only: Golden Carcass",
+   "amount": 67,
+   "currency": "usd",
+   "payment_link_id": "plink_1UXdkvIyTocie9gtonyGmvH3",
+   "payment_link_url": "https://buy.stripe.com/bJebJ215lelo3QPe7OdUY01"
+  },
+  "enormous_glasses": {
+   "product_id": "prod_VYYOUC34bype8c",
+   "price_id": "price_1UXRHeIyTocie9gtYCob2o0g",
+   "name": "Whales Only: Comically Enormous-er Glasses",
+   "amount": 67,
+   "currency": "usd",
+   "payment_link_id": "plink_1UXdl1IyTocie9gtZHxgd1tP",
+   "payment_link_url": "https://buy.stripe.com/4gMbJ26pFfpsbjhaVCdUY02"
+  },
+  "royal_cape": {
+   "product_id": "prod_VYYOwrAjoizacK",
+   "price_id": "price_1UXRHgIyTocie9gt6hIVyGoV",
+   "name": "Whales Only: Royal Cape",
+   "amount": 67,
+   "currency": "usd",
+   "payment_link_id": "plink_1UXdl2IyTocie9gt4JrdM7Jq",
+   "payment_link_url": "https://buy.stripe.com/7sY6oIbJZ0uycnlbZGdUY03"
+  },
+  "sparkle_trail": {
+   "product_id": "prod_VYYOExEtBSpcOf",
+   "price_id": "price_1UXRHhIyTocie9gtvofeDxEL",
+   "name": "Whales Only: Sparkle Trail",
+   "amount": 67,
+   "currency": "usd",
+   "payment_link_id": "plink_1UXdl4IyTocie9gt4s9mfSZe",
+   "payment_link_url": "https://buy.stripe.com/eVqdRa29p5OSfzx8NudUY04"
+  },
+  "buddy_monocle": {
+   "product_id": "prod_VYYO2bBxoaFZf7",
+   "price_id": "price_1UXRHjIyTocie9gtakqTf81X",
+   "name": "Whales Only: The Forbidden Monocle",
+   "amount": 67,
+   "currency": "usd",
+   "payment_link_id": "plink_1UXdl5IyTocie9gt2rORLuj5",
+   "payment_link_url": "https://buy.stripe.com/fZufZi4hxfpsafdbZGdUY05"
+  },
+  "dramatic_rain": {
+   "product_id": "prod_VYYOi73gGB3kb5",
+   "price_id": "price_1UXRHlIyTocie9gtnwA1TtkC",
+   "name": "Whales Only: Dramatic Rain",
+   "amount": 67,
+   "currency": "usd",
+   "payment_link_id": "plink_1UXdl6IyTocie9gtDZ9QYKSe",
+   "payment_link_url": "https://buy.stripe.com/00wbJ2bJZfpsdrp1l2dUY06"
+  },
+  "whale_title": {
+   "product_id": "prod_VYYOBvQS85jcWP",
+   "price_id": "price_1UXRHnIyTocie9gtnwIy3fqO",
+   "name": "Whales Only: WHALE Title",
+   "amount": 67,
+   "currency": "usd",
+   "payment_link_id": "plink_1UXdl7IyTocie9gtMMGCxv0j",
+   "payment_link_url": "https://buy.stripe.com/00wfZiaFV0uygDB7JqdUY07"
+  },
+  "royal_buddy": {
+   "product_id": "prod_VYsS7r4PWySWf4",
+   "price_id": "price_1UXkhSIyTocie9gtYTuFYbLy",
+   "name": "Whales Only: Royal Buddy",
+   "amount": 67,
+   "currency": "usd",
+   "payment_link_id": "plink_1UXkhXIyTocie9gtxJ2vgggo",
+   "payment_link_url": "https://buy.stripe.com/14A14o01hcdgfzx2p6dUY08"
+  },
+  "parade_duck": {
+   "product_id": "prod_VYsSavICfMTQCy",
+   "price_id": "price_1UXkhhIyTocie9gtKAewIWEe",
+   "name": "Whales Only: Parade Duck",
+   "amount": 67,
+   "currency": "usd",
+   "payment_link_id": "plink_1UXkhiIyTocie9gtfeOMwGtq",
+   "payment_link_url": "https://buy.stripe.com/dRmbJ29BR6SWafd8NudUY09"
+  },
+  "disco_mall": {
+   "product_id": "prod_VYsSkB2TmXNhR5",
+   "price_id": "price_1UXkhkIyTocie9gtyqmjfXRy",
+   "name": "Whales Only: Disco Mall",
+   "amount": 67,
+   "currency": "usd",
+   "payment_link_id": "plink_1UXkhlIyTocie9gtwvuyEOwA",
+   "payment_link_url": "https://buy.stripe.com/8x2cN6dS7elo3QPfbSdUY0a"
+  },
+  "confetti_squash": {
+   "product_id": "prod_VYsShkcaCvbgYn",
+   "price_id": "price_1UXkhnIyTocie9gtM2Peo5kE",
+   "name": "Whales Only: Confetti Squash",
+   "amount": 67,
+   "currency": "usd",
+   "payment_link_id": "plink_1UXkhoIyTocie9gtyByUCfq1",
+   "payment_link_url": "https://buy.stripe.com/dRmeVe3dt6SW4UTbZGdUY0b"
+  },
+  "aura_of_importance": {
+   "product_id": "prod_VYsStAn84kkeCP",
+   "price_id": "price_1UXkhrIyTocie9gtlwfOwFn5",
+   "name": "Whales Only: Aura of Importance",
+   "amount": 67,
+   "currency": "usd",
+   "payment_link_id": "plink_1UXkhsIyTocie9gtBOz1CZdI",
+   "payment_link_url": "https://buy.stripe.com/28E14o4hx5OS9b97JqdUY0c"
+  },
+  "space_buddy": {
+   "product_id": "prod_VYsSK3PTPypWod",
+   "price_id": "price_1UXkhuIyTocie9gtOxuPX8OF",
+   "name": "Whales Only: Space Buddy",
+   "amount": 67,
+   "currency": "usd",
+   "payment_link_id": "plink_1UXkhvIyTocie9gtmR4ikfRq",
+   "payment_link_url": "https://buy.stripe.com/eVqcN6eWb3GK3QPd3KdUY0d"
+  },
+  "name_in_lights": {
+   "product_id": "prod_VYsScYEJ7oEIZJ",
+   "price_id": "price_1UXkhxIyTocie9gtMF3GDpCL",
+   "name": "Whales Only: Name in Lights",
+   "amount": 67,
+   "currency": "usd",
+   "payment_link_id": "plink_1UXkhzIyTocie9gtybhreH48",
+   "payment_link_url": "https://buy.stripe.com/9B65kE4hxa58bjh2p6dUY0e"
+  },
+  "kazoo_mode": {
+   "product_id": "prod_VYsSm4NxF7Ds8q",
+   "price_id": "price_1UXki1IyTocie9gtKHIStoDq",
+   "name": "Whales Only: Kazoo Mode",
+   "amount": 67,
+   "currency": "usd",
+   "payment_link_id": "plink_1UXki2IyTocie9gthDx0BgFj",
+   "payment_link_url": "https://buy.stripe.com/7sYdRaaFV4KO2ML1l2dUY0f"
+  }
+ },
+ "issuer_url": "https://whales-only-issuer.dmsweetser.workers.dev",
+ "redirect_after_completion": "https://whales-only-issuer.dmsweetser.workers.dev/done?session_id={CHECKOUT_SESSION_ID}"
+}

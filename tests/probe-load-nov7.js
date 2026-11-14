@@ -1,0 +1,30 @@
+// Probe: trace loadtest's save/quit/continue flow state by state.
+const { chromium } = require('playwright-core');
+const EXE = process.env.HOME + '/.cache/ms-playwright/chromium-1248/chrome-linux64/chrome';
+const URL = 'http://localhost:8903/the-survival-game.html';
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+(async () => {
+  const browser = await chromium.launch({ executablePath: EXE, args: ['--autoplay-policy=no-user-gesture-required'] });
+  const page = await browser.newPage({ viewport: { width: 1000, height: 640 } });
+  page.on('pageerror', e => console.log('PAGEERROR', e.message));
+  await page.goto(URL);
+  await page.waitForFunction(() => window.__TSG && window.__TSG.dbg_state, null, { timeout: 20000 });
+  const call = (n, ...a) => page.evaluate(([n, a]) => window.__TSG[n](...a), [n, a]);
+  const key = async (code, ms) => { await page.keyboard.down(code); await sleep(ms || 150); await page.keyboard.up(code); await sleep(150); };
+  const st = async tag => console.log(tag, 'state=', await call('dbg_state'), 'px=', await call('dbg_px'), 'py=', await call('dbg_py'), 'mall=', await call('dbg_mall'));
+  await page.evaluate(() => localStorage.clear());
+  await page.reload();
+  await page.waitForFunction(() => window.__TSG && window.__TSG.dbg_state() === 0, null, { timeout: 20000 });
+  await st('title');
+  await key('Space', 400); await key('Enter', 600);
+  await page.waitForFunction(() => window.__TSG.dbg_state() === 1, null, { timeout: 10000 });
+  await st('in run');
+  await call('dbg_tp', 2000, 1500); await sleep(300);
+  await key('KeyP', 500); await st('paused');
+  await key('ArrowDown', 250); await key('ArrowDown', 250);
+  await key('Space', 700); await st('after save+quit');
+  await key('Space', 600); await st('after title space');
+  await key('Enter', 900); await st('after slot enter');
+  await sleep(1500); await st('settled');
+  await browser.close();
+})().catch(e => { console.error('ERR', e.message); process.exit(1); });

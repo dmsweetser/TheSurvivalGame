@@ -1,0 +1,31 @@
+// The Survival Game — Windows resources: icon, version info, manifest.
+// Compiled with `zig rc` and linked into the exe so the binary carries a
+// name, an icon, and a version instead of being an anonymous blob.
+1 ICON "app.ico"
+1 24 "app.manifest"
+
+1 VERSIONINFO
+FILEVERSION 1,0,0,0
+PRODUCTVERSION 1,0,0,0
+FILEOS 0x40004
+FILETYPE 0x1
+BEGIN
+  BLOCK "StringFileInfo"
+  BEGIN
+    BLOCK "040904B0"
+    BEGIN
+      VALUE "CompanyName", "dmsweetser"
+      VALUE "FileDescription", "The Survival Game"
+      VALUE "FileVersion", "1.0.0"
+      VALUE "InternalName", "TheSurvivalGame"
+      VALUE "OriginalFilename", "TheSurvivalGame.exe"
+      VALUE "ProductName", "The Survival Game"
+      VALUE "ProductVersion", "1.0.0"
+      VALUE "Comments", "Cartoony top-down bug-squashing arcade game. Single file, no installer. Includes a built-in LAN co-op server on port 8379."
+    END
+  END
+  BLOCK "VarFileInfo"
+  BEGIN
+    VALUE "Translation", 0x0409, 0x04B0
+  END
+END

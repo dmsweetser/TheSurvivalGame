@@ -1,0 +1,16636 @@
+// ============================================================================
+//  THE SURVIVAL GAME — a top-down bug-squashing survival shooter.
+//  Written in C99. One game source file. Build targets:
+//
+//    1) Windows (single .exe, Win32 only — no external libraries):
+//         gcc -O2 -std=c99 -DPLAT_WIN32 -o TheSurvivalGame.exe survival.c ^
+//             -lgdi32 -lwinmm -lws2_32 -mwindows
+//       (MinGW; MSVC works too: cl /DPLAT_WIN32 survival.c gdi32.lib
+//        winmm.lib ws2_32.lib user32.lib)
+//
+//    2) WebAssembly (playable in a browser, single HTML file):
+//         clang --target=wasm32 -nostdlib -O2 -DPLAT_WASM ... (see build.py)
+//       The JS shell provides canvas blit, input, WebAudio, localStorage.
+//       (The web menu is just START — LAN co-op lives in the native
+//       builds, which talk UDP directly.)
+//
+//    3) Linux (X11 window + ALSA software synth + BSD UDP):
+//         gcc -O2 -std=c99 -DPLAT_LINUX -o TheSurvivalGame-linux survival.c \
+//             -lX11 -lasound -lm -lpthread
+//
+//    4) macOS, Apple Silicon (pure-C Cocoa host in mac_main.c — no SDK
+//       headers needed; AppKit is driven through the Objective-C runtime
+//       and every framework symbol resolves at runtime):
+//         clang -DPLAT_MAC -o TheSurvivalGame-mac survival.c mac_main.c \
+//             -Wl,-undefined,dynamic_lookup -lm
+//       (build.py cross-compiles this from any host with zig cc.)
+//
+//  PREMISE: You are a developer. The codebase is infested. Bugs pour in from
+//  the Unmaintained Depths — the further from the Epicenter, the bigger,
+//  meaner and more valuable they get. Every bug you squash lands on your
+//  head as a carcass. Your hat IS your wallet: haul it back to the Bug
+//  Bounty store at the Epicenter and pay by weight — carcasses literally
+//  pulled off your head at the till. Spend weight on better weapons
+//  (Keyboards, thrown Mice, lobbed Project Managers, Rubber Ducks, and the
+//  dreaded Debugger), Firewall shields, Hoodie armor and Espresso. Or spend
+//  carcasses to build carcass walls that bugs must chew through.
+//  Survive. The leaderboard only cares about one thing: heaviest hat wins.
+// ============================================================================
+
+#include <stdint.h>
+#include <stddef.h>
+
+typedef uint64_t u64;
+typedef uint32_t u32;
+typedef uint16_t u16;
+typedef uint8_t  u8;
+typedef int32_t  i32;
+
+// ---------------------------------------------------------------------------
+// Platform interface. The game core calls these; each platform provides them.
+// ---------------------------------------------------------------------------
+// audio: note event (channel, midi note, velocity, wave/instrument id)
+void plat_note(int ch, int note, int vel, int instr);
+// storage: persist / load the save block (NUL-terminated text)
+void plat_save(const char *data, int len);
+int  plat_load(char *buf, int cap);            // returns length or -1
+// per-slot run storage: slot 1..3 (the global blob above is slot 0)
+void plat_save_slot(int slot, const char *data, int len);
+int  plat_load_slot(int slot, char *buf, int cap);
+// "TheSurvivalGame_save.txt" for slot 0, "..._save1.txt" .. for slots
+static void save_slot_name(char *out, int slot){
+    const char *base = "TheSurvivalGame_save";
+    int i=0; while (base[i]){ out[i]=base[i]; i++; }
+    if (slot>=1 && slot<=3) out[i++] = (char)('0'+slot);
+    const char *ext = ".txt"; int j=0; while (ext[j]) out[i++]=ext[j++];
+    out[i]=0;
+}
+// network: mode 0=off 1=host 2=client. Packets are opaque byte blobs.
+int  plat_net_start(int mode, const char *addr); // 0 ok
+void plat_net_stop(void);
+int  plat_net_send(const u8 *data, int len, int dest); // dest: -1 broadcast (host), 0 host (client)
+int  plat_net_recv(u8 *buf, int cap, int *src);        // returns len or 0
+// time in seconds (monotonic) and a "quit" flag for native builds
+double plat_now(void);
+// where friends point a browser to join this machine's game
+// ("192.168.1.42:8379"), or 0 on builds that cannot host
+const char *plat_join_addr(void);
+// Whales Only: open a purchase page in the player's browser, and pick
+// up an unlock code the player dropped off (web: ?whale= link / native:
+// a whale-code.txt file beside the saves). poll returns length or 0.
+void plat_open_url(const char *url);
+int  plat_whale_poll(char *buf, int cap);
+// native builds: start the built-in web server that serves the game
+// page and relays browser guests into this host (called once at launch)
+void web_server_start(void);
+static void sfx(int id);   // sound effects, implemented with the audio section
+static void try_buy(int pi, int sel);  // store purchases, implemented below
+static void station_action(int pi, int station, int row);   // mall stations, below
+static void draw_active_panel(void);                        // the open panel, below
+static void ui_vignette(int x0, int y0, int w, int h);      // glow-up shading, below
+static void bowl_update(int pi, float dt);                  // Bug Bowl tick, below
+static void draw_bowling(void);                             // Bug Bowl view, below
+static int act2_down(int a);                                // pad-2 held state, below
+static void push_ev(int type, float x, float y); // net event queue (host)
+static float client_aim=0; static int client_weapon=0, client_want_wall=0;
+static int client_joined=0;   // client has sent its 'J' join packet
+static float wall_send_t=0;   // host wall-broadcast timer (net section)
+
+// ---------------------------------------------------------------------------
+// Small libc-free helpers
+// ---------------------------------------------------------------------------
+static void *smemcpy(void *d, const void *s, int n){ u8 *a=(u8*)d; const u8 *b=(const u8*)s; for(int i=0;i<n;i++) a[i]=b[i]; return d; }
+static void *smemset(void *d, int v, int n){ u8 *a=(u8*)d; for(int i=0;i<n;i++) a[i]=(u8)v; return d; }
+static int slen(const char *s){ int n=0; while(s[n]) n++; return n; }
+static int scmp(const char *a, const char *b){ while(*a && *a==*b){ a++; b++; } return (u8)*a - (u8)*b; }
+static void scpy(char *d, const char *s, int cap){ int i=0; while(s[i] && i<cap-1){ d[i]=s[i]; i++; } d[i]=0; }
+static float ffabs(float x){ return x<0?-x:x; }
+static int   iabs(int x){ return x<0?-x:x; }
+static float fclamp(float x, float lo, float hi){ return x<lo?lo:(x>hi?hi:x); }
+static int   iclamp(int x, int lo, int hi){ return x<lo?lo:(x>hi?hi:x); }
+static float flerpf(float a, float b, float t){ return a+(b-a)*t; }
+
+// fixed-iteration Newton sqrt: bounded, no data-dependent loops (wasm-safe)
+static float fsqrt(float x){
+    if (x<=0.0f) return 0.0f;
+    union { float f; u32 u; } v; v.f = x;
+    v.u = (v.u>>1) + 0x1FC00000u;             // rough seed
+    float y = v.f;
+    for (int i=0;i<6;i++) y = 0.5f*(y + x/y);
+    return y;
+}
+#define PI 3.14159265f
+#define TAU 6.2831853f
+// polynomial sin/cos on [-PI,PI]; angles wrapped with bounded arithmetic
+static float sin_poly(float x){
+    // fold into [-PI/2, PI/2] first (exact symmetry): the Taylor series is
+    // poor near +-PI, and this keeps worst-case error under ~0.001.
+    if (x > PI*0.5f) x = PI - x;
+    else if (x < -PI*0.5f) x = -PI - x;
+    float x2 = x*x;
+    return x*(0.99997f + x2*(-0.16658f + x2*(0.00825f + x2*(-0.00019f))));
+}
+static float wrap_pi(float x){
+    // full turn reduction in one cast step (no loops): correct for any
+    // |x| up to ~1e6, which covers every phase accumulator in the game.
+    // (An earlier version only corrected two turns and silently exploded
+    //  past 3*PI — Taylor sin of -12 rad is in the thousands.)
+    float k = (float)(int)(x/TAU + (x>=0? 0.5f : -0.5f));
+    x -= k*TAU;
+    if (x >  PI) x -= TAU; else if (x < -PI) x += TAU;
+    return x;
+}
+static float fsin(float x){ return sin_poly(wrap_pi(x)); }
+static float fcos(float x){ return sin_poly(wrap_pi(x + PI*0.5f)); }
+static float fatan2(float y, float x){
+    if (x==0.0f && y==0.0f) return 0.0f;
+    float ax = ffabs(x), ay = ffabs(y);
+    float ang;
+    if (ax >= ay){
+        float t = ay/ax; float s2 = t*t;
+        float rr = ((-0.0464964749f*s2 + 0.15931422f)*s2 - 0.327622764f)*s2*t + t;
+        ang = rr;
+        if (x<0) ang = PI - ang;
+        if (y<0) ang = -ang;
+    } else {
+        float t = ax/ay; float s2 = t*t;
+        float rr = ((-0.0464964749f*s2 + 0.15931422f)*s2 - 0.327622764f)*s2*t + t;
+        ang = PI*0.5f - rr;
+        if (x<0) ang = PI - ang;
+        if (y<0) ang = -ang;
+    }
+    return ang;
+}
+
+// RNG (all unsigned math — defined wraparound, see AGENTS.md wasm lessons)
+static u32 rng_state = 0x2545F491u;
+static void rng_seed(u32 s){ rng_state = s ? s : 0x2545F491u; }
+static u32 rng_u32(void){ u32 x = rng_state; x ^= x<<13; x ^= x>>17; x ^= x<<5; rng_state = x; return x; }
+static float rng_f(void){ return (float)(rng_u32()>>8) * (1.0f/16777216.0f); }
+static float rng_range(float lo, float hi){ return lo + rng_f()*(hi-lo); }
+static u32 hash2(i32 x, i32 y, u32 seed){
+    u32 h = seed + (u32)x*374761393u + (u32)y*668265263u;
+    h = (h ^ (h>>13)) * 1274126177u;
+    return h ^ (h>>16);
+}
+static float hash_f(i32 x, i32 y, u32 seed){ return (float)(hash2(x,y,seed)>>8) * (1.0f/16777216.0f); }
+
+// ---------------------------------------------------------------------------
+// Framebuffer renderer — 640x360, cartoon shapes with dark outlines.
+// Pixel layout: 0xFFBBGGRR stored little-endian == RGBA bytes in memory,
+// which is exactly what both the JS ImageData blit and a Win32 32bpp DIB want.
+// ---------------------------------------------------------------------------
+#define VW 640
+#define VH 360
+// Render scale (Nov 3, 2026, Daniel): the framebuffer is RS times the
+// logical resolution — 1280x720 physical. ALL game code keeps drawing
+// in logical 640x360 coordinates; the primitives below scale into the
+// big buffer, and the font is a true 16x16 raster, so text gets real
+// extra detail while shapes keep the chunky pixel-art read.
+#define RS 2
+#define PW (VW*RS)
+#define PH (VH*RS)
+static u32 fb[PW*PH];
+// split-screen clip: all primitives confine drawing to the current
+// view's rectangle, [clip_x0, clip_x1) x [clip_y0, clip_y1). Full
+// screen (the default) changes nothing anywhere.
+static int clip_x0=0, clip_x1=VW;
+static int clip_y0=0, clip_y1=VH;
+#ifndef PLAT_WASM
+// Native blitters (Win32 DIB, X11 XImage, macOS CGBitmapContext with
+// byteOrder32Little) all want B,G,R,A bytes in memory:
+#define COL(r,g,b) (0xFF000000u | ((u32)(r)<<16) | ((u32)(g)<<8) | (u32)(b))
+#else
+// JS ImageData wants R,G,B,A bytes in memory:
+#define COL(r,g,b) (0xFF000000u | ((u32)(b)<<16) | ((u32)(g)<<8) | (u32)(r))
+#endif
+#define OUTLINE COL(28,24,38)
+
+static void pset(int x, int y, u32 c){
+    if (x<clip_x0 || x>=clip_x1 || y<clip_y0 || y>=clip_y1) return;
+    int px=x*RS, py=y*RS;
+    for (int yy=0; yy<RS; yy++){ u32 *row=&fb[(py+yy)*PW+px]; for (int xx=0; xx<RS; xx++) row[xx]=c; }
+}
+static void rect_fill(int x, int y, int w, int h, u32 c){
+    int x0=iclamp(x,clip_x0,clip_x1), y0=iclamp(y,clip_y0,clip_y1), x1=iclamp(x+w,clip_x0,clip_x1), y1=iclamp(y+h,clip_y0,clip_y1);
+    int px0=x0*RS, px1=x1*RS;
+    for (int yy=y0*RS; yy<y1*RS; yy++){ u32 *row=&fb[yy*PW]; for (int xx=px0; xx<px1; xx++) row[xx]=c; }
+}
+// one logical row-span of a disc/ellipse raster, written at full res
+static void span_fill(int yy, int x0, int x1, u32 c){
+    int px0=x0*RS, px1=(x1+1)*RS;
+    for (int py=yy*RS; py<(yy+1)*RS; py++){ u32 *row=&fb[py*PW]; for (int xx=px0; xx<px1; xx++) row[xx]=c; }
+}
+static void rect_line(int x, int y, int w, int h, u32 c){
+    rect_fill(x,y,w,1,c); rect_fill(x,y+h-1,w,1,c); rect_fill(x,y,1,h,c); rect_fill(x+w-1,y,1,h,c);
+}
+static void circle_fill(int cx, int cy, int r, u32 c){
+    if (r<0) r=0;
+    if (cx+r < clip_x0 || cx-r >= clip_x1) return;   // fully outside the split view
+    if (cy+r < clip_y0 || cy-r >= clip_y1) return;
+    int y0=iclamp(cy-r,clip_y0,clip_y1-1), y1=iclamp(cy+r,clip_y0,clip_y1-1);
+    int rr = r*r;
+    for (int yy=y0; yy<=y1; yy++){
+        int dy = yy-cy; int dx = (int)fsqrt((float)(rr-dy*dy));
+        if (cx+dx < clip_x0 || cx-dx >= clip_x1) continue;
+        int x0=iclamp(cx-dx,clip_x0,clip_x1-1), x1=iclamp(cx+dx,clip_x0,clip_x1-1);
+        span_fill(yy, x0, x1, c);
+    }
+}
+static void circle_out(int cx, int cy, int r, u32 fill){ // outlined cartoon circle
+    circle_fill(cx, cy, r+2, OUTLINE);
+    circle_fill(cx, cy, r, fill);
+}
+static void ellipse_fill(int cx, int cy, int rx, int ry, u32 c){
+    if (rx<1) rx=1; if (ry<1) ry=1;
+    if (cx+rx < clip_x0 || cx-rx >= clip_x1) return;
+    if (cy+ry < clip_y0 || cy-ry >= clip_y1) return;
+    int y0=iclamp(cy-ry,clip_y0,clip_y1-1), y1=iclamp(cy+ry,clip_y0,clip_y1-1);
+    for (int yy=y0; yy<=y1; yy++){
+        float t = (float)(yy-cy)/(float)ry;
+        int dx = (int)(rx*fsqrt(1.0f-t*t));
+        if (cx+dx < clip_x0 || cx-dx >= clip_x1) continue;
+        int x0=iclamp(cx-dx,clip_x0,clip_x1-1), x1=iclamp(cx+dx,clip_x0,clip_x1-1);
+        span_fill(yy, x0, x1, c);
+    }
+}
+static void ellipse_out(int cx, int cy, int rx, int ry, u32 fill){
+    ellipse_fill(cx, cy, rx+2, ry+2, OUTLINE);
+    ellipse_fill(cx, cy, rx, ry, fill);
+}
+static void line_thick(int x0, int y0, int x1, int y1, int r, u32 c){
+    int dx=x1-x0, dy=y1-y0;
+    int steps = iabs(dx)>iabs(dy)? iabs(dx) : iabs(dy);
+    if (steps<1) steps=1;
+    for (int i=0;i<=steps;i++){
+        int x = x0 + dx*i/steps, y = y0 + dy*i/steps;
+        circle_fill(x, y, r, c);
+    }
+}
+// --- shading helpers: the "smoothed, detailed" pass. Channel access must
+// respect each platform's COL() byte order, so it goes through macros.
+#ifndef PLAT_WASM
+#define COL_R(c) ((int)(((c)>>16)&0xFF))
+#define COL_G(c) ((int)(((c)>>8)&0xFF))
+#define COL_B(c) ((int)((c)&0xFF))
+#else
+#define COL_R(c) ((int)((c)&0xFF))
+#define COL_G(c) ((int)(((c)>>8)&0xFF))
+#define COL_B(c) ((int)(((c)>>16)&0xFF))
+#endif
+static u32 col_shade(u32 c, float f){
+    int r=(int)(COL_R(c)*f), g=(int)(COL_G(c)*f), b=(int)(COL_B(c)*f);
+    return COL(iclamp(r,0,255), iclamp(g,0,255), iclamp(b,0,255));
+}
+static void pset_blend(int x, int y, u32 c, int alpha){   // alpha 0..255
+    if (x<clip_x0 || x>=clip_x1 || y<clip_y0 || y>=clip_y1 || alpha<=0) return;
+    if (alpha>255) alpha=255;
+    int ia=255-alpha;
+    for (int yy=y*RS; yy<(y+1)*RS; yy++) for (int xx=x*RS; xx<(x+1)*RS; xx++){
+        u32 *p=&fb[yy*PW+xx]; u32 d=*p;
+        *p = COL((COL_R(c)*alpha + COL_R(d)*ia)/255,
+                 (COL_G(c)*alpha + COL_G(d)*ia)/255,
+                 (COL_B(c)*alpha + COL_B(d)*ia)/255);
+    }
+}
+static void blend_rect(int x, int y, int w, int h, u32 c, int alpha){
+    for (int yy=y; yy<y+h; yy++) for (int xx=x; xx<x+w; xx++) pset_blend(xx, yy, c, alpha);
+}
+static void shadow_ellipse(int cx, int cy, int rx, int ry){
+    // soft two-pass ground shadow
+    for (int pass=0; pass<2; pass++){
+        int prx = pass? rx*3/4 : rx, pry = pass? ry*3/4 : ry, al = pass? 110:60;
+        if (prx<1) prx=1; if (pry<1) pry=1;
+        int y0=iclamp(cy-pry,0,VH-1), y1=iclamp(cy+pry,0,VH-1);
+        for (int yy=y0; yy<=y1; yy++){
+            float t=(float)(yy-cy)/(float)pry;
+            int dx=(int)(prx*fsqrt(1.0f-t*t));
+            for (int xx=cx-dx; xx<=cx+dx; xx++) pset_blend(xx, yy, COL(18,26,18), al);
+        }
+    }
+}
+// a circle lit from the top, like a little sphere: rows run 1.14x bright at
+// the top to 0.76x at the bottom, plus a soft white gloss top-left.
+static void circle_shade(int cx, int cy, int r, u32 base){
+    if (r<1) r=1;
+    int y0=iclamp(cy-r,clip_y0,clip_y1-1), y1=iclamp(cy+r,clip_y0,clip_y1-1);
+    int rr=r*r;
+    for (int yy=y0; yy<=y1; yy++){
+        int dy=yy-cy; int dx=(int)fsqrt((float)(rr-dy*dy));
+        float f = 1.14f - 0.38f*((float)(dy+r)/(2.0f*r+1.0f));
+        u32 c = col_shade(base, f);
+        int x0=iclamp(cx-dx,clip_x0,clip_x1-1), x1=iclamp(cx+dx,clip_x0,clip_x1-1);
+        span_fill(yy, x0, x1, c);
+    }
+}
+static void ellipse_shade(int cx, int cy, int rx, int ry, u32 base){
+    if (rx<1) rx=1; if (ry<1) ry=1;
+    int y0=iclamp(cy-ry,clip_y0,clip_y1-1), y1=iclamp(cy+ry,clip_y0,clip_y1-1);
+    for (int yy=y0; yy<=y1; yy++){
+        float t=(float)(yy-cy)/(float)ry;
+        int dx=(int)(rx*fsqrt(1.0f-t*t));
+        float f = 1.13f - 0.36f*((float)(yy-(cy-ry))/(2.0f*ry+1.0f));
+        u32 c = col_shade(base, f);
+        int x0=iclamp(cx-dx,clip_x0,clip_x1-1), x1=iclamp(cx+dx,clip_x0,clip_x1-1);
+        span_fill(yy, x0, x1, c);
+    }
+}
+static void gloss(int cx, int cy, int r){
+    // soft specular blob toward the top-left of a round thing
+    int gx=cx-r/3, gy=cy-r/3;
+    int grx=r/3<1?1:r/3, gry=r/4<1?1:r/4;
+    int y0=iclamp(gy-gry,0,VH-1), y1=iclamp(gy+gry,0,VH-1);
+    for (int yy=y0; yy<=y1; yy++){
+        float t=(float)(yy-gy)/(float)gry;
+        int dx=(int)(grx*fsqrt(1.0f-t*t));
+        for (int xx=gx-dx; xx<=gx+dx; xx++) pset_blend(xx, yy, COL(255,255,255), 95);
+    }
+}
+static void tri_fill(int x0,int y0,int x1,int y1,int x2,int y2,u32 c){
+    int rminx = x0<x1?(x0<x2?x0:x2):(x1<x2?x1:x2), rmaxx = x0>x1?(x0>x2?x0:x2):(x1>x2?x1:x2);
+    if (rmaxx < clip_x0 || rminx >= clip_x1) return;
+    int minx=iclamp(rminx,clip_x0,clip_x1-1), maxx=iclamp(rmaxx,clip_x0,clip_x1-1);
+    int miny=iclamp(y0<y1?(y0<y2?y0:y2):(y1<y2?y1:y2),clip_y0,clip_y1-1), maxy=iclamp(y0>y1?(y0>y2?y0:y2):(y1>y2?y1:y2),clip_y0,clip_y1-1);
+    int d = (y1-y2)*(x0-x2) + (x2-x1)*(y0-y2);
+    if (d==0) return;
+    for (int yy=miny; yy<=maxy; yy++)
+        for (int xx=minx; xx<=maxx; xx++){
+            int w0 = (y1-y2)*(xx-x2) + (x2-x1)*(yy-y2);
+            int w1 = (y2-y0)*(xx-x2) + (x0-x2)*(yy-y2);
+            int w2 = d - w0 - w1;
+            if ((w0>=0&&w1>=0&&w2>=0)||(w0<=0&&w1<=0&&w2<=0)) pset(xx, yy, c);
+        }
+}
+
+// ---------------------------------------------------------------------------
+// 8x8 bitmap font, generated from Atkinson Hyperlegible (the Braille
+// Institute's typeface designed for low-vision readers — distinct
+// I/l/1, open apertures) by tools/genfont.py: the Bold face is
+// rasterized with a high ink threshold, which erodes the strokes to
+// a regular visual weight — full bold at 8px was too heavy to read.
+// Rows are bytes, MSB = leftmost pixel. Glyphs: ASCII 32..126.
+// ---------------------------------------------------------------------------
+static const u16 FONT16[96][16] = {
+/*   */ {0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000},
+ /* ! */ {0x0000,0x0000,0x0000,0x0000,0x0380,0x0380,0x0380,0x0380,0x0380,0x0100,0x0000,0x0100,0x0380,0x0380,0x0000,0x0000},
+ /* " */ {0x0000,0x0000,0x0000,0x0000,0x06C0,0x06C0,0x06C0,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000},
+ /* # */ {0x0000,0x0000,0x0000,0x0000,0x0660,0x0660,0x1FF8,0x1FF8,0x0E60,0x0CE0,0x3FF0,0x3FF0,0x0CC0,0x0CC0,0x0000,0x0000},
+ /* $ */ {0x0000,0x0000,0x0100,0x0100,0x0FE0,0x1FE0,0x1D00,0x1F00,0x0FC0,0x03F0,0x0170,0x0D70,0x0FE0,0x07C0,0x0100,0x0000},
+ /* % */ {0x0000,0x0000,0x0000,0x0000,0x1C60,0x3440,0x26C0,0x3680,0x1D30,0x0B78,0x02C8,0x06C8,0x0478,0x0C70,0x0000,0x0000},
+ /* & */ {0x0000,0x0000,0x0000,0x0700,0x0FC0,0x0CC0,0x0CC0,0x0F80,0x0F30,0x1FB0,0x39F0,0x38E0,0x1FE0,0x0FF0,0x0000,0x0000},
+ /* ' */ {0x0000,0x0000,0x0000,0x0000,0x0380,0x0180,0x0100,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000},
+ /* ( */ {0x0000,0x0000,0x0000,0x0000,0x0180,0x0300,0x0300,0x0300,0x0600,0x0600,0x0600,0x0700,0x0300,0x0300,0x0380,0x0180},
+ /* ) */ {0x0000,0x0000,0x0000,0x0000,0x0380,0x0180,0x0180,0x01C0,0x00C0,0x00C0,0x00C0,0x00C0,0x0180,0x0180,0x0180,0x0300},
+ /* * */ {0x0000,0x0000,0x0000,0x0000,0x0100,0x07C0,0x0380,0x0380,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000},
+ /* + */ {0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0100,0x0100,0x0100,0x0FE0,0x0FF0,0x0380,0x0100,0x0100,0x0000,0x0000},
+ /* , */ {0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0100,0x0380,0x0380,0x0100,0x0100},
+ /* - */ {0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x07C0,0x07C0,0x0000,0x0000,0x0000,0x0000,0x0000},
+ /* . */ {0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0100,0x0380,0x0380,0x0000,0x0000},
+ /* / */ {0x0000,0x0000,0x0000,0x0000,0x00C0,0x00C0,0x01C0,0x0180,0x0180,0x0300,0x0300,0x0700,0x0600,0x0600,0x0000,0x0000},
+ /* 0 */ {0x0000,0x0000,0x0000,0x0000,0x07C0,0x0EE0,0x1E70,0x1F70,0x1F30,0x1DF0,0x1CF0,0x0C70,0x0FE0,0x07C0,0x0000,0x0000},
+ /* 1 */ {0x0000,0x0000,0x0000,0x0000,0x00C0,0x07C0,0x07C0,0x00C0,0x00C0,0x00C0,0x00C0,0x00C0,0x00C0,0x00C0,0x0000,0x0000},
+ /* 2 */ {0x0000,0x0000,0x0000,0x0000,0x07E0,0x0E60,0x0060,0x0060,0x00E0,0x01C0,0x0380,0x0E00,0x0FE0,0x0FF0,0x0000,0x0000},
+ /* 3 */ {0x0000,0x0000,0x0000,0x0000,0x07E0,0x0CE0,0x0060,0x00E0,0x03C0,0x01E0,0x0060,0x0460,0x0FE0,0x07C0,0x0000,0x0000},
+ /* 4 */ {0x0000,0x0000,0x0000,0x0000,0x00C0,0x01C0,0x03C0,0x07C0,0x0EC0,0x0CE0,0x1FF0,0x1FF0,0x00C0,0x00C0,0x0000,0x0000},
+ /* 5 */ {0x0000,0x0000,0x0000,0x0000,0x0FE0,0x0FE0,0x0C00,0x0FC0,0x0FE0,0x0460,0x0070,0x0460,0x0FE0,0x07C0,0x0000,0x0000},
+ /* 6 */ {0x0000,0x0000,0x0000,0x0000,0x07E0,0x0E40,0x0C00,0x0FC0,0x0FE0,0x1C60,0x0C70,0x0C60,0x0FE0,0x07C0,0x0000,0x0000},
+ /* 7 */ {0x0000,0x0000,0x0000,0x0000,0x0FE0,0x0FE0,0x00E0,0x00C0,0x01C0,0x01C0,0x0380,0x0380,0x0300,0x0700,0x0000,0x0000},
+ /* 8 */ {0x0000,0x0000,0x0000,0x0000,0x07C0,0x06C0,0x0440,0x06C0,0x07C0,0x0EE0,0x1C70,0x1C70,0x0FE0,0x07C0,0x0000,0x0000},
+ /* 9 */ {0x0000,0x0000,0x0000,0x0000,0x07C0,0x0FE0,0x0C60,0x0C60,0x0E60,0x07E0,0x03C0,0x01C0,0x0180,0x0380,0x0000,0x0000},
+ /* : */ {0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0100,0x0380,0x0380,0x0000,0x0000,0x0100,0x0380,0x0380,0x0000,0x0000},
+ /* ; */ {0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0100,0x0380,0x0380,0x0000,0x0000,0x0100,0x0380,0x0380,0x0100,0x0100},
+ /* < */ {0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x00E0,0x03E0,0x0F00,0x0E00,0x07C0,0x01E0,0x0020,0x0000,0x0000},
+ /* = */ {0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0FF0,0x0FE0,0x0000,0x0FF0,0x0FE0,0x0000,0x0000,0x0000},
+ /* > */ {0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0800,0x0E00,0x0F80,0x01E0,0x00E0,0x07C0,0x0F00,0x0800,0x0000,0x0000},
+ /* ? */ {0x0000,0x0000,0x0000,0x0000,0x0FE0,0x0EE0,0x0070,0x00E0,0x03C0,0x0300,0x0000,0x0300,0x0300,0x0300,0x0000,0x0000},
+ /* @ */ {0x0000,0x0000,0x0000,0x0000,0x07E0,0x1830,0x1390,0x26C8,0x24C8,0x24D8,0x17F0,0x1220,0x0800,0x07C0,0x0000,0x0000},
+ /* A */ {0x0000,0x0000,0x0000,0x0000,0x0380,0x03C0,0x07C0,0x06C0,0x0EE0,0x0C60,0x0FE0,0x1FF0,0x1C30,0x3838,0x0000,0x0000},
+ /* B */ {0x0000,0x0000,0x0000,0x0000,0x1FE0,0x1FE0,0x1C70,0x1C60,0x1FE0,0x1FF0,0x1C70,0x1C70,0x1FF0,0x1FC0,0x0000,0x0000},
+ /* C */ {0x0000,0x0000,0x0000,0x0000,0x07E0,0x0FF0,0x1C20,0x1C00,0x1800,0x1800,0x1C00,0x1C20,0x0FF0,0x07E0,0x0000,0x0000},
+ /* D */ {0x0000,0x0000,0x0000,0x0000,0x1FC0,0x1FE0,0x1870,0x1830,0x1830,0x1830,0x1870,0x1870,0x1FE0,0x1F80,0x0000,0x0000},
+ /* E */ {0x0000,0x0000,0x0000,0x0000,0x0FF0,0x0FE0,0x0C00,0x0C00,0x0F80,0x0F80,0x0C00,0x0C00,0x0FF0,0x0FF0,0x0000,0x0000},
+ /* F */ {0x0000,0x0000,0x0000,0x0000,0x0FE0,0x0FE0,0x0C00,0x0E00,0x0FE0,0x0FE0,0x0C00,0x0C00,0x0C00,0x0C00,0x0000,0x0000},
+ /* G */ {0x0000,0x0000,0x0000,0x0000,0x07E0,0x0FF0,0x1C00,0x1800,0x18F0,0x18F8,0x1838,0x1C38,0x0FF8,0x07D8,0x0000,0x0000},
+ /* H */ {0x0000,0x0000,0x0000,0x0000,0x1830,0x1830,0x1830,0x1C70,0x1FF0,0x1FF0,0x1830,0x1830,0x1830,0x1830,0x0000,0x0000},
+ /* I */ {0x0000,0x0000,0x0000,0x0000,0x07C0,0x07C0,0x0380,0x0380,0x0380,0x0380,0x0380,0x0380,0x07C0,0x07C0,0x0000,0x0000},
+ /* J */ {0x0000,0x0000,0x0000,0x0000,0x0060,0x0060,0x0060,0x0060,0x0060,0x0060,0x0060,0x0C60,0x0FE0,0x07C0,0x0000,0x0000},
+ /* K */ {0x0000,0x0000,0x0000,0x0000,0x18E0,0x19C0,0x1980,0x1F00,0x1F00,0x1F80,0x1DC0,0x18C0,0x18E0,0x1870,0x0000,0x0000},
+ /* L */ {0x0000,0x0000,0x0000,0x0000,0x0C00,0x0C00,0x0C00,0x0C00,0x0C00,0x0C00,0x0C00,0x0C00,0x0FE0,0x0FE0,0x0000,0x0000},
+ /* M */ {0x0000,0x0000,0x0000,0x0000,0x3C78,0x3C78,0x3C78,0x3C78,0x36D8,0x36D8,0x33D8,0x3398,0x3398,0x3398,0x0000,0x0000},
+ /* N */ {0x0000,0x0000,0x0000,0x0000,0x1C30,0x1E30,0x1E30,0x1F30,0x1B30,0x19B0,0x19F0,0x18F0,0x18F0,0x1870,0x0000,0x0000},
+ /* O */ {0x0000,0x0000,0x0000,0x0000,0x0FE0,0x1EF0,0x1830,0x3838,0x3838,0x3838,0x3838,0x1C70,0x1FF0,0x07C0,0x0000,0x0000},
+ /* P */ {0x0000,0x0000,0x0000,0x0000,0x1FE0,0x1FF0,0x1C70,0x1C70,0x1FF0,0x1FE0,0x1C00,0x1C00,0x1C00,0x1C00,0x0000,0x0000},
+ /* Q */ {0x0000,0x0000,0x0000,0x0000,0x0FC0,0x1FE0,0x3870,0x3830,0x3030,0x39B0,0x39F0,0x18F0,0x1FF0,0x0FF8,0x0000,0x0000},
+ /* R */ {0x0000,0x0000,0x0000,0x0000,0x1FC0,0x1FE0,0x1870,0x1870,0x1FE0,0x1FC0,0x19C0,0x19C0,0x18E0,0x1870,0x0000,0x0000},
+ /* S */ {0x0000,0x0000,0x0000,0x0000,0x0FE0,0x1EE0,0x1C00,0x1E00,0x0FC0,0x03F0,0x0070,0x0C70,0x0FE0,0x07C0,0x0000,0x0000},
+ /* T */ {0x0000,0x0000,0x0000,0x0000,0x1FF0,0x1FF0,0x0380,0x0380,0x0380,0x0380,0x0380,0x0380,0x0380,0x0380,0x0000,0x0000},
+ /* U */ {0x0000,0x0000,0x0000,0x0000,0x1C30,0x1C30,0x1C30,0x1C30,0x1C30,0x1C30,0x1C70,0x1C70,0x0FE0,0x07C0,0x0000,0x0000},
+ /* V */ {0x0000,0x0000,0x0000,0x0000,0x1830,0x1C70,0x0C60,0x0C60,0x0EE0,0x06C0,0x06C0,0x07C0,0x0380,0x0380,0x0000,0x0000},
+ /* W */ {0x0000,0x0000,0x0000,0x0000,0x3398,0x3398,0x1390,0x1BB0,0x1AB0,0x1EF0,0x1EF0,0x0EE0,0x0C60,0x0C60,0x0000,0x0000},
+ /* X */ {0x0000,0x0000,0x0000,0x0000,0x1C70,0x0EE0,0x0FE0,0x07C0,0x0380,0x03C0,0x07C0,0x0EE0,0x1C70,0x1C70,0x0000,0x0000},
+ /* Y */ {0x0000,0x0000,0x0000,0x0000,0x1C70,0x0C70,0x0EE0,0x07C0,0x07C0,0x0380,0x0380,0x0380,0x0380,0x0380,0x0000,0x0000},
+ /* Z */ {0x0000,0x0000,0x0000,0x0000,0x1FF0,0x0FE0,0x00E0,0x01C0,0x0380,0x0700,0x0700,0x0E00,0x1FF0,0x1FF0,0x0000,0x0000},
+ /* [ */ {0x0000,0x0000,0x0000,0x0000,0x03C0,0x0300,0x0300,0x0300,0x0300,0x0300,0x0300,0x0300,0x0300,0x0300,0x0300,0x03C0},
+ /* \ */ {0x0000,0x0000,0x0000,0x0000,0x0600,0x0600,0x0700,0x0300,0x0380,0x0180,0x0180,0x01C0,0x00C0,0x00C0,0x0000,0x0000},
+ /* ] */ {0x0000,0x0000,0x0000,0x0000,0x0380,0x0180,0x0080,0x0080,0x0080,0x0080,0x0080,0x0080,0x0080,0x0080,0x0180,0x0380},
+ /* ^ */ {0x0000,0x0000,0x0000,0x0000,0x0380,0x0380,0x07C0,0x06C0,0x0C60,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000},
+ /* _ */ {0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0FE0,0x0FE0},
+ /* ` */ {0x0000,0x0000,0x0000,0x0300,0x0180,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000},
+ /* a */ {0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x03C0,0x07E0,0x0060,0x01E0,0x0FE0,0x0C60,0x0EE0,0x0F60,0x0000,0x0000},
+ /* b */ {0x0000,0x0000,0x0000,0x0000,0x0C00,0x0C00,0x0DC0,0x0FE0,0x0C60,0x0C60,0x0C70,0x0C60,0x0FE0,0x0FC0,0x0000,0x0000},
+ /* c */ {0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0380,0x07E0,0x0E40,0x0C00,0x0C00,0x0E00,0x0FE0,0x07C0,0x0000,0x0000},
+ /* d */ {0x0000,0x0000,0x0000,0x0000,0x0060,0x0060,0x0760,0x0FE0,0x0C60,0x1C60,0x1C60,0x0C60,0x0FE0,0x07F0,0x0000,0x0000},
+ /* e */ {0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0380,0x07E0,0x0C60,0x0FE0,0x0FE0,0x0C00,0x0FE0,0x07C0,0x0000,0x0000},
+ /* f */ {0x0000,0x0000,0x0000,0x01C0,0x03C0,0x0300,0x07C0,0x07C0,0x0380,0x0300,0x0300,0x0300,0x0300,0x0300,0x0000,0x0000},
+ /* g */ {0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0720,0x0FF0,0x0C70,0x1C70,0x0C70,0x0E70,0x0FF0,0x0370,0x0060,0x07E0},
+ /* h */ {0x0000,0x0000,0x0000,0x0000,0x0C00,0x0C00,0x0DC0,0x0FE0,0x0E60,0x0C60,0x0C60,0x0C60,0x0C60,0x0C60,0x0000,0x0000},
+ /* i */ {0x0000,0x0000,0x0080,0x0180,0x0180,0x0000,0x0380,0x0380,0x0180,0x0180,0x0180,0x0180,0x0180,0x0180,0x0000,0x0000},
+ /* j */ {0x0000,0x0000,0x0080,0x01C0,0x0180,0x0000,0x0080,0x01C0,0x01C0,0x01C0,0x01C0,0x01C0,0x01C0,0x01C0,0x01C0,0x0780},
+ /* k */ {0x0000,0x0000,0x0000,0x0000,0x0C00,0x0C00,0x0C60,0x0DC0,0x0D80,0x0F00,0x0F80,0x0FC0,0x0CC0,0x0CE0,0x0000,0x0000},
+ /* l */ {0x0000,0x0000,0x0000,0x0000,0x0300,0x0300,0x0300,0x0300,0x0300,0x0300,0x0300,0x0300,0x0380,0x03C0,0x0000,0x0000},
+ /* m */ {0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x3770,0x3FF8,0x3398,0x3398,0x3398,0x3398,0x3398,0x3398,0x0000,0x0000},
+ /* n */ {0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0DC0,0x0FE0,0x0E60,0x0C60,0x0C60,0x0C60,0x0C60,0x0C60,0x0000,0x0000},
+ /* o */ {0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0380,0x0FE0,0x0C60,0x0C70,0x1C70,0x0C60,0x0FE0,0x07C0,0x0000,0x0000},
+ /* p */ {0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x09C0,0x0FE0,0x0C60,0x0C60,0x0C70,0x0C60,0x0FE0,0x0FC0,0x0C00,0x0C00},
+ /* q */ {0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0E40,0x1FE0,0x1CE0,0x18E0,0x18E0,0x18E0,0x1FE0,0x0FE0,0x00E0,0x00F8},
+ /* r */ {0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x06C0,0x07C0,0x0780,0x0700,0x0600,0x0600,0x0600,0x0600,0x0000,0x0000},
+ /* s */ {0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0380,0x0FE0,0x0C00,0x0F80,0x07E0,0x0060,0x0EE0,0x07C0,0x0000,0x0000},
+ /* t */ {0x0000,0x0000,0x0000,0x0000,0x0100,0x0380,0x07C0,0x07C0,0x0380,0x0380,0x0380,0x0380,0x03C0,0x01C0,0x0000,0x0000},
+ /* u */ {0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0C60,0x0C60,0x0C60,0x0C60,0x0C60,0x0C60,0x0FE0,0x0760,0x0000,0x0000},
+ /* v */ {0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0C60,0x0C60,0x0E60,0x06C0,0x06C0,0x07C0,0x0380,0x0380,0x0000,0x0000},
+ /* w */ {0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x3118,0x3398,0x3BB8,0x1BB0,0x1EF0,0x1EF0,0x1EE0,0x0E60,0x0000,0x0000},
+ /* x */ {0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0C60,0x0EE0,0x07C0,0x0380,0x0380,0x07C0,0x0EE0,0x0C60,0x0000,0x0000},
+ /* y */ {0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0C60,0x0C60,0x0EE0,0x06C0,0x07C0,0x03C0,0x0380,0x0380,0x0300,0x0700},
+ /* z */ {0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0FE0,0x0FE0,0x01E0,0x01C0,0x0380,0x0700,0x0FE0,0x0FE0,0x0000,0x0000},
+ /* { */ {0x0000,0x0000,0x0000,0x0000,0x01C0,0x0380,0x0300,0x0300,0x0300,0x0700,0x0700,0x0300,0x0300,0x0300,0x0380,0x01C0},
+ /* | */ {0x0000,0x0000,0x0000,0x0000,0x0380,0x0380,0x0380,0x0380,0x0380,0x0380,0x0380,0x0380,0x0380,0x0380,0x0380,0x0380},
+ /* } */ {0x0000,0x0000,0x0000,0x0000,0x0700,0x0380,0x0180,0x0180,0x0180,0x01C0,0x01C0,0x0180,0x0180,0x0180,0x0380,0x0700},
+ /* ~ */ {0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x0000,0x07E0,0x0FE0,0x0000,0x0000,0x0000,0x0000,0x0000},
+};
+static void draw_char(int x, int y, char ch, int scale, u32 c){
+    int idx = (int)(u8)ch - 32;
+    if (idx<0 || idx>=96) idx = 31; // '?'
+    const u16 *g = FONT16[idx];
+    // physical-space blit: the glyph cell is 16 source px spanning
+    // 8*scale logical px, so one source px is exactly `scale` physical
+    // px. Runs of set bits merge into single fills.
+    int pcx0 = clip_x0*RS, pcx1 = clip_x1*RS, pcy0 = clip_y0*RS, pcy1 = clip_y1*RS;
+    for (int row=0; row<16; row++){
+        u16 bits = g[row];
+        if (!bits) continue;
+        int py = y*RS + row*scale;
+        if (py+scale<=pcy0 || py>=pcy1) continue;
+        int ay0 = py<pcy0? pcy0 : py, ay1 = py+scale>pcy1? pcy1 : py+scale;
+        int col = 0;
+        while (col<16){
+            if (bits & (0x8000>>col)){
+                int cs = col;
+                while (col<16 && (bits & (0x8000>>col))) col++;
+                int fx = x*RS + cs*scale, fw = (col-cs)*scale;
+                int ax0 = fx<pcx0? pcx0 : fx, ax1 = fx+fw>pcx1? pcx1 : fx+fw;
+                for (int yy=ay0; yy<ay1; yy++){ u32 *r2=&fb[yy*PW]; for (int xx=ax0; xx<ax1; xx++) r2[xx]=c; }
+            } else col++;
+        }
+    }
+}
+static int text_w(const char *s, int scale){ return slen(s)*8*scale; }
+// Text is drawn BARE — no drop shadow, no outline halo. Both were
+// tried for readability and both read as BOLD at this size (Daniel,
+// Nov 1 2026); the Atkinson letterforms at a regular weight carry
+// the readability on their own.
+static void draw_text(int x, int y, const char *s, int scale, u32 c){
+    for (int i=0; s[i]; i++) draw_char(x+i*8*scale, y, s[i], scale, c);
+}
+static void draw_text_plain(int x, int y, const char *s, int scale, u32 c){
+    draw_text(x, y, s, scale, c);
+}
+static void draw_text_center(int cx, int y, const char *s, int scale, u32 c){
+    draw_text(cx - text_w(s,scale)/2, y, s, scale, c);
+}
+// draw_text_fit: the HUD's fit guarantee. If the string is wider than
+// maxw pixels at this scale, it is trimmed with a ".." tail so what is
+// drawn NEVER spills past the box it belongs to.
+static void draw_text_fit(int x, int y, int maxw, const char *s, int scale, u32 c){
+    if (text_w(s, scale) <= maxw){ draw_text(x, y, s, scale, c); return; }
+    char buf[96]; int n=0;
+    while (s[n] && n<94){ buf[n]=s[n]; n++; }
+    buf[n]=0;
+    while (n>0 && (n+2)*8*scale > maxw) buf[--n]=0;
+    buf[n]='.'; buf[n+1]='.'; buf[n+2]=0;
+    draw_text(x, y, buf, scale, c);
+}
+static void draw_text_center_fit(int cx, int y, int maxw, const char *s, int scale, u32 c){
+    if (text_w(s, scale) <= maxw){ draw_text_center(cx, y, s, scale, c); return; }
+    char buf[96]; int n=0;
+    while (s[n] && n<94){ buf[n]=s[n]; n++; }
+    buf[n]=0;
+    while (n>0 && (n+2)*8*scale > maxw) buf[--n]=0;
+    buf[n]='.'; buf[n+1]='.'; buf[n+2]=0;
+    draw_text_center(cx, y, buf, scale, c);
+}
+// tiny string builders (no printf in freestanding land)
+static char *sappend(char *p, const char *s){ while(*s) *p++ = *s++; *p = 0; return p; }
+static char *sapp_int(char *p, int v){
+    char tmp[16]; int n=0;
+    if (v<0){ *p++='-'; v=-v; }
+    if (v==0) tmp[n++]='0';
+    while (v>0){ tmp[n++] = (char)('0' + v%10); v/=10; }
+    while (n>0) *p++ = tmp[--n];
+    *p = 0; return p;
+}
+static void fmt_int(char *out, const char *pre, int v, const char *post){
+    char *p = sappend(out, pre); p = sapp_int(p, v); sappend(p, post);
+}
+
+// ---------------------------------------------------------------------------
+// Game design data
+// ---------------------------------------------------------------------------
+#define MAXP 4            // players (1 local + up to 3 LAN)
+#define MAXBUGS 240
+#define MAXPROJ 320
+#define MAXWALLS 420
+#define MAXPART 500
+#define MAXFLOAT 48
+#define MAXSTACK 420      // carcasses carried per player
+#define WORLD_SEED 1337u
+
+// Weapons: 0 Keyboard, 1 Mouse, 2 Duck, 3 PM Launcher, 4 Debugger
+#define NWEAP 5
+static const char *WEAPON_NAME[NWEAP] = {
+    "MECHANICAL KEYBOARD", "MOUSE TOSSER", "RUBBER DUCK CANNON",
+    "PM LAUNCHER", "THE DEBUGGER"
+};
+static const char *WEAPON_BLURB[NWEAP] = {
+    "Fires keycaps. Clickety-clack of doom.",
+    "Throws mice. Batteries not included.",
+    "Ducks bounce bug to bug. Quack.",
+    "Lobs a Project Manager. Huge AoE synergy.",
+    "Fire: beams extend, spin once, close. Copies add beams."
+};
+static const int WEAPON_PRICE[NWEAP] = { 0, 25, 60, 120, 200 };
+static float weap_dmg(int w){ return w==0?6.0f : w==1?24.0f : w==2?15.0f : 65.0f; }
+static float weap_cd(int w){ return w==0?0.115f : w==1?0.38f : w==2?0.30f : 1.05f; }
+// weapons stack: owned[w] is a COPY COUNT (0 = not owned), UNCAPPED —
+// stack as high as you can afford. Extra copies fan their shots out
+// across your front; the Debugger adds beams in a ring around you.
+// Copy N costs N x the base price (see store_item_price).
+#define MAXCOPIES 999
+#define MAXBEAMS 48           // Debugger ring rendering/simulation cap
+// The Debugger fires as ONE SWEEP, not a held hose (Daniel, Oct 31):
+// beams extend, spin a single revolution, then close, then rest. The
+// old held beam froze + shoved everything it touched every 0.07s, so a
+// full ring of copies was an untouchable fountain — nothing could ever
+// close in and the run never ended. The dead time between sweeps is
+// what lets the swarm back in.
+#define BEAM_EXT  0.18f       // beams grow to full reach
+#define BEAM_SPIN 0.85f       // one full revolution
+#define BEAM_RET  0.15f       // beams close (no damage while closing)
+#define BEAM_REST 0.55f       // dead time before the next sweep
+
+// Store upgrade tracks: dmg, rate, shield, armor, speed, rollback,
+// hotfix. Slot 7 was the AI AGENT; the robot retired when Banzai
+// Buddies took the job, and the slot now sells THE BACKFIRE BEAN
+// (Krista's idea, Nov 5): a very expensive little fellow who flies
+// you home to the Epicenter. His fuel is his own business.
+#define NUPG 8
+static const char *UPG_NAME[NUPG] = {
+    "OVERCLOCK (DMG+)", "CAFFEINE DRIP (RATE+)", "FIREWALL SHIELD",
+    "HOODIE ARMOR (HP+)", "ESPRESSO LEGS (SPD+)", "ROLLBACK TOKEN",
+    "HOTFIX (HEAL 50)", "THE BACKFIRE BEAN"
+};
+static const int UPG_PRICE[NUPG][4] = {   // price per level, -1 = no more
+    { 40, 90, 180, 360 },   // dmg +25%/lvl
+    { 35, 80, 170, 340 },   // rate +18%/lvl
+    { 50, 110, 230, -1 },   // shield cap 30/60/100
+    { 45, 95, 200, -1 },    // +25 max hp / lvl
+    { 30, 75, -1, -1 },     // speed: heavy hats slow you less / lvl
+    { 150, 150, 150, 150 }, // consumable revive token (rebuyable)
+    { 20, -1, -1, -1 },     // hotfix: consumable heal, rebuyable
+    { 500, 500, 500, 500 }, // slot 7: THE BACKFIRE BEAN — flat 500, always in stock
+};
+static const int UPG_MAXLV[NUPG] = { 999, 999, 999, 999, 999, 999, 0, 999 };
+static int shield_for(int lv){ return lv<=0?0 : lv==1?30 : lv==2?60 : 100 + 40*(lv-3); }
+// upgrade prices past the printed table: keep climbing off the top
+// rung — the top price times how far past it you've climbed.
+static int upg_price(int u, int lv){
+    int last = -1, li = 0;
+    for (int i=0;i<4;i++) if (UPG_PRICE[u][i]>0){ last = UPG_PRICE[u][i]; li = i; }
+    if (lv<=li) return UPG_PRICE[u][lv];
+    return last * (lv - li + 1);
+}
+
+typedef struct {
+    int alive, connected, is_local;
+    int in_store;                     // browsing the Bug Bounty (raises the shield)
+    char name[13];
+    float x, y, aim, walk_ph;
+    int hp, maxhp, shield, shield_max;
+    float shield_regen_t;
+    float fire_cd, hurt_t, dead_t, revive_t;   // revive_t: post-rollback grace
+    int on_wall;                      // interlock group he's standing on, -1 = ground
+    float shed_cd;                    // bite-sheds-hat cooldown (endgame pressure)
+    float idle_t;                     // time since last movement (idle anim)
+    float wof;                        // WALK OF FAME hold timer (mall crawl parade)
+    int in_mall;                      // inside the Bug Mall interior
+    int in_arcade;                    // inside the Arcade room (in_mall stays 1: same safe zone)
+    int station;                      // mall station whose panel is open, -1 none
+    float banked;                     // kg stored at the Bug Bank (safe, not a record)
+    int hatstand;                     // owns the Psychic Hat Stand
+    int whale_own, whale_on;          // Whales Only: owned / switched-on vanity bits
+    int weapon;                       // current
+    int owned[NWEAP];
+    int upg[NUPG];
+    int rollback;                     // revive tokens held
+    int beans;                        // BACKFIRE BEANS held (the ride home)
+    float bean_t;                     // >0 while a bean ride is playing out
+    float bean_jet;                   // >0 while jetpacking on a bean (epicenter launches)
+    float jet_fall;                   // brief tumble after a jet ends
+    // the hat: a stack of carcass weights (kg). This is also the wallet.
+    float stack[MAXSTACK];
+    int stack_n;
+    float carried;                    // total kg on head
+    float heaviest;                   // heaviest hat this run
+    int kills;
+    float dmg_mul, rate_mul;          // derived from upgrades
+    int color;                        // hoodie palette index
+    float net_aim; int net_keys;      // last input from net (host side)
+    int cur_keys; float cur_aim;      // resolved input this frame (any source)
+    int want_wall, want_buy;          // edge-triggered actions (net or local)
+    float wall_cd;
+    float tx, ty;                     // render interpolation target (client)
+} Player;
+
+typedef struct {
+    int alive, kind;                  // kind: 0 roach 1 beetle 2 spider 3 moth
+    float x, y, vx, vy, w;            // w = weight kg (drives size/hp/value)
+    float hp, maxhp, speed, dmg;
+    float leg_ph, wobble, hit_t, bp_t; // bp_t: breakpoint pause (Debugger)
+    int target_wall;                  // wall index being chewed, -1 none
+    int btarget;                      // owner index of the Banzai Buddy it's chasing, -1 none
+    int aggro;                        // bot that has hit this bug and drawn
+                                      // its ire, -1 = it hunts the players
+    float chew_t;
+    float stuck_t, grease_t; int grease_s;   // anti-stuck grease (Nov 10): slide around props
+    u32 seed;
+} Bug;
+
+typedef struct {
+    int alive, kind, owner;           // kind = weapon id
+    float x, y, vx, vy, dmg, life;
+    int bounces, target;              // duck chaining
+    int agent;                        // who fired it: -1 = a player, -2 = a buddy
+    float spin;
+} Proj;
+
+typedef struct {
+    int alive, horiz;                 // horiz: segment runs E-W else N-S
+    float x, y, hp, maxhp;
+    int stack;                        // walls piled on this spot (reinforcement layers), >=1
+    int grp;                          // interlock group leader index, -1 none
+    int grp_old;                      // group before the last recompute (pool shares)
+    int endpt;                        // end of a run: <=1 neighbour in its group
+} Wall;
+
+// (The AI AGENT robot clones were retired on Nov 2 — Daniel: the
+// Banzai Buddies replace them. The system is gone end to end.)
+
+// BANZAI BUDDY: a fighting companion bought at the mall — puppy, kitty
+// or moose. Follows its owner, fights beside them, earns XP from kills,
+// and spends it on training and taught moves at the buddy store.
+typedef struct {
+    int active, species;              // 0 puppy 1 kitty 2 moose 3 platypus 4 pet rock 5 kitchen sink
+    float x, y, aim, walk_ph;
+    float mv_t;                       // >0 while actually moving (drives the rigid walk flop in draw_buddy)
+    int on_wall;                      // interlock group he's standing on, -1 = ground (mirrors Player)
+    float hp, maxhp;
+    int xp;
+    int up_hp, up_atk, up_def;       // training levels (bought with XP)
+    int skills;                       // bit0: move 2 taught, bit1: special taught
+    int fainted;                      // out cold at 0 HP — never dead; the shop revives
+    int name_idx;                     // which Elder-Days name it answers to
+    int color;                        // coat: 0 natural, 1-8 standard, 9 neon rainbow
+    float atk_cd, move_cd, spec_cd, lunge_t, hurt_t, down_t;
+    float energy;                     // special attacks spend it; it refills as you go (and fully on sleep)
+    float move3_cd, move4_cd;
+    float bw_x, bw_y;                 // where this buddy stands in Banzai World
+    int in_bw;                        // currently adventuring in Banzai World (per-player mode)
+    int bw_mode;                      // this trip: 0 free play, 1 story mode
+    int story_started, story_bits;    // story progress: 2 bits per quest (0 unseen, 1 active, 2 done); farm kills in bits 8-11
+    int story_bits2;                  // quests 6-9 state + their flags (Nov 4 story expansion); saved as sq2, defaults 0 on old saves
+    int ent_best, ent_done;           // ENTRANCES records (Nov 5): deepest room reached, runs finished; saved packed as er
+    int ent_sub_best;                 // SUBFLOOR record: deepest B-room reached; saved as sb
+    int plat_done;                    // SUPER BUDDY RUN record: levels completed; saved as pd
+    float craft_x, craft_y;           // BUDDY CRAFT: this buddy's standing spot in the endless wild; saved as cx/cy
+    int craft_wood, craft_stone, craft_fiber, craft_car, craft_pies, craft_gear;   // BUDDY CRAFT pack; saved as cm/cn/cg
+    int craft_stews;                  // BUDDY CRAFT: stews in the pack (rides the cn token)
+    int craft_fish;                   // BUDDY CRAFT: lake fish in the pack (saved as cf)
+    float craft_tod;                  // BUDDY CRAFT: time of day, 0..240s cycle (day, dusk, night, dawn); saved as ct
+    int craft_bn;                     // BUDDY CRAFT: placed builds — they PERSIST (Daniel: leaving used to wipe them); saved as cw
+    int craft_btx[48], craft_bty[48], craft_bk[48], craft_bhp[48];   // build tiles, kind, chew hp left
+    int craft_gn;                     // BUDDY CRAFT: mined-out node keys (persist too); saved as cd
+    int craft_gone[96];
+    int items[4];                     // BW-only consumables: 0 Patch Notes, 1 Energy Drink, 2 Adrenal Cookie, 3 Ctrl-Z
+    int bw_seed, bw_started;          // its own procedural world, once begun
+    float calm;                       // seconds since last hurt (drives the regen)
+    float stuck_t, grease_t; int grease_s;   // anti-stuck grease (Nov 10): slide around props
+    int tank_done;                    // TANK RESCUE record: deepest level cleared; saved as td
+    float roll;                       // the pet rock's rolling angle
+    float steady_t;                   // pet rock's ROCK STEADY: unhurtable while > 0
+    float tx, ty;                     // render interpolation target (client)
+} Buddy;
+
+// BUG BOWL: one player's bowling game at the mall lanes. Lane space:
+// x across (-60..60 is the lane, beyond is gutter), y down-lane from
+// the foul line (0) to the back of the deck (~390). Full bowling
+// scoring: strikes, spares, and a three-ball tenth frame.
+typedef struct {
+    int active, game_over, final;
+    int frame, ball, ri_frame;        // ri_frame: roll index where this frame began
+    int rolls[21]; char marks[21]; int nrolls;
+    int phase;                        // 0 position 1 angle 2 power 3 rolling 4 settle 5 over 6 attract
+    float thrower_x, angle; int angle_dir;
+    float power; int power_dir;
+    float bx, by, bvx, bvy; int bl_live, bl_gutter, bl_kind;
+    int pins_before;
+    float settle_t, msg_t;
+    char msg[40];
+    int act;                          // queued FIRE edge from station_input
+    int standing[10];
+    float pfx[10], pfy[10], pfvx[10], pfvy[10], pft[10];   // toppling pins
+} Bowl;
+
+typedef struct { int alive; float x,y,vx,vy,life,maxlife; int size; u32 col; } Particle;
+typedef struct { int alive; float x,y,life; char text[24]; u32 col; } Floater;
+// a carcass in flight (to a head, to the store, or to a wall site)
+typedef struct {
+    int alive, mode;                  // 0 to head, 1 to store, 2 to wall site
+    float x0,y0, x1,y1, t, dur, w;
+    int player, wall_slot;
+} CarcassFx;
+
+enum { GS_MENU=0, GS_PLAY=1, GS_STORE=2, GS_OVER=3, GS_HELP=4, GS_PAUSE=5, GS_SETTINGS=6, GS_SLOTS=7, GS_BWORLD=8 };
+enum { NET_OFF=0, NET_HOST=1, NET_CLIENT=2 };
+
+typedef struct {
+    int state, prev_state;
+    int net_mode, my_id;
+    float time;                       // run elapsed
+    Player p[MAXP];
+    Bug bugs[MAXBUGS];
+    Proj projs[MAXPROJ];
+    Wall walls[MAXWALLS];
+    Particle parts[MAXPART];
+    Floater floats[MAXFLOAT];
+    CarcassFx fx[MAXP*24 + 64];
+    float camx, camy, shake;
+    float threat;                     // world difficulty x1.0+, from player power
+    float zoom;                       // camera zoom (1 = normal, <1 = zoomed out)
+    float spawn_t, autosave_t, net_t, music_t;
+    int total_kills;
+    float total_earned;               // kg cashed in, all time this run
+    int menu_sel, store_sel, store_msg_t;
+    int store_sel2;                   // co-op: P2's own store cursor
+    int store_pi;                     // whose store is being drawn/driven
+    int store_station;                // mall station of the open panel (0 = the shop)
+    Buddy bud[MAXP];                  // one Banzai Buddy per player slot
+    Bowl bowl[MAXP];                  // one Bug Bowl game per player slot
+    int coop_pref;                    // 2P local co-op wanted (persisted)
+    int p2_slot;                      // player index of the local P2, -1 none
+    int view_x0, view_w, view_pi;     // split-screen: current render view
+    int view_y0, view_h;              // (y twin: horizontal splits stack views)
+    int cam_lock;                     // split pass: cam/zoom set by the caller
+    int ui_compact;                   // store panel squeezed into a split half
+    int tap_close_store;              // mobile: tapped outside the store panel
+    char store_msg[64];
+    float gameover_t;
+    int bind[14];                     // action -> physical key id (see PK_*)
+    int touch_ctl;                    // mobile control scheme: 0 = drag, 1 = virtual d-pad
+    int zen, zen_run;                 // zen preference + the running game's zen flag
+    int eddie;                        // EDDIE MODE: bugs render as fuzzy orange puffballs (cosmetic)
+    int whale_own, whale_on;          // WHALES ONLY: this user's unlocks (persisted globally)
+    int difficulty, diff_run;         // 0 EASY (= the game as it was) 1 MEDIUM 2 HARD 3 BUGAGGEDON
+    int set_sel, set_capture;         // settings screen: row, awaiting a key
+    // records (persisted across runs)
+    char rec_name[13]; float rec_hat; int rec_kills; float rec_time; int rec_bowl;
+    int has_save;
+    int menu_pad;                     // title-menu layout latch: 0 unset, 1 keyboard rows, 2 pad rows
+    // save slots: the run lives in one of three slot blobs; records and
+    // settings stay in the global blob. slot = the slot this run uses.
+    int slot; int slot_has[4];
+    int slots_mode, slots_sel, slots_confirm;   // slot picker UI state
+    int pause_sel;                              // pause menu selection
+    int pause_ctl;                              // pause menu: the CONTROLS panel is open
+    // menu text fields, filled by the platform (name / join IP)
+    char my_name[13];
+    char join_ip[48];
+    int edit_field;                   // 0 none, 1 name, 2 ip
+    int key_edges;                    // key bits that went down this frame
+    float anim_t;                     // global animation clock
+    u32 run_seed;
+} Game;
+static Game G;
+static void refresh_has_save(void);
+static int want_autostart = 0;   // shell asks to skip the menu (hosted page)
+
+// Physical keys — the ONLY keyboard vocabulary the platform layers speak
+// now. Each backend reports which physical keys are held (IN.raw); the
+// core turns them into game actions through the player's key bindings,
+// so every build has exactly the same controls. Letters A-Z are 0-25,
+// digits 0-9 are 26-35, then the named keys.
+enum {
+    PK_UP=36, PK_DOWN, PK_LEFT, PK_RIGHT, PK_SPACE, PK_ENTER, PK_ESC,
+    PK_SHIFT, PK_BACKSPACE, PK_COUNT
+};
+// Game actions. The first 14 are rebindable in Settings; WPREV/WNEXT/ESC
+// exist so gamepads can speak in actions directly.
+enum {
+    ACT_UP=0, ACT_DOWN, ACT_LEFT, ACT_RIGHT, ACT_FIRE, ACT_INTERACT,
+    ACT_WALL, ACT_PAUSE, ACT_SPRINT, ACT_W1, ACT_W2, ACT_W3, ACT_W4,
+    ACT_W5, ACT_WPREV, ACT_WNEXT, ACT_ESC, ACT_ENTER, ACT_BEAN, ACT_COUNT
+};
+static const char *act_name(int a){
+    static const char *n[] = { "MOVE UP","MOVE DOWN","MOVE LEFT","MOVE RIGHT",
+        "FIRE","INTERACT","BUILD WALL","PAUSE","SPRINT",
+        "WEAPON 1","WEAPON 2","WEAPON 3","WEAPON 4","WEAPON 5" };
+    return n[a];
+}
+static const char *key_name(int pk){
+    static char b[8];
+    if (pk>=0 && pk<26){ b[0]=(char)('A'+pk); b[1]=0; return b; }
+    if (pk>=26 && pk<36){ b[0]=(char)('0'+pk-26); b[1]=0; return b; }
+    switch (pk){
+        case PK_UP: return "UP"; case PK_DOWN: return "DOWN";
+        case PK_LEFT: return "LEFT"; case PK_RIGHT: return "RIGHT";
+        case PK_SPACE: return "SPACE"; case PK_ENTER: return "ENTER";
+        case PK_ESC: return "ESC"; case PK_SHIFT: return "SHIFT";
+        case PK_BACKSPACE: return "BKSP";
+    }
+    return "?";
+}
+static void bind_defaults(int *bind){
+    bind[ACT_UP]= 'W'-'A'; bind[ACT_DOWN]='S'-'A';
+    bind[ACT_LEFT]='A'-'A'; bind[ACT_RIGHT]='D'-'A';
+    bind[ACT_FIRE]=PK_SPACE; bind[ACT_INTERACT]='E'-'A';
+    bind[ACT_WALL]='F'-'A'; bind[ACT_PAUSE]='P'-'A';
+    bind[ACT_SPRINT]=PK_SHIFT;
+    for (int w=0;w<5;w++) bind[ACT_W1+w]=26+1+w;   // digits 1-5
+}
+
+// input, filled by the platform each frame
+typedef struct {
+    u64 raw;                          // held physical keys (PK_* bits)
+    u64 edges_in;                     // keydown events since last frame:
+                                      // lossless edges (a tap between two
+                                      // frames still counts exactly once)
+    u64 pulse;                        // one-frame key taps (touch buttons)
+    u32 act_held, act_edges;          // gamepad actions, in ACT_* space
+    u32 act2_held, act2_edges;        // second gamepad (local co-op P2)
+    int pad_count;                    // controllers the platform can see
+    float dev_t, pad_last, key_last;  // last-device stamps: which input the player is actually USING (drives hint labels)
+    int weapon_cycle;                 // derived: -1/0/+1 from gamepad bumpers
+    int keys;                         // bits below
+    float mx, my;                     // mouse in screen coords
+    int mdown, mclicked, rclicked;
+    char typed[16]; int typed_n;      // characters typed this frame (for fields)
+    int backspace;
+    int weapon_key;                   // 0 none, else 1..5 pressed this frame
+    int bean_key;                     // the Backfire Bean trigger (key 6 / BEAN tap)
+    int wall_pressed, interact_pressed, esc_pressed;
+    int enter_pressed;                // Enter key specifically (E is interact;
+                                      // menus need to tell them apart so you
+                                      // can type the letter E into a field)
+    int select_pressed;               // Space (the select key) or Enter, one frame
+    int pause_pressed;                // P key, one frame (single-player pause)
+    int touch_x, touch_y, touch_down; // mobile web: finger pos (fb coords) + held
+    int touch_seen;                   // mobile web: touch used at least once (prompt wording)
+    int mobile_boot;                  // mobile web: shell reported a touch-first device at boot
+    int tap_x, tap_y, tapped;         // mobile web: a quick tap landed this frame
+    struct { int active, id, x, y, x0, y0, ax, ay, moved, zone; float age; } tp[6];  // live touch points (ax/ay: joystick anchor)
+    int touch_keys;                   // stick scheme: K_* bits held via on-screen controls
+    int tp_act_edge, tp_wpn_edge, tp_wall_edge;   // button taps, latched for the next frame
+    int tp_held;                      // button zones currently held (for rendering)
+    int joy_on, joy_ax, joy_ay, joy_kx, joy_ky;   // floating joystick render state
+    int menu_up, menu_down;           // ARROW keys only, as one-frame edges.
+                                      // Menus navigate with these, never with
+                                      // the WASD bits — otherwise typing a
+                                      // name like WES would steer the menu.
+} Input;
+static Input IN;
+// Touch-first presentation: no keyboard exists, so the Settings (key
+// binding) screen is hidden and every instruction is written for taps.
+static int mobile_ui(void){ return IN.touch_seen || IN.mobile_boot; }
+// gamepad presentation: the keyboard/touch control hints and the
+// menu's settings (key-binding) option hide themselves — Daniel's
+// rule. This used to be "a pad is plugged in", which lied constantly:
+// a pad sitting connected flipped every hint to pad labels while the
+// player was on keys (and vice versa). Now it follows the LAST DEVICE
+// actually touched: pad buttons/sticks stamp pad_last in
+// derive_input, physical keys stamp key_last, and the newer stamp
+// wins. Before either is touched, a connected pad still means pad
+// labels (the boot default Daniel expects on the couch).
+static int pad_mode(void){
+    if (IN.pad_count<1) return 0;
+    if (IN.pad_last<=0 && IN.key_last<=0) return 1;
+    return IN.pad_last>=IN.key_last;
+}
+// The title menu's ROW LAYOUT latches its pad/keyboard flavour when the
+// menu opens. pad_mode() follows the last device touched, which is right
+// for hint labels — but letting it restructure the menu mid-navigation
+// silently moves rows under the cursor: one keyboard Down press
+// re-inserted the SETTINGS row and pushed 2P CO-OP down a row, so a
+// player counting rows toggled EDDIE MODE instead and co-op never
+// engaged (the mallfix P2 drop-in failure, Nov 14 2026). The latch
+// resets whenever the game leaves the title menu.
+static int menu_pad_mode(void){
+    if (!G.menu_pad) G.menu_pad = pad_mode()? 2 : 1;
+    return G.menu_pad==2;
+}
+// the one true label for an action, for the device in hand. Pad map
+// (standard): A fire/confirm, B interact, X wall, START pause/menu,
+// BACK back. Keyboard labels honour the player's own bindings.
+static const char *lbl_fire(void){ return pad_mode()? "A" : (mobile_ui()? "TAP" : key_name(G.bind[ACT_FIRE])); }
+static const char *lbl_int(void){ return pad_mode()? "B" : (mobile_ui()? "TAP" : key_name(G.bind[ACT_INTERACT])); }
+static const char *lbl_wall(void){ return pad_mode()? "X" : (mobile_ui()? "TAP" : key_name(G.bind[ACT_WALL])); }
+static const char *lbl_bean(void){ return pad_mode()? "Y" : (mobile_ui()? "TAP BEAN" : "6"); }
+// a contextual key prompt: "<KEY> - <VERB>", composed on the spot
+// (key_name's buffer is shared, so never store its pointer)
+static const char *key_prompt(char *buf, const char *key, const char *verb){
+    char *q=buf; q=sappend(q, key); q=sappend(q, " - "); q=sappend(q, verb); *q=0; return buf;
+}
+static const char *lbl_exit(void){ return pad_mode()? "START" : "ESC"; }
+
+enum {
+    K_UP=1<<0, K_DOWN=1<<1, K_LEFT=1<<2, K_RIGHT=1<<3,
+    K_FIRE=1<<4, K_WALL=1<<5, K_INTERACT=1<<6, K_SPRINT=1<<7
+};
+// ---- touch controls: the shell forwards every finger to the core.
+// Scheme 0 (drag): the first finger steers + fires; a quick, still touch
+// is a tap (menus, store, entering the store). Scheme 1 (d-pad): during
+// play, on-screen controls — a d-pad bottom-left, FIRE / USE (interact)
+// / WPN (cycle weapon) bottom-right — while taps still drive the menus.
+#define TP_DPAD_CX 66
+#define TP_DPAD_CY 288
+#define TP_FIRE_CX (VW-58)
+#define TP_FIRE_CY 278
+#define TP_ACT_CX  (VW-126)
+#define TP_ACT_CY  318
+#define TP_WPN_CX  (VW-130)
+#define TP_WPN_CY  232
+#define TP_WALL_CX (VW-58)
+#define TP_WALL_CY 198
+// zones: 5 = FIRE, 6 = USE, 7 = WPN, 8 = joystick, 9 = WALL
+static int tp_zone_at(int x, int y){
+    int dx=x-TP_FIRE_CX, dy=y-TP_FIRE_CY; if (dx*dx+dy*dy<38*38) return 5;
+    dx=x-TP_ACT_CX; dy=y-TP_ACT_CY; if (dx*dx+dy*dy<26*26) return 6;
+    dx=x-TP_WPN_CX; dy=y-TP_WPN_CY; if (dx*dx+dy*dy<22*22) return 7;
+    dx=x-TP_WALL_CX; dy=y-TP_WALL_CY; if (dx*dx+dy*dy<26*26) return 9;
+    dx=x-TP_DPAD_CX; dy=y-TP_DPAD_CY;
+    if (dx*dx+dy*dy<60*60){
+        if (dx>=-12 && dx<=12 && dy>=-12 && dy<=12) return 0;
+        if (dx*dx>dy*dy) return dx>0? 4:3;
+        return dy>0? 2:1;
+    }
+    return 0;
+}
+static void disc_fill(int cx, int cy, int r, u32 c){
+    for (int dy=-r; dy<=r; dy++){ int dx=(int)fsqrt((float)(r*r-dy*dy)); rect_fill(cx-dx, cy+dy, dx*2, 1, c); }
+}
+static int chip_at(Player *me, int tx, int ty);   // weapon chips (defined with the HUD)
+static void touch_update(float dt){
+    // weapon chips: a tap on the strip equips that weapon directly —
+    // the only way to switch on a touchscreen in drag mode
+    if (G.state==GS_PLAY && IN.tapped){
+        Player *me=&G.p[G.my_id];
+        int cw = chip_at(me, IN.tap_x, IN.tap_y);
+        if (cw>=0){ IN.weapon_key = cw+1; IN.tapped=0; }
+        // the BEAN readout in the status card is a button too
+        else if (me->beans>0 && IN.tap_x>=138 && IN.tap_x<232 && IN.tap_y>=64 && IN.tap_y<80){ IN.bean_key = 1; IN.tapped=0; }
+    }
+    IN.touch_keys=0; IN.tp_held=0; IN.joy_on=0;
+    if (IN.tp_act_edge){ IN.interact_pressed=1; IN.tp_act_edge=0; }
+    if (IN.tp_wpn_edge){ IN.weapon_cycle=1; IN.tp_wpn_edge=0; }
+    if (IN.tp_wall_edge){ IN.wall_pressed=1; IN.tp_wall_edge=0; }
+    IN.touch_down=0;
+    for (int i=0;i<6;i++){
+        if (!IN.tp[i].active) continue;
+        IN.tp[i].age += dt;
+        if (G.touch_ctl==0){
+            if (!IN.touch_down && IN.tp[i].zone!=9 && IN.tp[i].zone!=7){ IN.touch_x=IN.tp[i].x; IN.touch_y=IN.tp[i].y; IN.touch_down=1; }
+        } else if (G.state==GS_PLAY && IN.tp[i].zone==5){
+            IN.tp_held |= 32; IN.touch_keys |= K_FIRE;
+        } else if (G.state==GS_PLAY && IN.tp[i].zone==8){
+            // floating joystick (Minecraft-style): the base sits where the
+            // thumb landed and slides along when the thumb drags past the
+            // rim, so the knob is always at full reach under the finger.
+            float dx = (float)(IN.tp[i].x - IN.tp[i].ax), dy = (float)(IN.tp[i].y - IN.tp[i].ay);
+            float len = fsqrt(dx*dx + dy*dy);
+            if (len > 48.0f){
+                float s = (len - 48.0f) / len;
+                IN.tp[i].ax += (int)(dx * s); IN.tp[i].ay += (int)(dy * s);
+                dx = (float)(IN.tp[i].x - IN.tp[i].ax); dy = (float)(IN.tp[i].y - IN.tp[i].ay);
+            }
+            IN.joy_on=1; IN.joy_ax=IN.tp[i].ax; IN.joy_ay=IN.tp[i].ay;
+            IN.joy_kx=IN.tp[i].ax+(int)dx; IN.joy_ky=IN.tp[i].ay+(int)dy;
+            if (dx>9) IN.touch_keys|=K_RIGHT; else if (dx<-9) IN.touch_keys|=K_LEFT;
+            if (dy>9) IN.touch_keys|=K_DOWN; else if (dy<-9) IN.touch_keys|=K_UP;
+        }
+    }
+}
+// raw-key bookkeeping for derive_input (defined later); the settings
+// screen's capture mode reads g_raw_edges directly
+static u64 prev_raw=0, g_raw_edges=0; static int prev_sem=0;
+static float menu_rep_t=0; static int menu_rep_dir=0;
+static int raw_dn(int pk){ return pk>=0 && pk<64? (int)((IN.raw>>pk)&1) : 0; }
+static int raw_edge(int pk){ return pk>=0 && pk<64? (int)((g_raw_edges>>pk)&1) : 0; }
+static void move_key_str(char *b);   // forward: defined with the help screen
+
+// palettes
+static const u32 HOODIE[MAXP] = { COL(64,140,240), COL(240,90,90), COL(90,200,110), COL(240,180,60) };
+static const u32 BUG_COL[4] = { COL(150,90,200), COL(90,170,80), COL(220,120,50), COL(100,180,220) };
+static const u32 BUG_BELLY[4] = { COL(190,150,230), COL(140,210,120), COL(245,170,100), COL(160,220,245) };
+
+// regions by distance from the epicenter (stretched: the good stuff
+// is FAR out). The first three bands are the original country, kept
+// exactly as they were; beyond the Legacy Lands the world keeps
+// changing its mind — scorched kernel badlands, a frozen cache field,
+// neon RAM flats, an overgrown cable jungle, and at the end of the
+// world the Depths, pushed far out to where they belong (Daniel,
+// Nov 9: "add more regions as you go further from the epicenter").
+// Everything regional is a pure function of distance, so the ground,
+// the prop tables and the bug strains all agree with each other —
+// and with the host in co-op — with nothing stored anywhere.
+#define NREGIONS 8
+static const char *REGION_NAME[NREGIONS] = {
+    "CLEAN CODE MEADOWS", "SPAGHETTI FIELDS", "LEGACY LANDS",
+    "KERNEL BADLANDS", "FROZEN CACHE FIELDS", "NEON RAM FLATS",
+    "CABLE JUNGLE", "THE UNMAINTAINED DEPTHS"
+};
+static const float REGION_EDGE[NREGIONS-1] = { 500, 1400, 2600, 4200, 6200, 8800, 12000 };
+static const u32 REGION_GA[NREGIONS] = {
+    COL(116,184,96),  COL(150,164,84),  COL(128,116,92),  COL(112,70,48),
+    COL(176,204,220), COL(56,50,104),   COL(56,102,60),   COL(88,80,104)
+};
+static const u32 REGION_GB[NREGIONS] = {
+    COL(108,176,90),  COL(142,156,78),  COL(120,108,86),  COL(102,62,42),
+    COL(166,196,212), COL(48,43,94),    COL(48,94,54),    COL(80,72,96)
+};
+// ground sprinkle tint per region (the little grass-tuft strokes)
+static const u32 REGION_TUFT[NREGIONS] = {
+    COL(80,140,70),  COL(96,132,74),  COL(120,124,88),  COL(158,102,58),
+    COL(214,234,244), COL(110,235,255), COL(74,156,84), COL(140,128,140)
+};
+// each far region's dominant bug strain (BUG_COL order); -1 = fair mix
+static const int REGION_BUG[NREGIONS] = { -1, -1, -1, 2, 3, 0, 1, -1 };
+static int region_at(float d){
+    int r = 0;
+    while (r < NREGIONS-1 && d >= REGION_EDGE[r]) r++;
+    return r;
+}
+static const char *zone_name(float d){ return REGION_NAME[region_at(d)]; }
+static u32 zone_ground(float d, int checker){
+    int r = region_at(d);
+    return checker ? REGION_GA[r] : REGION_GB[r];
+}
+
+// hat tiers — predefined shapes the stack grows through
+static const char *hat_tier_name(int n, float kg){
+    if (n<=0)        return "BALD";
+    if (n==1)        return "SINGLE ROACH";
+    if (n<=3)        return "BUG CAP";
+    if (n<=6)        return "BUG BEANIE";
+    if (n<=11)       return "STACK OVERFLOW";
+    if (n<=18)       return "TOWER OF TECH DEBT";
+    if (kg<160.0f)   return "CROWN OF CARCASSES";
+    return "THE LEGACY SYSTEM";
+}
+static float player_speed(Player *p){
+    // Espresso Legs. Nov 9 rebalance (Daniel): "cap the unburdened
+    // speed upgrade max so I'm not zooming everywhere — it should
+    // continue to have a benefit burdened, and make the burdened
+    // benefit more substantial per level." So: the bare-speed bonus
+    // now CAPS at +40% (207 px/s — where a level-10 build already
+    // cruises) no matter how Endless the levels get, and the
+    // upgrade's endless value moved into the load curve instead:
+    // each level raises by 50% (was 35%) the weight the curve
+    // shrugs off, so every level claws back a bigger share of the
+    // hat's penalty than it used to, forever. Level 0 is untouched:
+    // same base, same curve as always.
+    float bmul = 1.0f + 0.04f*p->upg[4]; if (bmul>1.40f) bmul=1.40f;
+    float base = 148.0f * bmul;
+    float cap = 55.0f * (1.0f + 0.50f*p->upg[4]);
+    float load = 1.0f/(1.0f + p->carried/cap);   // heavy hat = slow dev
+    if (p->cur_keys & K_SPRINT) load *= 1.22f;
+    return base*load;
+}
+
+// ---------------------------------------------------------------------------
+// Entity helpers
+// ---------------------------------------------------------------------------
+// WHALES ONLY: PARADE DUCK — per-player follower state (purely visual)
+static float duck_x[MAXP], duck_y[MAXP], duck_ph[MAXP];
+static int duck_on[MAXP], duck_face[MAXP];
+static void spawn_particle(float x, float y, u32 col, float spd, float life, int size){
+    for (int i=0;i<MAXPART;i++) if (!G.parts[i].alive){
+        Particle *q=&G.parts[i];
+        float a = rng_f()*TAU;
+        q->alive=1; q->x=x; q->y=y; q->vx=fcos(a)*spd*rng_f(); q->vy=fsin(a)*spd*rng_f();
+        q->life=q->maxlife=life*(0.5f+rng_f()*0.5f); q->size=size; q->col=col; return;
+    }
+}
+static void splat(float x, float y, u32 col, int n, float spd){
+    for (int i=0;i<n;i++) spawn_particle(x, y, col, spd, 0.55f, 2+(int)(rng_f()*3));
+}
+static void spawn_floater(float x, float y, const char *txt, u32 col){
+    for (int i=0;i<MAXFLOAT;i++) if (!G.floats[i].alive){
+        Floater *f=&G.floats[i];
+        f->alive=1; f->x=x; f->y=y; f->life=1.1f; scpy(f->text, txt, 24); f->col=col; return;
+    }
+}
+static void floater_num(float x, float y, const char *pre, int v, const char *post, u32 col){
+    char b[24]; fmt_int(b, pre, v, post); spawn_floater(x, y, b, col);
+}
+static CarcassFx *spawn_fx(int mode, float x0, float y0, float x1, float y1, float w, int player){
+    for (int i=0;i<(int)(sizeof(G.fx)/sizeof(G.fx[0]));i++) if (!G.fx[i].alive){
+        CarcassFx *f=&G.fx[i];
+        f->alive=1; f->mode=mode; f->x0=x0; f->y0=y0; f->x1=x1; f->y1=y1;
+        f->t=0; f->dur=0.42f; f->w=w; f->player=player; f->wall_slot=-1; return f;
+    }
+    return 0;
+}
+// hat stack ops — the stack is both hat and wallet
+static void hat_push(Player *p, float w){
+    if (p->stack_n < MAXSTACK) p->stack[p->stack_n++] = w;
+    else p->stack[MAXSTACK-1] += w;                    // merge overflow
+    p->carried += w;
+    if (p->carried > p->heaviest) p->heaviest = p->carried;
+}
+static float hat_pop(Player *p){                        // returns weight or 0
+    if (p->stack_n<=0) return 0;
+    float w = p->stack[--p->stack_n];
+    p->carried -= w; if (p->carried<0) p->carried=0;
+    return w;
+}
+
+// ---------------------------------------------------------------------------
+// Banzai Buddies — species data and derived stats
+// ---------------------------------------------------------------------------
+#define BUDN 6
+static const char *BUD_NAME[BUDN] = { "PUPPY", "KITTY", "MOOSE", "PLATYPUS", "PET ROCK", "KITCHEN SINK" };
+static const char *BUD_MOVE2[BUDN] = { "POUNCE", "RAKE", "CHARGE", "SPUR DIVE", "ROLL OUT", "SPLASH DOWN" };
+static const char *BUD_SPEC[BUDN] = { "BARK", "HAIRBALL", "STOMP", "VENOM STING", "ROCK STEADY", "OVERFLOW" };
+static const char *BUD_MOVE3[BUDN] = { "FETCH", "FLYING CLAWS", "ANTLER SWEEP", "BILL SLAM", "SEDIMENT SLAM", "DISPOSAL" };
+static const char *BUD_MOVE4[BUDN] = { "PUPPY EYES", "AMBUSH", "TIMBER!", "SIXTH SENSE", "AVALANCHE", "EVERYTHING" };
+static const char *BUD_BASIC[BUDN] = { "CHOMP", "SCRATCH", "HEADBUTT", "BILL POKE", "BONK", "CLANG" };
+// Buddy energy (Daniel): specials are not free anymore. The basic attack
+// costs nothing; each taught move has a price, and the pool refills on
+// its own as you go. Sleeping (Banzai World) refills it outright.
+#define BUD_ENERGY_MAX 100.0f
+#define BUD_EN_MOVE2 20.0f
+#define BUD_EN_SPEC  45.0f
+#define BUD_EN_MOVE3 30.0f
+#define BUD_EN_MOVE4 55.0f
+#define BUD_EN_REGEN 5.0f
+static const int BUD_PRICE[BUDN] = { 100, 150, 300, 200, 60, 175 };
+static const float BUD_HP0[BUDN] = { 95, 75, 230, 120, 420, 160 };
+static const float BUD_DMG0[BUDN] = { 7, 5, 15, 9, 6, 10 };
+static const float BUD_CD0[BUDN] = { 0.55f, 0.32f, 0.9f, 0.6f, 1.1f, 0.7f };
+static const float BUD_SPD[BUDN] = { 185, 195, 165, 175, 118, 148 };   // the rock is in no hurry
+static const float BUD_DEF[BUDN] = { 1.0f, 1.0f, 0.9f, 0.9f, 0.45f, 0.8f };   // damage taken multiplier
+// the name list: obscure Elves (and a few Maiar) of the Elder Days,
+// out of The Silmarillion — diacritics folded to plain letters
+#define BUD_NAMES_N 60
+// elven names from The Silmarillion, The Hobbit and The Lord of the
+// Rings, ASCII-folded and alphabetized (Daniel, Nov 2). Half-elves
+// Earendil, Elrond and Elwing make the cut; the old list's Maiar
+// (Salmar, Osse and friends) do not — they were never elves.
+static const char *BUD_ELF[BUD_NAMES_N] = {
+    "AEGNOR", "AMRAS", "AMROD", "ANGROD", "AREDHEL", "ARGON", "ARWEN", "BELEG",
+    "CARANTHIR", "CELEBORN", "CELEBRIAN", "CELEGORM", "CIRDAN", "CURUFIN", "DAERON", "DENETHOR",
+    "EARENDIL", "ECTHELION", "EGALMOTH", "ELENWE", "ELLADAN", "ELROHIR", "ELROND", "ELWING",
+    "EOL", "ERESTOR", "FEANOR", "FINARFIN", "FINDUILAS", "FINGOLFIN", "FINROD", "FINWE",
+    "GALADRIEL", "GALION", "GILDOR", "GILGALAD", "GLORFINDEL", "GWINDOR", "HALDIR", "IDRIL",
+    "INGWE", "LEGOLAS", "LINDIR", "LUTHIEN", "MABLUNG", "MAEDHROS", "MAEGLIN", "MAGLOR",
+    "MIRIEL", "NERDANEL", "NIMLOTH", "ORODRETH", "OROPHIN", "PENGOLODH", "RUMIL", "SAEROS",
+    "THINGOL", "THRANDUIL", "TURGON", "VORONWE"
+};
+// the original 20-name list, kept only so saves written before the
+// expansion can map their stored index to the same name (the bnv
+// save token marks new-format saves; the Maiar names that are gone
+// fall back to the species default)
+static const char *BUD_ELF_LEGACY[20] = {
+    "AEGNOR", "AMROD", "AMRAS", "ANGROD", "CARANTHIR", "EOL", "MAEGLIN", "VORONWE",
+    "GWINDOR", "MABLUNG", "BELEG", "FINDUILAS", "NERDANEL", "SALMAR", "ILMARE",
+    "EONWE", "TILION", "ARIEN", "OSSE", "UINEN"
+};
+static const int BUD_DEF_NAME[BUDN] = { 7, 43, 57, 37, 24, 12 };   // BELEG, LUTHIEN, THRANDUIL, GWINDOR, EOL, CIRDAN
+// buddy coats: 0 is the species' own color; 1-8 are the standard set;
+// 9 is the psychedelic neon rainbow (cycles with time)
+#define BUD_COLORS_N 10
+static const char *BUD_COLOR_NAME[BUD_COLORS_N] = {
+    "NATURAL", "RED", "ORANGE", "YELLOW", "GREEN", "BLUE", "PURPLE", "PINK", "BROWN", "NEON RAINBOW"
+};
+static u32 bud_hsv(float h){   // h in turns; full saturation, full neon
+    h -= (int)h; if (h<0) h+=1.0f;
+    float x = h*6.0f; int s = (int)x; float f = x - s;
+    int up = (int)(f*255.0f), dn = 255-up;
+    switch (s%6){
+        case 0: return COL(255, up, 0); case 1: return COL(dn, 255, 0);
+        case 2: return COL(0, 255, up); case 3: return COL(0, dn, 255);
+        case 4: return COL(up, 0, 255); default: return COL(255, 0, dn);
+    }
+}
+static u32 bud_coat(Buddy *b, u32 natural){
+    static const u32 STD[8] = { COL(216,64,54), COL(240,140,40), COL(244,208,64), COL(84,190,84),
+                                COL(72,130,230), COL(150,90,210), COL(244,140,190), COL(140,95,60) };
+    if (b->color==9) return bud_hsv(G.anim_t*0.22f + (float)(b - G.bud)*0.37f);
+    if (b->color>=1 && b->color<=8) return STD[b->color-1];
+    return natural;
+}
+// adoption draft state: species -> name -> color, then the till runs
+static int bud_stage[MAXP];        // 0 panel, 1 name (adopt), 2 color (adopt), 3 name (rename), 4 color (recolor)
+static int bud_page[MAXP];         // name-list page while picking
+static int bud_dsp[MAXP];          // drafted species for an adoption
+static int bud_dname[MAXP];        // drafted name for an adoption
+static int bud_color_draft[MAXP];  // drafted coat for an adoption
+static void buddy_refresh(int pi){
+    Buddy *b=&G.bud[pi];
+    b->maxhp = BUD_HP0[b->species%BUDN] + 25.0f*b->up_hp;
+    if (b->hp > b->maxhp) b->hp = b->maxhp;
+}
+static float buddy_dmg(Buddy *b){ return BUD_DMG0[b->species%BUDN] * (1.0f + 0.2f*b->up_atk); }
+static void buddy_adopt(int pi, int species){
+    Buddy *b=&G.bud[pi];
+    smemset(b, 0, sizeof(*b));
+    b->active=1; b->species=species; b->on_wall=-1;
+    b->name_idx = bud_dname[pi]; b->color = bud_color_draft[pi];
+    buddy_refresh(pi);
+    b->hp = b->maxhp;
+    b->energy = BUD_ENERGY_MAX;
+    b->x = G.p[pi].x + 26; b->y = G.p[pi].y + 12;
+    b->aim = -PI/2;
+    splat(b->x, b->y, COL(255,214,120), 12, 100);
+}
+
+// pending store payment (one at a time; the till is not self-service)
+static int   store_open_local=0;      // client-side store UI flag
+static int   client_station=0;        // client-side: which mall station panel is open
+static int   shield_remote=0;         // client copy: shield state from snapshots
+static int   pay_active=0, pay_player=0, pay_kind=0, pay_id=0;
+static float pay_left=0, pay_t=0, pay_total=0;
+static void grant_item(int pi, int kind, int id){
+    Player *p=&G.p[pi];
+    if (kind==3){ p->hatstand=1; sfx(11); }                       // Psychic Hat Stand
+    else if (kind==4){ buddy_adopt(pi, id); sfx(11); }            // adopt a Banzai Buddy
+    else if (kind==5){ Buddy *b=&G.bud[pi]; b->species=id;        // re-species the buddy
+        buddy_refresh(pi); b->hp=b->maxhp; b->fainted=0;
+        b->x=p->x+26; b->y=p->y+12; sfx(11); }
+    else if (kind==6){ Buddy *b=&G.bud[pi];                       // REVIVE a fainted buddy
+        b->fainted=0; buddy_refresh(pi); b->hp=b->maxhp;
+        b->x=p->x+26; b->y=p->y+12;
+        splat(b->x, b->y, COL(150,255,170), 14, 110);
+        spawn_floater(b->x, b->y-20, "REVIVED!", COL(150,255,170));
+        sfx(11); }
+    else if (kind==0){ if (p->owned[id]<MAXCOPIES) p->owned[id]++; p->weapon=id; sfx(11); }
+    else {
+        if (id==5){ p->rollback++; }
+        else if (id==7){ p->beans++; }   // one Backfire Bean, holstered and ready to rip
+        else if (id==6){ p->hp += 50; if (p->hp > p->maxhp) p->hp = p->maxhp; }
+        else p->upg[id]++;
+        p->dmg_mul  = 1.0f + 0.25f*p->upg[0];
+        p->rate_mul = 1.0f + 0.18f*p->upg[1];
+        p->shield_max = shield_for(p->upg[2]);
+        p->maxhp = 100 + 25*p->upg[3];
+        if (p->hp > p->maxhp) p->hp = p->maxhp;
+        sfx(11);
+    }
+    if (pi==G.my_id){
+        scpy(G.store_msg, kind==3? "THE STAND IS YOURS!"
+                                  : kind==4? "BUDDY ADOPTED!"
+                                  : kind==6? "BUDDY REVIVED!"
+                                  : kind==5? "NEW BUDDY - SAME TRAINING!"
+                                  : kind==0? "WEAPON INSTALLED!"
+                                  : (id==7? "ONE BACKFIRE BEAN, READY TO RIP" : id==6? "PATCHED UP! +50 HP" : "UPGRADE INSTALLED!"), 64);
+        G.store_msg_t = 150;
+    }
+    push_ev(3, p->x, p->y);
+}
+static void start_payment(int pi, int kind, int id, int price){
+    pay_active=1; pay_player=pi; pay_kind=kind; pay_id=id;
+    pay_left=(float)price; pay_total=(float)price; pay_t=0;
+}
+static void update_payment(float dt){
+    if (!pay_active) return;
+    Player *p=&G.p[pay_player];
+    pay_t -= dt;
+    if (pay_t<=0){
+        pay_t = 0.05f;
+        // in the mall the carcasses fly to the counter, not the plaza
+        float fdx = p->in_mall? p->x : 0, fdy = p->in_mall? p->y-70 : -30;
+        // BATCH COUNTING (Daniel, Nov 10): one carcass per tick made a
+        // big hat take forever to pay with — at scale the till counts
+        // in handfuls. The batch grows with how many carcasses the
+        // remaining bill will take, so a small price still counts out
+        // one by one (the charm of the till) while a 400-carcass hat
+        // settles in about a second. The exact-change slice still
+        // finishes every payment, so the totals never drift.
+        int need = 0; float acc = 0;
+        for (int i=p->stack_n-1; i>=0 && acc<pay_left; i--){ acc += p->stack[i]; need++; }
+        int batch = need<=6? 1 : need<=24? 3 : need<=80? 6 : need<=200? 12 : 20;
+        int fx_left = 2;   // only the first couple of each handful fly visibly
+        for (int k=0;k<batch && pay_left>0 && p->stack_n>0;k++){
+            if (p->stack[p->stack_n-1] >= pay_left){
+                // the till slices the top carcass: exact change, the rest
+                // stays on the hat (bugs are weighed, not coinage)
+                float w = pay_left;
+                p->stack[p->stack_n-1] -= w;
+                if (p->stack[p->stack_n-1] <= 0.01f) p->stack_n--;
+                p->carried -= w; if (p->carried<0) p->carried=0;
+                if (fx_left>0){ spawn_fx(1, p->x, p->y-26, fdx, fdy, w, pay_player); fx_left--; }
+                pay_left = 0;
+            } else {
+                float w = hat_pop(p);
+                if (w>0 && fx_left>0){ spawn_fx(1, p->x, p->y-26, fdx, fdy, w, pay_player); fx_left--; }
+                pay_left -= w;
+            }
+        }
+        sfx(10);
+        if (pay_left<=0 || p->stack_n<=0){
+            pay_active=0;
+            G.total_earned += pay_total;
+            grant_item(pay_player, pay_kind, pay_id);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Procedural world props — deterministic per chunk. The field is a
+// junkyard now (Daniel, Nov 2): the old rocks became electronic
+// debris. Types: 0 none, 1 shattered PCB + parts spill, 2 crate with
+// a CRT in it (solid), 3 DRAM sticks + a coax coil, 4 fax machine
+// with a modem on top (solid), 5 a tipped game console in the dirt
+// with its cables spilled out. Solid types block players and bugs.
+// ---------------------------------------------------------------------------
+#define CHUNK 256
+// what washes up in each region: the home country's junkyard (types
+// 1-5) gives way to the far countries' own wrecks — burnt server
+// husks and heat vents in the Badlands, frost-locked drive banks in
+// the Cache Fields, neon memory towers in the RAM Flats, cable trees
+// in the Jungle, half-deleted monoliths in the Depths (types 6-15,
+// drawn in draw_prop). One table slot per hash roll, same density
+// and positions as always — only the identity is regional.
+static const int REGION_PROPS[NREGIONS][5] = {
+    { 1, 2, 3, 4, 5 },        // Meadows: the classic junkyard
+    { 1, 2, 3, 4, 5 },        // Spaghetti Fields
+    { 1, 2, 3, 4, 5 },        // Legacy Lands
+    { 6, 7, 1, 6, 3 },        // Kernel Badlands
+    { 8, 9, 3, 8, 1 },        // Frozen Cache Fields
+    { 10, 11, 3, 10, 11 },    // Neon RAM Flats
+    { 12, 13, 5, 12, 1 },     // Cable Jungle
+    { 14, 15, 1, 14, 5 }      // The Unmaintained Depths
+};
+static void chunk_prop(int cx, int cy, int slot, float *px, float *py, int *type, int *solid){
+    u32 h = hash2(cx, cy, WORLD_SEED + (u32)slot*7919u);
+    *type = 0; *solid = 0; *px = 0; *py = 0;
+    if (cx>=-1 && cx<=0 && cy>=-1 && cy<=0) return;      // keep the store plaza clear
+    float r = (float)(h>>8)/16777216.0f;
+    if (r > 0.42f) return;                               // sparse
+    *px = cx*CHUNK + 40 + (float)((h>>3)%170);
+    *py = cy*CHUNK + 40 + (float)((h>>11)%170);
+    { float pd = fsqrt((*px)*(*px) + (*py)*(*py));
+      *type = REGION_PROPS[region_at(pd)][(h>>16)%5]; }
+    if (*type==2 || *type==4 || *type==6 || *type==8 || *type==10 || *type==12 || *type==14) *solid = 1;
+}
+static int prop_collide(float x, float y, float rad){
+    int cx = (int)(x/CHUNK) - (x<0?1:0), cy = (int)(y/CHUNK) - (y<0?1:0);
+    for (int i=-1;i<=1;i++) for (int j=-1;j<=1;j++)
+        for (int s=0;s<2;s++){
+            float px,py; int t,sol;
+            chunk_prop(cx+i, cy+j, s, &px,&py,&t,&sol);
+            if (sol){ float dx=x-px, dy=y-py; if (dx*dx+dy*dy < (rad+20)*(rad+20)) return 1; }
+        }
+    return 0;
+}
+
+// ---------------------------------------------------------------------------
+// Bugs — stats scale with distance from the Epicenter, per the design:
+// further out = bigger max size, more bugs, and the small ones get faster.
+// ---------------------------------------------------------------------------
+static float bug_radius(float w){ return 7.0f + fsqrt(w)*2.3f; }
+// max bug weight at distance d from the Epicenter. The curve stays nearly
+// flat for a long way out (pocket-change roaches) and only rears up in the
+// far country — you have to travel to find the big ones.
+// --- player power and world threat -----------------------------------
+// Your capability score: best-weapon DPS plus effective health. A fresh
+// DEV scores ~152, and world THREAT is your score relative to that — so
+// it starts at x1.0 and climbs as you upgrade, feeding you bigger, faster,
+// more numerous bugs even on the Epicenter's doorstep.
+static float player_dps(Player *p){
+    float best = 0;
+    for (int w=0;w<NWEAP;w++) if (p->owned[w]){
+        float d;
+        if (w==4) d = (8.0f/0.07f) * p->dmg_mul
+                    * ((BEAM_EXT+BEAM_SPIN)/(BEAM_EXT+BEAM_SPIN+BEAM_RET+BEAM_REST)); // beam dps x sweep duty cycle
+        else d = weap_dmg(w) * (float)p->owned[w] / weap_cd(w) * p->dmg_mul * p->rate_mul;
+        if (d>best) best=d;
+    }
+    return best;
+}
+static float player_power(Player *p){
+    return player_dps(p) + (float)p->maxhp + (float)p->shield_max*2.0f;
+}
+static float threat_override = -1;   // debug/test hook only; -1 = use the real threat
+// THREAT RATIO (Daniel, Nov 9): "it doesn't need to tip more in the
+// user's favor, just change the general ratio." The world's answer
+// to your power is scaled by this one constant: the curve keeps its
+// shape at every upgrade level, but only 3/4 of the excess over a
+// fresh DEV's x1.0 ever arrives. A new run is untouched (power 152
+// still means threat x1.0), and every threat channel downstream —
+// bug size, the far-country inflation, the crowd a powerful player
+// draws — reads G.threat, so the whole composite eases by the same
+// proportion everywhere.
+#define THREAT_RATIO 0.75f
+static void compute_threat(void){
+    float pw = 152.0f;
+    for (int i=0;i<MAXP;i++) if (G.p[i].connected){
+        float v = player_power(&G.p[i]); if (v>pw) pw=v;
+    }
+    G.threat = 1.0f + (pw/152.0f - 1.0f) * THREAT_RATIO; if (G.threat<1.0f) G.threat=1.0f;
+    if (threat_override>=0) G.threat = threat_override;
+}
+// hauling a downed partner back up costs carcasses off YOUR hat,
+// priced off the DOWNED player's capability (Daniel): a fresh
+// sidekick is cheap to save, a stacked one takes a real haul. Half health and a grace ring, like
+// the Rollback Token, and the swarm on them gets shoved back.
+static int revive_price(Player *down){
+    int v = 30 + (int)(player_dps(down)*0.25f) + down->maxhp/8;
+    return v<15? 15 : v;
+}
+static Player *downed_near(Player *p){
+    for (int j=0;j<MAXP;j++){ Player *q=&G.p[j];
+        if (q==p || !q->connected || q->alive) continue;
+        float dx=q->x-p->x, dy=q->y-p->y;
+        if (dx*dx+dy*dy <= 46*46) return q;
+    }
+    return 0;
+}
+static int try_revive(int pi){
+    Player *p=&G.p[pi];
+    Player *q = downed_near(p);
+    if (!q) return 0;
+    int price = revive_price(q);
+    if (p->carried < (float)price){
+        char b[48]; char *s=b; s=sappend(s, "REVIVE NEEDS "); s=sapp_int(s, price); s=sappend(s, " KG"); *s=0;
+        spawn_floater(p->x, p->y-30, b, COL(255,120,110));
+        sfx(16);
+        return 1;   // the press was spent on the attempt
+    }
+    float need = (float)price;
+    while (need > 0 && p->stack_n>0) need -= hat_pop(p);
+    q->alive=1; q->hp=q->maxhp/2; q->shield=q->shield_max/2;
+    q->revive_t=3.0f; q->dead_t=0;
+    for (int i=0;i<MAXBUGS;i++) if (G.bugs[i].alive){
+        float dx=G.bugs[i].x-q->x, dy=G.bugs[i].y-q->y, d2=dx*dx+dy*dy;
+        if (d2 < 140*140 && d2>0.01f){ float d=fsqrt(d2); G.bugs[i].vx += dx/d*340; G.bugs[i].vy += dy/d*340; }
+    }
+    spawn_floater(q->x, q->y-34, "REVIVED!", COL(120,255,160));
+    splat(q->x, q->y, COL(120,255,160), 22, 160);
+    sfx(12);
+    return 1;
+}
+// the owner's best gun for a bot to carry: highest per-shot damage among
+// the projectile weapons (the Debugger counts as its keyboard fallback)
+static int best_weapon_idx(Player *p, float *per_shot){
+    int bw=0; float bd=0;
+    for (int w=0;w<4;w++) if (p->owned[w]){ float d=weap_dmg(w)*p->dmg_mul; if (d>bd){ bd=d; bw=w; } }
+    if (p->owned[4] && 30.0f*p->dmg_mul>bd){ bd=30.0f*p->dmg_mul; bw=0; }
+    if (per_shot) *per_shot=bd;
+    return bw;
+}
+// ---------------------------------------------------------------------------
+// Difficulty — EASY is the game exactly as it has always played; every
+// step up only makes it harder (Daniel's rule). Picked on the title
+// screen, locked into the run at start (diff_run), saved with the run.
+// ---------------------------------------------------------------------------
+static const char *DIFF_NAME[4] = { "EASY", "MEDIUM", "HARD", "BUGAGGEDON" };
+static const float DIFF_HP[4]  = { 1.0f, 1.35f, 1.8f, 2.6f };
+static const float DIFF_DMG[4] = { 1.0f, 1.25f, 1.6f, 2.2f };
+static const float DIFF_SPD[4] = { 1.0f, 1.08f, 1.16f, 1.25f };
+static const float DIFF_POP[4] = { 1.0f, 1.3f, 1.7f, 2.4f };
+static const float DIFF_RATE[4]= { 1.0f, 1.25f, 1.6f, 2.2f };
+static const float DIFF_W[4]   = { 1.0f, 1.15f, 1.3f, 1.6f };
+static float d_hp(void){ return DIFF_HP[G.diff_run&3]; }
+static float d_dmg(void){ return DIFF_DMG[G.diff_run&3]; }
+static float d_spd(void){ return DIFF_SPD[G.diff_run&3]; }
+static float d_pop(void){ return DIFF_POP[G.diff_run&3]; }
+static float d_rate(void){ return DIFF_RATE[G.diff_run&3]; }
+static float d_w(void){ return DIFF_W[G.diff_run&3]; }
+
+static float bug_max_weight(float d){
+    float t = d/3000.0f; if (t>1.3f) t=1.3f;
+    float m = 2.0f + 133.0f * t*t*(0.35f + 0.65f*t);
+    float cap = 150.0f * (1.0f + (G.threat-1.0f)*0.35f);   // threat lifts the ceiling (0.6 -> 0.35, Nov 2)
+    return m>cap? cap : m;
+}
+static void spawn_bug(float x, float y){
+    for (int i=0;i<MAXBUGS;i++) if (!G.bugs[i].alive){
+        Bug *b=&G.bugs[i];
+        float d = fsqrt(x*x + y*y);
+        // THREAT: an upgraded player makes the whole map act farther-out
+        // than it is — the bugs near home grow teeth too. Retuned Nov 2
+        // (Daniel: pacing too aggressive, too many big bugs): the
+        // inflation is 1100 -> 650 and the weight roll below is
+        // quartic, so high THREAT mostly means MORE small bugs, not a
+        // screen full of giants on the doorstep.
+        float de = d + (G.threat-1.0f)*650.0f;
+        float maxW = bug_max_weight(de) * d_w();
+        float r1 = rng_f();
+        float w = 0.6f + r1*r1*r1*r1*maxW;               // quartic skew: mostly tiny, giants rare
+        // SIZE scales with THREAT, indefinitely (Daniel): the stronger
+        // you get, the bigger everything that crawls out gets — weight,
+        // radius, HP and bite all ride on w, and there is no ceiling.
+        // The camera gives ground in steps to compensate (zoom_target_of).
+        w *= 1.0f + (G.threat-1.0f)*0.30f;
+        b->alive=1; b->kind=(int)(rng_f()*4); b->aggro=-1; b->target_wall=-1; b->btarget=-1;
+        // regional strains (Nov 9): each far country has a dominant
+        // kind — rustbacks in the Badlands, frostbites in the Cache
+        // Fields, neons in the RAM Flats, mossbacks in the Jungle.
+        // Half the locals wear the regional colors; the rest stay a
+        // fair mix. This flavors the spawn AFTER all the threat and
+        // distance scaling above, so it composes with that curve
+        // instead of bypassing it.
+        { int rg = region_at(d);
+          if (REGION_BUG[rg]>=0 && rng_f()<0.5f) b->kind = REGION_BUG[rg]; }
+        b->x=x; b->y=y; b->vx=0; b->vy=0; b->w=w;
+        b->maxhp = b->hp = (4.0f + w*2.4f) * d_hp();
+        // speed: near the Epicenter everything crawls, big or small. Far
+        // out the whole swarm speeds up — and the little ones most of all.
+        float dfac = de/2600.0f; if (dfac>1) dfac=1;
+        float smallness = 1.0f - (w/60.0f>1?1:w/60.0f);
+        b->speed = (20.0f + 38.0f*dfac + 34.0f*dfac*smallness) * rng_range(0.85f,1.15f) * d_spd();
+        b->dmg = (1.5f + w*0.10f) * d_dmg();
+        // the Depths keep ancients: a rare few that were old when the
+        // codebase was young, and noticeably heavier for it
+        if (region_at(d)==NREGIONS-1 && rng_f()<0.08f){
+            b->w *= 1.35f;
+            b->maxhp = b->hp = (4.0f + b->w*2.4f) * d_hp();
+            b->dmg = (1.5f + b->w*0.10f) * d_dmg();
+        }
+        if (G.zen_run){   // zen mode: every bug gigantic, every bug slow
+            b->w = w*8.0f + 6.0f;
+            b->maxhp = b->hp = (4.0f + b->w*2.4f) * d_hp();
+            b->dmg = (1.5f + b->w*0.10f) * d_dmg();
+            b->speed *= 0.30f;
+        }
+        b->leg_ph = rng_f()*TAU; b->wobble = rng_f()*TAU;
+        b->hit_t=0; b->bp_t=0; b->target_wall=-1; b->chew_t=0;
+        // the seed is a trig PHASE (pupil drift, Eddie's fuzz), not a
+        // number to keep: a full-range u32 (up to 4.3e9) blows past
+        // wrap_pi's float range, the Taylor sin explodes into the
+        // thousands, and the bug's pupils land half a screen away
+        // (Daniel, Nov 6). 0..6282 milli-radians is plenty of variety.
+        b->seed = rng_u32()%6283;
+        return;
+    }
+}
+static void spawner(float dt){
+    compute_threat();
+    G.spawn_t -= dt;
+    if (G.spawn_t>0) return;
+    int alive=0; for (int i=0;i<MAXBUGS;i++) if (G.bugs[i].alive) alive++;
+    float far=0; int npl=0;
+    for (int i=0;i<MAXP;i++) if (G.p[i].connected && G.p[i].alive && !G.p[i].in_mall){
+        npl++;
+        float d=fsqrt(G.p[i].x*G.p[i].x + G.p[i].y*G.p[i].y); if (d>far) far=d;
+    }
+    // population target: a sparse trickle near home, a swarm far out.
+    int time_term = (int)(G.time*0.15f); if (time_term>10) time_term=10;
+    int target = 6 + (int)(far*0.017f) + time_term + 3*(npl>0? npl-1:0);
+    target = (int)(target * (1.0f + (G.threat-1.0f)*0.18f));   // power draws a crowd (0.30 -> 0.18, Nov 2)
+    target = (int)(target * d_pop());                          // difficulty draws a bigger one
+    if (target>200) target=200;
+    if (G.zen_run && target>8) target = 8 + (target-8)/2;   // giants need elbow room
+    G.spawn_t = (far<600? 1.0f : 0.55f) / (1.0f + (G.threat-1.0f)*0.08f) / d_rate();   // slow drip at home
+    if (alive>=target || npl==0) return;
+    // spawn near a random connected player, just off-screen. Anywhere is
+    // fair game now — including the Epicenter plaza itself.
+    int pi=-1, tries=0;
+    for (int i=0;i<MAXP;i++) if (G.p[i].connected && !G.p[i].in_mall) pi=i;
+    if (pi<0) return;
+    pi = (int)(rng_f()*(pi+1)); if (!G.p[pi].connected) pi=0;
+    while (tries<6){
+        tries++;
+        float a = rng_f()*TAU, rad = rng_range(620.0f, 860.0f);
+        float x = G.p[pi].x + fcos(a)*rad, y = G.p[pi].y + fsin(a)*rad;
+        if (x>-110 && x<110 && y>-135 && y<-25) continue; // not inside the hut
+        spawn_bug(x, y);
+        if (far>2000 && alive<target-25) spawn_bug(x + rng_range(-60,60), y + rng_range(-60,60));
+        return;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Combat
+// ---------------------------------------------------------------------------
+static void fire_proj(int owner, int kind, float x, float y, float ang, float dmg, int agent){
+    for (int i=0;i<MAXPROJ;i++) if (!G.projs[i].alive){
+        Proj *q=&G.projs[i];
+        q->alive=1; q->kind=kind; q->owner=owner; q->x=x; q->y=y; q->dmg=dmg; q->agent=agent;
+        q->bounces=0; q->target=-1; q->spin=rng_f()*TAU;
+        if (kind==0){ float s=430; q->vx=fcos(ang)*s; q->vy=fsin(ang)*s; q->life=0.85f; }
+        if (kind==1){ float s=330; q->vx=fcos(ang)*s; q->vy=fsin(ang)*s; q->life=1.15f; }
+        if (kind==2){ float s=360; q->vx=fcos(ang)*s; q->vy=fsin(ang)*s; q->life=1.5f; }
+        if (kind==3){ float s=265; q->vx=fcos(ang)*s; q->vy=fsin(ang)*s; q->life=1.6f; }
+        return;
+    }
+}
+static void hurt_bug(int bi, float dmg, int owner, float kx, float ky);
+static void hurt_buddy(int owner, float dmg);
+static void explode_pm(float x, float y, float dmg, int owner, int agent){
+    splat(x, y, COL(255,200,80), 16, 130);
+    for (int i=0;i<MAXBUGS;i++) if (G.bugs[i].alive){
+        float dx=G.bugs[i].x-x, dy=G.bugs[i].y-y;
+        if (dx*dx+dy*dy < 95*95){
+            float d=fsqrt(dx*dx+dy*dy)+0.01f;
+            hurt_bug(i, dmg, owner, dx/d*180, dy/d*180);
+        }
+    }
+    spawn_floater(x, y-14, "SYNERGY!", COL(255,220,90));
+    sfx(7);
+}
+static void kill_bug(int bi, int owner){
+    Bug *b=&G.bugs[bi];
+    b->alive=0;
+    G.total_kills++;
+    // assist XP: a buddy that had bitten this bug learns from its fall
+    if (b->btarget>=0 && b->btarget!=owner && G.bud[b->btarget].active && !G.bud[b->btarget].fainted)
+        G.bud[b->btarget].xp += 2 + (int)(b->w*0.3f);
+    if (owner>=0 && owner<MAXP){
+        G.p[owner].kills++;
+        // the carcass flies to the killer's head and joins the stack
+        CarcassFx *f = spawn_fx(0, b->x, b->y, G.p[owner].x, G.p[owner].y-24, b->w, owner);
+        if (!f) hat_push(&G.p[owner], b->w);           // fx full: instant
+    }
+    splat(b->x, b->y, BUG_COL[b->kind], 10, 110);
+    // two-tone burst (glow-up): pale belly bits drift longer, and a
+    // few white sparks snap out fast — a squash should FEEL juicy
+    for (int i=0;i<5;i++) spawn_particle(b->x, b->y, BUG_BELLY[b->kind], 70, 0.8f, 2);
+    for (int i=0;i<3;i++) spawn_particle(b->x, b->y, COL(255,252,240), 170, 0.3f, 1);
+    if (owner>=0 && owner<MAXP && (G.p[owner].whale_on & 1024)){   // WHALES ONLY: CONFETTI SQUASH
+        static const u32 PARTY[6] = { COL(255,90,120), COL(255,200,60), COL(90,220,120),
+                                      COL(90,180,255), COL(200,120,255), COL(255,140,60) };
+        for (int i=0;i<14;i++) spawn_particle(b->x, b->y, PARTY[i%6], 95, 1.15f, 2);
+    }
+    push_ev(1, b->x, b->y);
+    sfx(5);
+}
+static void hurt_bug(int bi, float dmg, int owner, float kx, float ky){
+    Bug *b=&G.bugs[bi];
+    if (!b->alive) return;
+    b->hp -= dmg; b->hit_t = 0.12f;
+    b->vx += kx*0.4f; b->vy += ky*0.4f;
+    if (b->hp<=0) kill_bug(bi, owner);
+}
+// a bean jetpack ends the moment its rider takes a hit or fires
+// (Daniel, Nov 10): the bean dumps you where you are, mid-field.
+static void bean_jet_end(int pi, int shot){
+    Player *p=&G.p[pi];
+    if (p->bean_jet<=0) return;
+    p->bean_jet=0; p->jet_fall=0.32f;
+    splat(p->x, p->y+6, COL(168,216,120), 12, 100);
+    spawn_floater(p->x, p->y-30, shot? "BACK TO EARTH!" : "KNOCKED FROM THE SKY!", COL(255,220,150));
+    sfx(5);
+}
+static void hurt_player(int pi, float dmg){
+    Player *p=&G.p[pi];
+    if (!p->alive || G.state!=GS_PLAY) return;
+    if (p->revive_t>0) return;               // just rolled back: untouchable
+    if (p->bean_jet>0) bean_jet_end(pi, 0);   // one hit ends the jet
+    if (p->shield>0){
+        float absorbed = dmg < (float)p->shield ? dmg : (float)p->shield;
+        p->shield -= (int)absorbed; dmg -= absorbed;
+        p->shield_regen_t = 3.0f;
+        if (absorbed>0) sfx(8);
+    }
+    if (dmg>0){
+        p->hp -= (int)dmg; p->hurt_t = 0.25f; sfx(9);
+        splat(p->x, p->y, COL(230,60,60), 5, 80);
+        // ENDGAME PRESSURE (Daniel's pick #1): a heavy hat is a
+        // liability. Once you're carrying real weight, every bite that
+        // gets through knocks the top carcass clean off your head.
+        // What's on your skull is at risk; what's in the Bug Bank is not.
+        if (p->carried>=50.0f && p->stack_n>0 && p->shed_cd<=0){
+            float w = hat_pop(p);
+            if (w>0){
+                p->shed_cd = 0.7f;
+                splat(p->x, p->y-24, BUG_COL[(int)w%4], 7, 120);
+                floater_num(p->x, p->y-40, "-", (int)w, "KG", COL(255,120,110));
+            }
+        }
+    }
+    if (p->hp<=0){
+        if (p->rollback>0){
+            p->rollback--; p->hp = p->maxhp/2; p->shield = p->shield_max/2;
+            p->revive_t = 3.0f;              // 3s of grace to get clear
+            // and shove the swarm that killed you off your face
+            for (int i=0;i<MAXBUGS;i++) if (G.bugs[i].alive){
+                float dx=G.bugs[i].x-p->x, dy=G.bugs[i].y-p->y, d2=dx*dx+dy*dy;
+                if (d2 < 140*140 && d2>0.01f){ float d=fsqrt(d2); G.bugs[i].vx += dx/d*340; G.bugs[i].vy += dy/d*340; }
+            }
+            spawn_floater(p->x, p->y-34, "ROLLBACK!", COL(120,255,160));
+            splat(p->x, p->y, COL(120,255,160), 22, 160);
+            sfx(12);
+            return;
+        }
+        p->alive=0; p->dead_t=0;
+        // the hat comes crashing down
+        for (int i=0;i<p->stack_n && i<26;i++) spawn_particle(p->x, p->y-20, BUG_COL[i%4], 150, 0.9f, 3);
+        p->stack_n=0; p->carried=0;
+        sfx(13);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Update logic (runs on the host / in single player)
+// ---------------------------------------------------------------------------
+static float beam_vis[MAXP];
+static float shield_frac[MAXP];   // fractional firewall-shield regen, carried between frames
+static float whale_spark_t[MAXP]; // Whales Only sparkle-trail emitter timers
+static float wof_spark_t[MAXP];   // WALK OF FAME confetti emitter timers
+static const u32 WOF_COL[6] = { COL(255,90,120), COL(255,200,60), COL(90,220,120),
+                                COL(80,180,255), COL(200,120,255), COL(255,140,60) };          // Debugger beam render timer per player
+static float beam_ang[MAXP][MAXBEAMS]; // where each stacked beam points
+static int beam_n[MAXP];              // how many beams (Debugger copies)
+static int beam_len[MAXP];            // beam reach (grows per copy)
+static float beam_frac[MAXP];         // current reach fraction (extend/retract)
+static int beam_phase[MAXP];          // sweep state: 0 idle 1 extend 2 spin 3 retract
+static float beam_t[MAXP];            // time inside the current sweep phase
+static float beam_base[MAXP];         // aim captured when the sweep began
+static float beam_tick[MAXP];         // damage-tick accumulator while beams are live
+static int   wall_build_n[MAXWALLS];  // carcasses arrived at a building wall
+static void do_save(void);            // forward: save section
+static void save_records(void);       // forward: save section
+
+// ---------------------------------------------------------------------------
+// Interlocked walls (Daniel's rules): a wall placed touching others joins
+// their RUN. A run shares ONE health pool worth 1.1x the sum of its
+// segments' individual health; bugs chewing anywhere drain the pool, and
+// the segment being chewed gives way once the damage since the last break
+// passes its own share. A placement that would close a complete circuit
+// is refused. Runs of 5+ grow cosmetic tiers — and you can walk on top.
+// ---------------------------------------------------------------------------
+static float grp_pool[MAXWALLS];   // shared health remaining (leader-indexed)
+static float grp_cap[MAXWALLS];    // 1.1 * sum of member base hp
+static float grp_dsb[MAXWALLS];    // damage since the last segment broke
+static int   grp_n[MAXWALLS];      // member count
+static int grp_tier(int n){ return n>=100? 4 : n>=20? 3 : n>=10? 2 : n>=5? 1 : 0; }
+static int wall_adjacent(Wall *a, Wall *b){
+    float ahx = a->horiz? 26:9, ahy = a->horiz? 9:26;
+    float bhx = b->horiz? 26:9, bhy = b->horiz? 9:26;
+    float dx = a->x-b->x; if (dx<0) dx=-dx;
+    float dy = a->y-b->y; if (dy<0) dy=-dy;
+    return dx < ahx+bhx+10 && dy < ahy+bhy+10;
+}
+static int uf_find(int *par, int i){ while (par[i]!=i){ par[i]=par[par[i]]; i=par[i]; } return i; }
+// rebuild the groups. Pool health carries across reshapes by share: a
+// wall coming from an old group brings that group's remaining pool in
+// proportion to its base; a loner brings what it had left, plus the
+// interlock bonus on the remainder. fresh=1 (save load): pool = cap x
+// the saved damage fraction instead.
+static void walls_recompute_ex(int fresh){
+    static int par[MAXWALLS], lead[MAXWALLS];
+    int sim = (G.net_mode!=NET_CLIENT);
+    for (int i=0;i<MAXWALLS;i++){ par[i]=i; lead[i]=-1; }
+    for (int i=0;i<MAXWALLS;i++) if (G.walls[i].alive==1)
+        for (int j=i+1;j<MAXWALLS;j++) if (G.walls[j].alive==1 && wall_adjacent(&G.walls[i], &G.walls[j])){
+            int a=uf_find(par,i), b=uf_find(par,j); if (a!=b) par[b]=a;
+        }
+    static float npool[MAXWALLS], ncap[MAXWALLS];
+    for (int i=0;i<MAXWALLS;i++){ npool[i]=0; ncap[i]=0; grp_n[i]=0; }
+    for (int i=0;i<MAXWALLS;i++) if (G.walls[i].alive==1)
+        G.walls[i].grp = uf_find(par,i);   // root for now; leader fixed below
+    // leader must be the smallest member index (stable identity)
+    for (int i=0;i<MAXWALLS;i++) if (G.walls[i].alive==1){
+        int r = G.walls[i].grp;
+        if (lead[r]<0 || i<lead[r]) lead[r]=i;
+    }
+    for (int i=0;i<MAXWALLS;i++) if (G.walls[i].alive==1){
+        int L = lead[G.walls[i].grp]; G.walls[i].grp = L;
+        // a reinforced stack counts as the several walls it is: it
+        // feeds the run's tiers, its walk-on-top size and its pool
+        // membership exactly like the separate entries it replaced
+        grp_n[L] += G.walls[i].stack>0? G.walls[i].stack : 1;
+        ncap[L] += G.walls[i].maxhp;
+    }
+    if (sim){
+        for (int i=0;i<MAXWALLS;i++) if (G.walls[i].alive==1){
+            Wall *w=&G.walls[i]; int L=w->grp;
+            if (fresh) npool[L] += w->hp * 1.1f;                    // saved hp was a fraction of base; x1.1 rebuilds the pool share
+            else if (w->grp_old>=0 && grp_n[w->grp_old]>=2 && grp_cap[w->grp_old]>0)
+                npool[L] += grp_pool[w->grp_old] * (w->maxhp*1.1f) / grp_cap[w->grp_old];
+            else npool[L] += w->hp + w->maxhp*0.1f;                 // loner/new: what it had + interlock bonus on the base
+        }
+        for (int i=0;i<MAXWALLS;i++) if (grp_n[i]>0){
+            grp_cap[i] = ncap[i]*1.1f;
+            grp_pool[i] = npool[i]; if (grp_pool[i]>grp_cap[i]) grp_pool[i]=grp_cap[i]; if (grp_pool[i]<0) grp_pool[i]=0;
+            grp_dsb[i]=0;
+            if (grp_n[i]>=2){
+                float frac = grp_cap[i]>0? grp_pool[i]/grp_cap[i] : 0;
+                for (int m=0;m<MAXWALLS;m++) if (G.walls[m].alive==1 && G.walls[m].grp==i)
+                    G.walls[m].hp = G.walls[m].maxhp * frac;
+            }
+        }
+        if (G.net_mode==NET_HOST) wall_send_t = 0.05f;
+    }
+    // endpoints: members with at most one neighbour inside the run
+    for (int i=0;i<MAXWALLS;i++) if (G.walls[i].alive==1){
+        int cnt=0;
+        for (int j=0;j<MAXWALLS;j++) if (j!=i && G.walls[j].alive==1 && G.walls[j].grp==G.walls[i].grp && wall_adjacent(&G.walls[i], &G.walls[j])) cnt++;
+        G.walls[i].endpt = (cnt<=1 && grp_n[G.walls[i].grp]>=2)? 1:0;
+    }
+    for (int i=0;i<MAXWALLS;i++) G.walls[i].grp_old = G.walls[i].grp;
+}
+static void walls_recompute(void){ walls_recompute_ex(0); }
+static void break_wall(int wi){
+    Wall *w=&G.walls[wi];
+    // Reinforcement (restored Nov 7): a stacked wall gives way ONE
+    // layer at a time — the top course crumbles off, and the rest of
+    // the pile, with its remaining share of the run's pool, fights
+    // on. Only a stack chewed down to its last layer, or one drained
+    // dry (hp ~0), falls for good.
+    if (w->stack>1 && w->hp>1.0f){
+        float share = w->maxhp / w->stack;
+        w->stack--;
+        w->maxhp -= share; if (w->maxhp<1.0f) w->maxhp=1.0f;
+        if (w->hp>w->maxhp) w->hp=w->maxhp;
+        splat(w->x, w->y, COL(170,120,70), 10, 110);
+        push_ev(2, w->x, w->y);
+        if (G.net_mode==NET_HOST) wall_send_t = 0.05f;
+        sfx(17);
+        walls_recompute();
+        return;
+    }
+    w->alive=0; w->grp=-1; w->grp_old=-1;
+    splat(w->x, w->y, COL(170,120,70), 14, 120);
+    push_ev(2, w->x, w->y);
+    if (G.net_mode==NET_HOST) wall_send_t = 0.05f;
+    sfx(17);
+    walls_recompute();
+}
+static void damage_wall(int wi, float dmg){
+    Wall *w=&G.walls[wi];
+    if (w->alive!=1) return;
+    int L = w->grp;
+    if (L>=0 && grp_n[L]>=2){
+        grp_pool[L] -= dmg; grp_dsb[L] += dmg;
+        float frac = grp_cap[L]>0? grp_pool[L]/grp_cap[L] : 0; if (frac<0) frac=0;
+        for (int m=0;m<MAXWALLS;m++) if (G.walls[m].alive==1 && G.walls[m].grp==L)
+            G.walls[m].hp = G.walls[m].maxhp * frac;
+        // the chewed segment gives way after taking 1.1x ONE layer's
+        // share — for a reinforced stack that sheds a layer, not the pile
+        float layer_hp = w->maxhp / (w->stack>0? w->stack : 1);
+        if (grp_pool[L]<=0 || grp_dsb[L] >= 1.1f*layer_hp) break_wall(wi);
+    } else {
+        w->hp -= dmg;
+        if (w->hp<=0) break_wall(wi);
+    }
+}
+// would a wall at (wx,wy,horiz) close a circuit? For every pair of its
+// neighbours already in one run, walk the existing path between them:
+// if that path plus the new wall encloses real area, it's a loop.
+static int placement_closes_loop(float wx, float wy, int horiz){
+    Wall cand; cand.alive=1; cand.horiz=horiz; cand.x=wx; cand.y=wy;
+    int nb[8], nn=0;
+    for (int i=0;i<MAXWALLS && nn<8;i++)
+        if (G.walls[i].alive==1 && wall_adjacent(&cand, &G.walls[i])) nb[nn++]=i;
+    for (int a=0;a<nn;a++) for (int b=a+1;b<nn;b++){
+        if (G.walls[nb[a]].grp != G.walls[nb[b]].grp || G.walls[nb[a]].grp<0) continue;
+        // BFS the run from nb[a] to nb[b]
+        static int par2[MAXWALLS]; static int qq[MAXWALLS];
+        for (int i=0;i<MAXWALLS;i++) par2[i]=-2;
+        int qh=0, qt=0; qq[qt++]=nb[a]; par2[nb[a]]=-1;
+        while (qh<qt && par2[nb[b]]==-2){
+            int cur=qq[qh++];
+            for (int j=0;j<MAXWALLS;j++)
+                if (G.walls[j].alive==1 && G.walls[j].grp==G.walls[cur].grp && par2[j]==-2 && wall_adjacent(&G.walls[cur], &G.walls[j])){
+                    par2[j]=cur; qq[qt++]=j;
+                }
+        }
+        if (par2[nb[b]]==-2) continue;
+        // shoelace over the closed polygon: path points, then the
+        // candidate, then back to the start — EVERY edge counts
+        // (dropping the candidate's closing edge once silently
+        // shrank the area and let loops through)
+        float pts[440][2]; int np=0;
+        for (int c=nb[b]; c!=-1; c=par2[c]){ pts[np][0]=G.walls[c].x; pts[np][1]=G.walls[c].y; np++; }
+        pts[np][0]=wx; pts[np][1]=wy; np++;
+        float area=0;
+        for (int i=0;i<np;i++){
+            int j=(i+1)%np;
+            area += pts[i][0]*pts[j][1] - pts[j][0]*pts[i][1];
+        }
+        if (area<0) area=-area;
+        if (area*0.5f > 2400.0f) return 1;
+    }
+    return 0;
+}
+
+static int wall_box_hit(float x, float y, float rad, Wall *w){
+    float hx = w->horiz? 26.0f : 9.0f, hy = w->horiz? 9.0f : 26.0f;
+    return (x > w->x-hx-rad && x < w->x+hx+rad && y > w->y-hy-rad && y < w->y+hy+rad);
+}
+// The Bug Mall is SOLID — the whole storefront: building, awning,
+// counter and crates (the same footprint tap_on_store uses). Entry
+// is by INTERACT from the plaza, so the collision needs no door
+// gap. Applied to players, bugs, bots and buddies: nothing walks
+// through the mall. (It lives inside collide_walls too, and is
+// called directly by the movers that skip wall collision.)
+static void collide_hut(float *x, float *y, float rad){
+    if (*x > -92-rad && *x < 92+rad && *y > -116-rad && *y < -14+rad){
+        float dyl = *y-(-116-rad), dyr = (-14+rad)-*y;
+        float dxl = *x-(-92-rad), dxr = (92+rad)-*x;
+        float m=dxl; int side=0;
+        if (dxr<m){ m=dxr; side=1; } if (dyl<m){ m=dyl; side=2; } if (dyr<m){ side=3; }
+        if (side==0) *x=-92-rad; else if (side==1) *x=92+rad;
+        else if (side==2) *y=-116-rad; else *y=-14+rad;
+    }
+}
+static void collide_walls(float *x, float *y, float rad){
+    for (int i=0;i<MAXWALLS;i++){
+        Wall *w=&G.walls[i];
+        if (w->alive!=1) continue;
+        float hx = w->horiz? 26.0f : 9.0f, hy = w->horiz? 9.0f : 26.0f;
+        if (*x > w->x-hx-rad && *x < w->x+hx+rad && *y > w->y-hy-rad && *y < w->y+hy+rad){
+            float dxl = *x-(w->x-hx-rad), dxr = (w->x+hx+rad)-*x;
+            float dyl = *y-(w->y-hy-rad), dyr = (w->y+hy+rad)-*y;
+            float m = dxl; int side=0;
+            if (dxr<m){ m=dxr; side=1; } if (dyl<m){ m=dyl; side=2; } if (dyr<m){ side=3; }
+            if (side==0) *x = w->x-hx-rad; else if (side==1) *x = w->x+hx+rad;
+            else if (side==2) *y = w->y-hy-rad; else *y = w->y+hy+rad;
+        }
+    }
+    collide_hut(x, y, rad);
+}
+// is the player still standing over his own run?
+static int over_own_run(Player *p){
+    if (p->on_wall<0) return 0;
+    for (int i=0;i<MAXWALLS;i++)
+        if (G.walls[i].alive==1 && G.walls[i].grp==p->on_wall && wall_box_hit(p->x, p->y, 11, &G.walls[i])) return 1;
+    return 0;
+}
+// wall collision with a door in it: step INTO a cosmetically-merged run
+// (5+ interlocked) and you're up on top of it, walking the wall. Step
+// off the run anywhere and you drop back to the ground.
+static void wall_step(Player *p){
+    if (p->in_mall){ p->on_wall=-1; return; }
+    int hit_grp=-1, hit_other=0;
+    for (int i=0;i<MAXWALLS;i++){
+        Wall *w=&G.walls[i];
+        if (w->alive!=1) continue;
+        if (!wall_box_hit(p->x, p->y, 11, w)) continue;
+        if (w->grp>=0 && grp_n[w->grp]>=5){ if (hit_grp<0) hit_grp=w->grp; }
+        else hit_other=1;
+    }
+    if (hit_grp>=0 && !hit_other){ p->on_wall=hit_grp; return; }   // up (or still up)
+    if (hit_other){
+        collide_walls(&p->x, &p->y, 11);
+        if (p->on_wall>=0 && !over_own_run(p)) p->on_wall=-1;
+        return;
+    }
+    if (p->on_wall>=0 && !over_own_run(p)) p->on_wall=-1;           // stepped off the end
+}
+// the buddy climbs exactly when the player can (Daniel): same runs of
+// 5+ interlocked walls, same drop-off rule — wall_step, mirrored.
+static int buddy_over_run(Buddy *b){
+    if (b->on_wall<0) return 0;
+    for (int i=0;i<MAXWALLS;i++)
+        if (G.walls[i].alive==1 && G.walls[i].grp==b->on_wall && wall_box_hit(b->x, b->y, 9, &G.walls[i])) return 1;
+    return 0;
+}
+static void buddy_wall_step(Buddy *b){
+    int hit_grp=-1, hit_other=0;
+    for (int i=0;i<MAXWALLS;i++){
+        Wall *w=&G.walls[i];
+        if (w->alive!=1) continue;
+        if (!wall_box_hit(b->x, b->y, 9, w)) continue;
+        if (w->grp>=0 && grp_n[w->grp]>=5){ if (hit_grp<0) hit_grp=w->grp; }
+        else hit_other=1;
+    }
+    if (hit_grp>=0 && !hit_other){ b->on_wall=hit_grp; return; }
+    if (hit_other){
+        collide_walls(&b->x, &b->y, 9);
+        if (b->on_wall>=0 && !buddy_over_run(b)) b->on_wall=-1;
+        return;
+    }
+    if (b->on_wall>=0 && !buddy_over_run(b)) b->on_wall=-1;
+}
+static int near_store(Player *p){
+    float dx=p->x, dy=p->y+10;
+    return (dx*dx+dy*dy < 130*130);
+}
+// a tap only opens the store when it lands ON the store building —
+// tapping anywhere else in the plaza is just a tap (mobile drag fix)
+static int SX(float wx); static int SY(float wy);   // defined with the renderer
+static float zoom_target_of(Player *p);             // defined with the renderer
+static int tap_on_store(void){
+    return IN.tap_x>=SX(-92) && IN.tap_x<=SX(92) &&
+           IN.tap_y>=SY(-116) && IN.tap_y<=SY(-14);
+}
+
+// ---------------------------------------------------------------------------
+// THE BUG MALL — the old single-panel Bug Bounty grew into a walk-in
+// mall (Daniel's design): a shop counter at the entrance with everything
+// the Bounty always sold, then the Gallery (Psychic Hat Stand), the Bug
+// Bank, and the Banzai Buddies store. The interior lives far south of
+// the world at (0, MALL_CY); walking in is a step through the hut door.
+// No bugs inside. Ever. House rules.
+// ---------------------------------------------------------------------------
+#define MALL_CY (-6000)
+static const int MALL_SX[4] = { -225, -75, 75, 225 };   // station counter centres
+static const char *MALL_STATION[5] = { "BUG BOUNTY", "WHALES ONLY", "BUG BANK", "BANZAI BUDDIES", "BUG BOWL" };
+#define BOWL_SX (-170)                                   // the lanes counter, south-west
+static int station_at(Player *p){
+    if (!p->in_mall) return -1;
+    for (int s=0;s<4;s++){
+        float dx=p->x - MALL_SX[s], dy=p->y - (MALL_CY-108);
+        if (dx*dx + dy*dy < 64*64) return s;
+    }
+    { float dx=p->x - BOWL_SX, dy=p->y - (MALL_CY+92);   // the bowling counter
+      if (dx*dx + dy*dy < 64*64) return 4; }
+    return -1;
+}
+#define BW_SX 185                                    // the Banzai World door, south-east
+// ---------------------------------------------------------------------------
+// THE ARCADE (Daniel, Nov 10): a whole room of its own off the mall's
+// east wall. The Banzai World gate keeps STORY MODE and FREE PLAY;
+// every other game that used to hide behind the gate now lives here,
+// one arcade cabinet per game — ENTRANCES, SUPER BUDDY RUN, BUDDY
+// CRAFT, and the new TANK RESCUE. The room sits far south of the mall
+// in world space; in_mall stays 1 inside (same bug-safe zone), with
+// in_arcade marking the room for collision, rendering and buddies.
+// ---------------------------------------------------------------------------
+#define ARC_CY (-12000)
+static const int ARC_SX[4] = { -219, -73, 73, 219 };   // cabinet centres along the north wall (cabinets widened Nov 11 so the longest name, SUPER BUDDY RUN at 120px, fits the 128px cabinet)
+static const char *ARC_NAME[4] = { "ENTRANCES", "SUPER BUDDY RUN", "BUDDY CRAFT", "TANK RESCUE" };
+static const int ARC_MODE[4] = { 2, 3, 4, 5 };         // the bw_mode each cabinet launches
+static int arcgate[MAXP], arcgate_sel[MAXP], arc_cab[MAXP];   // the cabinet panel (per player)
+static int bw_arc_src[MAXP], bw_arc_cab[MAXP];         // pending arcade origin for bw_enter_mode
+static int cabinet_at(Player *p){
+    if (!p->in_arcade) return -1;
+    for (int s=0;s<4;s++){
+        float dx=p->x - ARC_SX[s], dy=p->y - (ARC_CY-108);
+        if (dx*dx + dy*dy < 74*74) return s;
+    }
+    return -1;
+}
+static int arcade_door_at(Player *p){   // the mall's east-wall door
+    return p->in_mall && !p->in_arcade && p->x>192 && p->y>MALL_CY-14 && p->y<MALL_CY+66;
+}
+static int arcade_exit_at(Player *p){   // the arcade's west-wall mat
+    return p->in_arcade && p->x<-192 && p->y>ARC_CY-14 && p->y<ARC_CY+66;
+}
+static void arcade_enter(int pi){
+    Player *p=&G.p[pi];
+    p->in_arcade=1; p->station=-1;
+    p->x=-244; p->y=ARC_CY+24; p->aim=0;
+    splat(p->x, p->y, COL(140,240,255), 10, 90);
+    sfx(19);
+}
+static void arcade_exit(int pi){
+    Player *p=&G.p[pi];
+    p->in_arcade=0; p->station=-1;
+    p->x=196; p->y=MALL_CY+24; p->aim=PI;
+    splat(p->x, p->y, COL(140,240,255), 10, 90);
+    sfx(19);
+}
+static void arc_gate_try(int pi);                      // cabinet checks + panel, below
+static void arc_gate_draw(int pi, int vx, int vy, int vw2, int vh2);   // ditto
+static void arc_gate_tap(int pi, int vx, int vy, int vw2, int vh2);    // ditto
+static void arc_gate_pick(int pi);                     // ditto
+static void draw_arcade(void);                         // ditto (with the mall art)
+static void bw_gate_try(int pi);                     // gate checks + mode panel, below
+static void bw_enter_mode(int pi, int mode);         // defined with Banzai World, below
+static void ent_reset(int pi);
+static int ent_solid(int pi, float x, float y);
+static void bw_render_ent(int pi);
+static void bw_gate_draw(int pi, int vx, int vy, int vw2, int vh2);   // ditto
+static void bw_gate_tap(int pi, int vx, int vy, int vw2, int vh2);    // ditto
+static void p1_view_rect(int *x, int *y, int *w, int *h);             // P1's co-op view rect, below
+static void bw_gate_pick(int pi);                    // ditto
+static int bwgate[MAXP], bwgate_sel[MAXP];           // the gate's mode-choice panel
+// Banzai World runs per-player: each frame the owning player's input is
+// packed into a BwIn and handed to bw_update, wherever that player lives
+// (solo full-screen, or their half of a co-op split).
+typedef struct { int keys, interact, exit_, sel, up, down, wall, sel_held, pause; } BwIn;
+static void ent_update(int pi, float dt, const BwIn *in);
+static void plat_enter(int pi);
+static void plat_update(int pi, float dt, const BwIn *in);
+static void plat_render(int pi);
+static void glow_ellipse(int cx, int cy, int rx, int ry, u32 c, int alpha);
+static void craft_enter(int pi);
+static void craft_update(int pi, float dt, const BwIn *in);
+static void craft_render(int pi);
+static void tank_enter(int pi);
+static void tank_update(int pi, float dt, const BwIn *in);
+static void tank_render(int pi);
+static void bw_draw_note(int pi);
+static void bw_update(int pi, float dt, const BwIn *in);   // ditto, below
+static void bw_fill_p1(BwIn *bin, float dt);   // P1 input pack (touch-unified), below
+static void bw_battle_tap(int pi, int vx, int vy, int vw2, int vh2);   // ditto
+static void bw_render(int pi);                       // ditto
+static int bw_door_at(Player *p){
+    if (!p->in_mall) return 0;
+    float dx=p->x - BW_SX, dy=p->y - (MALL_CY+92);
+    // 100, not 64: the gate block itself holds you ~69 units off the
+    // door point from the south and the west — at 64 the two most
+    // natural approaches (up the door column from the entrance, east
+    // along the mat row) stopped a few pixels short, and Interact did
+    // nothing at all, not even the denial floaters (Daniel, Nov 3:
+    // "wouldn't even let me in")
+    return dx*dx + dy*dy < 100*100;
+}
+static int on_exit_mat(Player *p){
+    return p->in_mall && p->x>-40 && p->x<40 && p->y>MALL_CY+128 && p->y<MALL_CY+172;
+}
+static void mall_enter(int pi){
+    Player *p=&G.p[pi];
+    p->in_mall=1; p->in_arcade=0; p->bean_jet=0; p->on_wall=-1; p->station=-1;
+    p->x=0; p->y=MALL_CY+118; p->aim=-PI/2;
+    splat(p->x, p->y, COL(255,214,120), 10, 90);
+    sfx(19);
+}
+static void mall_exit(int pi){
+    Player *p=&G.p[pi];
+    p->in_mall=0; p->in_arcade=0; p->station=-1;
+    p->x=0; p->y=58; p->aim=PI/2;
+    splat(p->x, p->y, COL(255,214,120), 10, 90);
+    sfx(19);
+}
+// what INTERACT would do right here (the HUD hint). neutral=1 swaps the
+// key name for a plain INTERACT (P2's half of a co-op screen)
+static const char *interact_prompt(Player *p, char *buf, int neutral){
+    char *q=buf;
+    if (!p->alive) return 0;
+    const char *key = neutral? "INTERACT" : (pad_mode()? "B" : (IN.touch_seen? "TAP" : key_name(G.bind[ACT_INTERACT])));
+    { Player *down = downed_near(p);
+      if (down){ q=sappend(q, key); q=sappend(q, " - REVIVE "); q=sappend(q, down->name);
+                 q=sappend(q, " - "); q=sapp_int(q, revive_price(down)); q=sappend(q, " KG");
+                 *q=0; return buf; } }
+    if (!p->in_mall){
+        if (!near_store(p)) return 0;
+        q=sappend(q, key); q=sappend(q, " - ENTER THE BUG MALL"); *q=0; return buf;
+    }
+    int st = station_at(p);
+    if (st>=0){
+        q=sappend(q, key); q=sappend(q, " - "); q=sappend(q, MALL_STATION[st]); *q=0; return buf;
+    }
+    // the arcade door is checked BEFORE the Banzai gate: the gate's
+    // generous trigger disc (r=100 around its front) overlaps the
+    // door's approach strip on the east wall, and the wall door is
+    // the more specific address — the gate's own stands (south of
+    // the block, west of it) are outside the door strip, so the
+    // gate loses nothing.
+    if (arcade_door_at(p)){
+        q=sappend(q, key); q=sappend(q, " - THE ARCADE"); *q=0; return buf;
+    }
+    if (bw_door_at(p) && G.net_mode!=NET_CLIENT){
+        q=sappend(q, key); q=sappend(q, " - BANZAI WORLD"); *q=0; return buf;
+    }
+    { int cab = cabinet_at(p);
+      if (cab>=0 && G.net_mode!=NET_CLIENT){
+          q=sappend(q, key); q=sappend(q, " - PLAY "); q=sappend(q, ARC_NAME[cab]); *q=0; return buf;
+      } }
+    if (arcade_exit_at(p)){
+        q=sappend(q, key); q=sappend(q, " - BACK TO THE MALL"); *q=0; return buf;
+    }
+    if (on_exit_mat(p)){
+        q=sappend(q, key); q=sappend(q, " - LEAVE THE MALL"); *q=0; return buf;
+    }
+    return 0;
+}
+// mall interior collision: stay in the room, don't walk through counters
+static void mall_collide(Player *p){
+    if (p->x < -284) p->x = -284; if (p->x > 284) p->x = 284;
+    if (p->y < MALL_CY-164) p->y = MALL_CY-164;
+    if (p->y > MALL_CY+158) p->y = MALL_CY+158;
+    // the Banzai World gate against the south wall (east twin of the bowl)
+    { float hx=52, hy0=MALL_CY+118, hy1=MALL_CY+150, rad=11;
+      if (p->x > BW_SX-hx-rad && p->x < BW_SX+hx+rad && p->y > hy0-rad && p->y < hy1+rad){
+          float dyr = (hy1+rad) - p->y, dyl = p->y - (hy0-rad);
+          float dxr = (BW_SX+hx+rad) - p->x, dxl = p->x - (BW_SX-hx-rad);
+          float m=dyr; int side=0;
+          if (dyl<m){ m=dyl; side=1; } if (dxr<m){ m=dxr; side=2; } if (dxl<m){ side=3; }
+          if (side==0) p->y = hy1+rad; else if (side==1) p->y = hy0-rad;
+          else if (side==2) p->x = BW_SX+hx+rad; else p->x = BW_SX-hx-rad;
+      } }
+    // the bowling counter against the south wall
+    { float hx=52, hy0=MALL_CY+118, hy1=MALL_CY+150, rad=11;
+      if (p->x > BOWL_SX-hx-rad && p->x < BOWL_SX+hx+rad && p->y > hy0-rad && p->y < hy1+rad){
+          float dyr = (hy1+rad) - p->y, dyl = p->y - (hy0-rad);
+          float dxr = (BOWL_SX+hx+rad) - p->x, dxl = p->x - (BOWL_SX-hx-rad);
+          float m=dyr; int side=0;
+          if (dyl<m){ m=dyl; side=1; } if (dxr<m){ m=dxr; side=2; } if (dxl<m){ side=3; }
+          if (side==0) p->y = hy1+rad; else if (side==1) p->y = hy0-rad;
+          else if (side==2) p->x = BOWL_SX+hx+rad; else p->x = BOWL_SX-hx-rad;
+      } }
+    for (int s=0;s<4;s++){
+        float hx=58, hy0=MALL_CY-158, hy1=MALL_CY-126, rad=11;
+        if (p->x > MALL_SX[s]-hx-rad && p->x < MALL_SX[s]+hx+rad && p->y > hy0-rad && p->y < hy1+rad){
+            // push out the shallow way (almost always south, off the counter front)
+            float dyr = (hy1+rad) - p->y, dyl = p->y - (hy0-rad);
+            float dxr = (MALL_SX[s]+hx+rad) - p->x, dxl = p->x - (MALL_SX[s]-hx-rad);
+            float m=dyr; int side=0;
+            if (dyl<m){ m=dyl; side=1; } if (dxr<m){ m=dxr; side=2; } if (dxl<m){ side=3; }
+            if (side==0) p->y = hy1+rad; else if (side==1) p->y = hy0-rad;
+            else if (side==2) p->x = MALL_SX[s]+hx+rad; else p->x = MALL_SX[s]-hx-rad;
+        }
+    }
+}
+
+// arcade interior collision: same room shape as the mall, with the
+// four cabinets standing along the north wall where counters would be
+static void arcade_collide(Player *p){
+    if (p->x < -284) p->x = -284; if (p->x > 284) p->x = 284;
+    if (p->y < ARC_CY-164) p->y = ARC_CY-164;
+    if (p->y > ARC_CY+158) p->y = ARC_CY+158;
+    for (int s=0;s<4;s++){
+        float hx=66, hy0=ARC_CY-158, hy1=ARC_CY-126, rad=11;
+        if (p->x > ARC_SX[s]-hx-rad && p->x < ARC_SX[s]+hx+rad && p->y > hy0-rad && p->y < hy1+rad){
+            float dyr = (hy1+rad) - p->y, dyl = p->y - (hy0-rad);
+            float dxr = (ARC_SX[s]+hx+rad) - p->x, dxl = p->x - (ARC_SX[s]-hx-rad);
+            float m=dyr; int side=0;
+            if (dyl<m){ m=dyl; side=1; } if (dxr<m){ m=dxr; side=2; } if (dxl<m){ side=3; }
+            if (side==0) p->y = hy1+rad; else if (side==1) p->y = hy0-rad;
+            else if (side==2) p->x = ARC_SX[s]+hx+rad; else p->x = ARC_SX[s]-hx-rad;
+        }
+    }
+}
+
+static void place_wall(int pi){
+    Player *p=&G.p[pi];
+    if (p->in_mall) return;                               // the mall is a no-build zone
+    if (p->stack_n<3 || p->wall_cd>0) { if (pi==G.my_id) sfx(16); return; }
+    float wx = p->x + fcos(p->aim)*36, wy = p->y + fsin(p->aim)*36;
+    int horiz = (ffabs(fsin(p->aim)) > ffabs(fcos(p->aim))) ? 1 : 0;
+    // Forgiving interlock (Daniel): a wall placed NEAR an existing one
+    // snaps into line with it — same row, end to end, or a clean
+    // corner — so extending a run doesn't take pixel-perfect
+    // shuffling. The nearest good snap wins; the loop rule and the
+    // too-close rule below judge the SNAPPED spot, not the raw one.
+    { float best=1e18f, sx=wx, sy=wy;
+      for (int i=0;i<MAXWALLS;i++){ Wall *o=&G.walls[i];
+        if (!o->alive) continue;
+        if (o->horiz == horiz){
+            // collinear: my line is close to theirs, my center is
+            // somewhere past their end — slide me to exactly end-to-end
+            float dl = horiz? wy-o->y : wx-o->x; if (dl<0) dl=-dl;
+            float da = horiz? wx-o->x : wy-o->y;
+            float ada = da<0? -da:da;
+            if (dl<=20 && ada>20 && ada<=104){
+                float tx = horiz? o->x + (da<0? -56:56) : o->x;
+                float ty = horiz? o->y : o->y + (da<0? -56:56);
+                float d2 = (tx-wx)*(tx-wx) + (ty-wy)*(ty-wy);
+                if (d2<best){ best=d2; sx=tx; sy=ty; }
+            }
+        } else {
+            // a corner: my center belongs at (±26, ±26) from theirs,
+            // where my end lands exactly on their end
+            for (int a=-1;a<=1;a+=2) for (int b=-1;b<=1;b+=2){
+                float tx = o->x + 26*a, ty = o->y + 26*b;
+                float d2 = (tx-wx)*(tx-wx) + (ty-wy)*(ty-wy);
+                if (d2 < 24*24 && d2<best){ best=d2; sx=tx; sy=ty; }
+            }
+        }
+      }
+      wx=sx; wy=sy; }
+    // Stacking (Daniel): building right on top of an existing wall is
+    // allowed — it reinforces that spot, and the bugs have to chew
+    // through both. A same-direction stack can't change the run's
+    // outline, so it skips the circuit rule; there is no too-close
+    // rejection anymore.
+    int stacking = 0, stack_i = -1;
+    for (int i=0;i<MAXWALLS;i++){ Wall *o=&G.walls[i];
+        if (o->alive){ float dx=o->x-wx, dy=o->y-wy;
+            if (dx*dx+dy*dy < 36){ stacking = (o->horiz==horiz)? 1 : 2; stack_i = i; break; } } }
+    // Daniel's circuit rule: a wall that would entirely close a loop
+    // is never allowed — the run must always stay open somewhere.
+    if (stacking!=1 && placement_closes_loop(wx, wy, horiz)){
+        spawn_floater(wx, wy-16, "THE LOOP MUST STAY OPEN", COL(255,120,110));
+        if (pi==G.my_id) sfx(16);
+        p->wall_cd = 0.35f;
+        return;
+    }
+    // Absorb (Daniel, Nov 6): stacking onto a same-direction wall no
+    // longer spawns a twin entry on the same spot — every twin was a
+    // full extra wall to draw, collide and chew, and a tall stack
+    // lagged the game. The new carcasses melt into the wall that is
+    // already there: same total strength, one wall entry. Nov 7:
+    // the pile is still a PILE — the entry counts its layers
+    // (o->stack), the renderer draws them heaped up, the run counts
+    // them toward its size/tiers, and chewing sheds them one at a
+    // time (break_wall), like the separate walls they used to be.
+    if (stacking==1 && stack_i>=0){
+        Wall *o=&G.walls[stack_i];
+        float sum=0; float ws[3];
+        for (int k=0;k<3;k++){ ws[k]=hat_pop(p); sum+=ws[k]; }
+        float add = 45.0f + sum*2.2f;
+        o->maxhp += add; o->hp += add; if (o->hp>o->maxhp) o->hp=o->maxhp;
+        o->stack = (o->stack>0? o->stack : 1) + 1; if (o->stack>999) o->stack=999;
+        for (int k=0;k<3;k++){
+            CarcassFx *f = spawn_fx(2, p->x, p->y-24-k*4, o->x, o->y, ws[k], pi);
+            if (f) f->wall_slot=stack_i;   // lands on it; an alive wall ignores the build count
+        }
+        walls_recompute();
+        spawn_floater(o->x, o->y-16, "REINFORCED!", COL(255,230,150));
+        p->wall_cd = 0.35f;
+        sfx(15);
+        return;
+    }
+    // walls may go anywhere now — the plaza needs defending like anywhere
+    for (int i=0;i<MAXWALLS;i++) if (!G.walls[i].alive){
+        Wall *w=&G.walls[i];
+        float sum=0; float ws[3];
+        for (int k=0;k<3;k++){ ws[k]=hat_pop(p); sum+=ws[k]; }
+        w->alive=2; w->horiz = horiz;
+        w->x=wx; w->y=wy; w->hp = w->maxhp = 45.0f + sum*2.2f;
+        w->stack=1; w->grp=-1; w->grp_old=-1; w->endpt=0;
+        wall_build_n[i]=0;
+        for (int k=0;k<3;k++){
+            CarcassFx *f = spawn_fx(2, p->x, p->y-24-k*4, wx, wy, ws[k], pi);
+            if (f) f->wall_slot=i; else wall_build_n[i]++;
+        }
+        if (wall_build_n[i]>=3){ w->alive=1; walls_recompute(); }
+        p->wall_cd = 0.35f;
+        sfx(15);
+        return;
+    }
+}
+
+static void player_fire(Player *p, int pi, float dt){
+    if (p->in_mall){ p->fire_cd = 0; return; }   // house rules: no shooting in the mall
+    p->fire_cd -= dt;
+    if (!(p->cur_keys & K_FIRE)) return;
+    int w = p->weapon;
+    if (!p->owned[w]) return;
+    float mx = p->x + fcos(p->aim)*16, my = p->y + fsin(p->aim)*16;
+    float dm = p->dmg_mul, rm = p->rate_mul;
+    if (w==4){ // THE DEBUGGER: one pull = one sweep. All your beams
+        // extend together, spin one revolution together, then close
+        // together (the sweep itself lives in update_beam). Stacked
+        // copies don't widen one beam — they add beams to the ring:
+        // 2 = front + back, 3 = every 120°, and so on, each one also
+        // reaching a little farther.
+        if (p->fire_cd<=0 && beam_phase[pi]==0){
+            int copies = p->owned[4]; if (copies<1) copies=1;
+            beam_n[pi] = copies>MAXBEAMS? MAXBEAMS : copies;
+            beam_len[pi] = 105 + 10*(copies-1);
+            beam_base[pi] = p->aim;
+            beam_phase[pi] = 1; beam_t[pi] = 0; beam_tick[pi] = 0;
+            beam_frac[pi] = 0;
+            p->fire_cd = (BEAM_EXT + BEAM_SPIN + BEAM_RET + BEAM_REST)/rm;
+        }
+        return;
+    }
+    float cd = (w==0?0.115f : w==1?0.38f : w==2?0.30f : 1.05f);
+    if (p->fire_cd>0) return;
+    p->fire_cd = cd/rm;
+    float spread = (w==0?0.055f : w==1?0.03f : w==2?0.045f : 0.02f);
+    float dmg = (w==0?6.0f : w==1?24.0f : w==2?15.0f : 65.0f) * dm;
+    // stacked copies fan out: one copy fires straight ahead, two fire
+    // at two angles, three at three — a row of shots across your front.
+    // Stacks are uncapped; the fan itself tops out at 40 projectiles
+    // per volley (the projectile pool is only so deep).
+    int n = p->owned[w]; if (n<1) n=1; if (n>40) n=40;
+    for (int i=0;i<n;i++){
+        float off = ((float)i - (float)(n-1)/2.0f) * 0.11f;
+        float ang = p->aim + off + rng_range(-spread, spread);
+        fire_proj(pi, w, mx, my, ang, dmg, -1);
+    }
+    sfx(w==0?1 : w==1?2 : w==2?3 : 4);
+    if (w==3){ G.shake = 2.0f; }
+}
+
+// one damage tick of every live beam: same cone test the held beam used
+// (nearest bugs inside reach and ±0.55 rad of the beam's current angle
+// get breakpoint-frozen and burned)
+static void beam_hit_tick(int pi){
+    Player *p=&G.p[pi];
+    int nb = beam_n[pi]; if (nb<1) nb=1;
+    float bl = beam_len[pi] * beam_frac[pi];
+    float dm = p->dmg_mul;
+    for (int k=0;k<nb;k++){
+        float ba = beam_ang[pi][k];
+        for (int i=0;i<MAXBUGS;i++) if (G.bugs[i].alive){
+            float dx=G.bugs[i].x-p->x, dy=G.bugs[i].y-p->y;
+            float d2=dx*dx+dy*dy;
+            if (d2 < bl*bl){
+                float da = wrap_pi(fatan2(dy,dx) - ba);
+                if (ffabs(da) < 0.55f){
+                    G.bugs[i].bp_t = 0.35f;          // BREAKPOINT: frozen
+                    hurt_bug(i, 8.0f*dm, pi, fcos(ba)*30, fsin(ba)*30);
+                }
+            }
+        }
+    }
+    sfx(14);
+}
+
+// advance one player's Debugger sweep: extend (beams grow, damage live),
+// spin (one full revolution, damage live), retract (beams close, no
+// damage), done. Writes the render state (angles, reach fraction, vis)
+// every frame; the ring rotates as a whole from the captured aim.
+static void update_beam(int pi, float dt){
+    if (beam_phase[pi]==0){ beam_frac[pi]=1; return; }
+    Player *p=&G.p[pi];
+    if (!p->alive || !p->owned[4]){ beam_phase[pi]=0; beam_vis[pi]=0; beam_frac[pi]=1; return; }
+    beam_t[pi]+=dt;
+    int ph = beam_phase[pi];
+    float dur = ph==1? BEAM_EXT : ph==2? BEAM_SPIN : BEAM_RET;
+    if (beam_t[pi]>=dur){
+        beam_t[pi]=0;
+        beam_phase[pi] = ph==3? 0 : ph+1;
+        if (beam_phase[pi]==0){ beam_vis[pi]=0; beam_frac[pi]=1; return; }
+        ph = beam_phase[pi];
+        dur = ph==1? BEAM_EXT : ph==2? BEAM_SPIN : BEAM_RET;
+    }
+    float f = beam_t[pi]/dur;
+    float rot = 0;
+    if (ph==1) beam_frac[pi]=f;
+    else if (ph==2){ beam_frac[pi]=1; rot = TAU*f; }
+    else { beam_frac[pi]=1-f; rot = TAU; }
+    int nb = beam_n[pi]; if (nb<1) nb=1;
+    for (int k=0;k<nb;k++) beam_ang[pi][k] = beam_base[pi] + rot + TAU*(float)k/(float)nb;
+    beam_vis[pi]=0.09f;
+    if (ph==1 || ph==2){
+        beam_tick[pi]+=dt;
+        while (beam_tick[pi]>=0.07f){ beam_tick[pi]-=0.07f; beam_hit_tick(pi); }
+    }
+}
+
+// THE BACKFIRE BEAN (Krista's idea, Daniel's build, Nov 5): a small
+// green fellow with goggles and a jetpack he fuels entirely himself —
+// beans are famous for exactly one thing, and he has weaponized it,
+// tastefully, in little green puffs. Squeeze him (key 6, or tap BEAN
+// in the status card) anywhere out in the wild and he flies you —
+// and your hat, and your buddy — straight home to the Epicenter.
+// One bean, one ride. He regrets nothing.
+//
+// INSIDE the epicenter there is no home to fly to, so the bean does
+// the other thing he knows (Daniel, Nov 10): he becomes a JETPACK.
+// You fly where you steer, over props, walls and swarms alike, for
+// as long as you keep your nerve — the ride ends the moment you
+// FIRE, or the moment anything lands ONE HIT on you, and he drops
+// you right where you are. A launch pad for the far country.
+#define BEAN_EPI_R 280.0f
+static void bean_use(int pi){
+    Player *p=&G.p[pi];
+    if (G.state!=GS_PLAY || p->beans<=0 || p->bean_t>0 || p->bean_jet>0 || !p->alive) return;
+    if (p->in_mall || p->station>=0 || G.bud[pi].in_bw) return;
+    float dx=p->x, dy=p->y-70;
+    if (dx*dx+dy*dy < BEAN_EPI_R*BEAN_EPI_R){
+        p->beans--; p->bean_jet=1; p->jet_fall=0;
+        spawn_floater(p->x, p->y-30, "JETPACK AWAY!", COL(150,220,120));
+        sfx(23);
+        if (pi==G.my_id) do_save();
+        return;
+    }
+    p->beans--; p->bean_t=1.6f;
+    spawn_floater(p->x, p->y-30, "BEAN POWER!", COL(150,220,120));
+    sfx(23);
+    if (pi==G.my_id) do_save();
+}
+static void update_players(float dt){
+    for (int i=0;i<MAXP;i++){
+        Player *p=&G.p[i];
+        if (!p->connected) continue;
+        if (p->fire_cd>0 && p->weapon!=4) { /* handled in fire */ }
+        if (p->wall_cd>0) p->wall_cd-=dt;
+        if (p->shed_cd>0) p->shed_cd-=dt;
+        if (p->wof>0) p->wof-=dt;
+        p->idle_t += dt;                       // movement zeroes this (idle anim)
+        if (p->hurt_t>0) p->hurt_t-=dt;
+        if (p->revive_t>0) p->revive_t-=dt;
+        if (beam_vis[i]>0) beam_vis[i]-=dt;
+        update_beam(i, dt);
+        if (!p->alive){ p->dead_t+=dt; continue; }
+        if (p->shield_regen_t>0) p->shield_regen_t-=dt;
+        else if (p->shield < p->shield_max){
+            // 14 points a second, accumulated fractionally: the old
+            // line added (int)(14*dt+0.5) a frame, which truncates to
+            // 0 at 30-60 fps — the shield silently never recharged.
+            shield_frac[i] += 14.0f*dt;
+            int whole = (int)shield_frac[i];
+            if (whole>0){ p->shield += whole; shield_frac[i] -= (float)whole;
+                          if (p->shield>p->shield_max){ p->shield=p->shield_max; shield_frac[i]=0; } }
+        }
+        // THE BACKFIRE BEAN ride: sputter (0–0.45s), the BLAST teleports
+        // you home (0.45s), then you drop out of the sky onto the plaza
+        // (to 1.05s) and stand there dizzy (to 1.6s). A passenger does
+        // not move or fire — the bean is driving.
+        if (p->bean_t>0){
+            float eb = 1.6f - p->bean_t;          // elapsed at frame start
+            p->bean_t -= dt; if (p->bean_t<0) p->bean_t=0;
+            float e = 1.6f - p->bean_t;           // elapsed now
+            if (eb<0.45f && e>=0.45f){
+                p->x=0; p->y=70;
+                Buddy *bb=&G.bud[i];
+                if (bb->active && !bb->in_bw){ bb->x=p->x+26; bb->y=p->y+12; }
+                splat(p->x, p->y+6, COL(168,216,120), 22, 130);
+                splat(p->x, p->y+6, COL(240,248,230), 12, 90);
+                spawn_floater(p->x, p->y-34, "PBBBT!", COL(150,220,120));
+                sfx(22);
+                if (i==G.my_id) do_save();
+            } else if (e<0.45f){
+                if ((int)(e*14)!=(int)(eb*14))
+                    spawn_particle(p->x+rng_range(-6,6), p->y+8, COL(168,216,120), 14, 0.4f, 3);
+            } else if (e<1.05f){
+                if ((int)(e*20)!=(int)(eb*20))
+                    spawn_particle(p->x+rng_range(-5,5), p->y-14, COL(240,248,230), 12, 0.35f, 2);
+            } else if (eb<1.05f){
+                splat(p->x, p->y+8, COL(168,216,120), 16, 110);
+                splat(p->x, p->y+8, COL(240,248,230), 10, 80);
+                sfx(5);
+            }
+            continue;
+        }
+        // THE BEAN JETPACK (epicenter launches): steer freely, fly
+        // over everything at jet speed; firing or one landed hit
+        // ends it where you are (see bean_jet_end). No hat burden,
+        // no prop collision — you're above all of it.
+        if (p->jet_fall>0){
+            p->jet_fall -= dt;
+            if ((int)(G.time*20)!=(int)((G.time-dt)*20))
+                spawn_particle(p->x+rng_range(-5,5), p->y-8, COL(240,248,230), 10, 0.3f, 2);
+            continue;
+        }
+        if (p->bean_jet>0){
+            if (p->cur_keys & K_FIRE){ bean_jet_end(i, 1); continue; }
+            float jx=0, jy=0;
+            if (p->cur_keys & K_UP) jy-=1;
+            if (p->cur_keys & K_DOWN) jy+=1;
+            if (p->cur_keys & K_LEFT) jx-=1;
+            if (p->cur_keys & K_RIGHT) jx+=1;
+            float jl = fsqrt(jx*jx+jy*jy);
+            if (jl>0){
+                jx/=jl; jy/=jl;
+                p->aim = fatan2(jy, jx);
+                p->x += jx*335.0f*dt; p->y += jy*335.0f*dt;
+                p->walk_ph += dt*6; p->idle_t = 0;
+            }
+            p->on_wall=-1;
+            if ((int)(G.time*24)!=(int)((G.time-dt)*24))
+                spawn_particle(p->x+rng_range(-4,4), p->y+10, COL(168,216,120), 12, 0.35f, 3);
+            continue;
+        }
+        // movement
+        float mx=0, my=0;
+        if (p->cur_keys & K_UP) my-=1;
+        if (p->cur_keys & K_DOWN) my+=1;
+        if (p->cur_keys & K_LEFT) mx-=1;
+        if (p->cur_keys & K_RIGHT) mx+=1;
+        float ml = fsqrt(mx*mx+my*my);
+        if (ml>0){
+            mx/=ml; my/=ml;
+            // Cyberdogs rules: you face (and therefore fire) the way you move
+            p->aim = fatan2(my, mx);
+            float sp = player_speed(p);
+            float nx = p->x + mx*sp*dt, ny = p->y + my*sp*dt;
+            // The mall interior stands on world chunks the junkyard
+            // generator also fills — its solid crates and fax machines
+            // were colliding in the mall even though draw_mall never
+            // draws them (Daniel's "invisible impediments", Nov 3).
+            // Inside, only mall_collide governs.
+            if (p->in_mall){ p->x = nx; p->y = ny; }
+            else {
+                if (!prop_collide(nx, p->y, 11)) p->x = nx;
+                if (!prop_collide(p->x, ny, 11)) p->y = ny;
+            }
+            wall_step(p);
+            if (p->in_arcade) arcade_collide(p);
+            else if (p->in_mall) mall_collide(p);
+            p->walk_ph += dt*sp*0.055f;
+            p->idle_t = 0;
+            if ((p->whale_on & 8) && !p->in_mall){   // Whales Only: sparkle trail
+                whale_spark_t[i] -= dt*sp;
+                if (whale_spark_t[i]<=0){ whale_spark_t[i]=13;
+                    spawn_particle(p->x + (float)rng_range(-8,8), p->y + (float)rng_range(0,9),
+                                   COL(255,230,140), 26, 0.7f, 2); }
+            }
+            if (p->in_mall && !p->in_arcade && sp < 64.0f){
+                // WALK OF FAME (Daniel, Nov 14, 2026): crawling through
+                // the mall under a big hat is a parade, not a slog —
+                // confetti rains and the marquee flashes while you creep.
+                p->wof = 0.3f;
+                wof_spark_t[i] -= dt*sp;
+                if (wof_spark_t[i]<=0){ wof_spark_t[i]=6;
+                    for (int k=0;k<2;k++)
+                        spawn_particle(p->x + (float)rng_range(-22,22), p->y - (float)rng_range(6,48),
+                                       WOF_COL[(int)(rng_f()*5.99f)], 40, 1.3f, 3); }
+            }
+        } else if (i!=G.my_id && G.net_mode==NET_HOST){
+            p->aim = p->net_aim;      // remote player standing still: keep
+                                      // the facing they last sent us
+        }
+        // WHALES ONLY: PARADE DUCK — it follows. It does nothing else.
+        if ((p->whale_on & 256) && p->connected && p->alive){
+            float ddx = p->x - duck_x[i], ddy = p->y - duck_y[i];
+            if (!duck_on[i] || ddx*ddx + ddy*ddy > 300.0f*300.0f){
+                duck_x[i] = p->x - fcos(p->aim)*30; duck_y[i] = p->y - fsin(p->aim)*30; duck_on[i] = 1;
+            }
+            float tx = p->x - fcos(p->aim)*30, ty = p->y - fsin(p->aim)*30;
+            float dx = tx - duck_x[i], dy = ty - duck_y[i], dd = fsqrt(dx*dx + dy*dy);
+            if (dd > 4){
+                float dsp = 165.0f*dt; if (dsp > dd) dsp = dd;
+                duck_x[i] += dx/dd*dsp; duck_y[i] += dy/dd*dsp;
+                duck_ph[i] += dt*11; if (dx < -1) duck_face[i] = -1; else if (dx > 1) duck_face[i] = 1;
+            }
+        } else duck_on[i] = 0;
+        if (!p->in_mall && p->on_wall<0) collide_hut(&p->x, &p->y, 11);
+        if (G.state==GS_PLAY) player_fire(p, i, dt);
+        else if (p->fire_cd>0) p->fire_cd-=dt;
+        if (p->want_wall){ p->want_wall=0; if (G.state==GS_PLAY) place_wall(i); }
+    }
+}
+
+static void update_projectiles(float dt){
+    for (int i=0;i<MAXPROJ;i++){
+        Proj *q=&G.projs[i];
+        if (!q->alive) continue;
+        q->life -= dt;
+        q->x += q->vx*dt; q->y += q->vy*dt; q->spin += dt*9;
+        int dead = (q->life<=0);
+        // shots fly OVER carcass walls: the player can fire across a
+        // wall line, while bugs still have to chew through it — there
+        // are no enemy projectiles, so nothing hostile crosses a wall
+        // without eating it first. PMs now detonate on a bug or when
+        // their life runs out instead of on the wall.
+        if (!dead && q->life<=0 && q->kind==3){ explode_pm(q->x, q->y, q->dmg, q->owner, q->agent); dead=1; }
+        if (dead){ q->alive=0; continue; }
+        // bug hits
+        for (int bi=0;bi<MAXBUGS;bi++){
+            Bug *b=&G.bugs[bi];
+            if (!b->alive) continue;
+            float dx=b->x-q->x, dy=b->y-q->y, rr=bug_radius(b->w)+5;
+            if (dx*dx+dy*dy > rr*rr) continue;
+            if (q->kind==3){ explode_pm(q->x, q->y, q->dmg, q->owner, q->agent); q->alive=0; }
+            else if (q->kind==2){ // duck: hit and bounce to a neighbour
+                hurt_bug(bi, q->dmg, q->owner, q->vx*0.2f, q->vy*0.2f);
+                if (q->agent==-2) b->btarget=q->owner;   // a buddy's hit draws its ire
+                sfx(3);
+                q->bounces++;
+                int best=-1; float bd=180*180;
+                for (int j=0;j<MAXBUGS;j++) if (j!=bi && G.bugs[j].alive){
+                    float ddx=G.bugs[j].x-q->x, ddy=G.bugs[j].y-q->y, d2=ddx*ddx+ddy*ddy;
+                    if (d2<bd){ bd=d2; best=j; }
+                }
+                if (best>=0 && q->bounces<=3){
+                    float d=fsqrt(bd)+0.01f, sp=360;
+                    q->vx=(G.bugs[best].x-q->x)/d*sp; q->vy=(G.bugs[best].y-q->y)/d*sp;
+                    q->life = q->life>0.5f? q->life : 0.5f;
+                } else q->alive=0;
+            } else {
+                hurt_bug(bi, q->dmg, q->owner, q->vx*0.35f, q->vy*0.35f);
+                if (q->agent==-2) b->btarget=q->owner;
+                if (q->kind==1){ // mouse splash
+                    for (int j=0;j<MAXBUGS;j++) if (j!=bi && G.bugs[j].alive){
+                        float ddx=G.bugs[j].x-q->x, ddy=G.bugs[j].y-q->y;
+                        if (ddx*ddx+ddy*ddy < 36*36){ hurt_bug(j, q->dmg*0.4f, q->owner, ddx, ddy); if (q->agent==-2) G.bugs[j].btarget=q->owner; }
+                    }
+                }
+                q->alive=0;
+            }
+            break;
+        }
+    }
+}
+
+// The Epicenter shield: while ANY living player is anywhere in the
+// Bug Mall (or has a shop panel open), the plaza is sealed — bugs
+// cannot cross the ring until the last shopper comes back out.
+// Shopping is sacred.
+static int shield_active(void){
+    for (int i=0;i<MAXP;i++)
+        if (G.p[i].connected && G.p[i].alive && (G.p[i].in_store || G.p[i].in_mall)) return 1;
+    return 0;
+}
+static int any_remote_connected(void){
+    // a LAN guest is remote; the local co-op P2 sits on this machine
+    for (int i=1;i<MAXP;i++) if (G.p[i].connected && i!=G.p2_slot) return 1;
+    return 0;
+}
+static void update_bugs(float dt){
+    int shield = shield_active();
+    for (int i=0;i<MAXBUGS;i++){
+        Bug *b=&G.bugs[i];
+        if (!b->alive) continue;
+        if (b->hit_t>0) b->hit_t-=dt;
+        b->leg_ph += dt*(2.0f + b->speed*0.08f);
+        // knockback decay
+        b->x += b->vx*dt; b->y += b->vy*dt;
+        b->vx *= (1.0f - 6.0f*dt); b->vy *= (1.0f - 6.0f*dt);
+        if (b->bp_t>0){ b->bp_t-=dt; continue; }         // frozen at a breakpoint
+        // who does this bug hunt? A player, normally. But the first
+        // time a Banzai Buddy's shot lands on it, the bug turns on
+        // that buddy and keeps coming for it until one of them is
+        // down (the same rule the retired robot clones used to get).
+        int tp=-1; float td=1e18f;
+        if (b->btarget>=0 && G.bud[b->btarget].active && G.bud[b->btarget].hp>0 && !G.bud[b->btarget].fainted){
+            float dx=G.bud[b->btarget].x-b->x, dy=G.bud[b->btarget].y-b->y;
+            td=dx*dx+dy*dy; tp=-2;   // tp -2: the quarry is a buddy (index in btarget)
+        } else {
+            b->btarget=-1;   // its foe is gone — back to players
+            for (int j=0;j<MAXP;j++) if (G.p[j].connected && G.p[j].alive && !G.p[j].in_mall){
+                float dx=G.p[j].x-b->x, dy=G.p[j].y-b->y, d2=dx*dx+dy*dy;
+                if (d2<td){ td=d2; tp=j; }
+            }
+        }
+        if (tp<0 && tp!=-2) continue;
+        float txp = tp==-2? G.bud[b->btarget].x : G.p[tp].x;
+        float typ = tp==-2? G.bud[b->btarget].y : G.p[tp].y;
+        float dist = fsqrt(td);
+        if (dist > 1750){ b->alive=0; continue; }        // left behind
+        float dx=txp-b->x, dy=typ-b->y;
+        float inv = dist>0.01f? 1.0f/dist : 0;
+        float mx = dx*inv, my = dy*inv;
+        // GREASE (Daniel, Nov 10): a bug stuck behind a prop used to
+        // hug it forever. While greased, its heading bends hard to one
+        // side — chosen by probing which side is open — so it slides
+        // around the obstacle instead of pressing into it.
+        if (b->grease_t>0){
+            b->grease_t -= dt;
+            float gx2 = mx*0.22f + (-my)*b->grease_s, gy2 = my*0.22f + mx*b->grease_s;
+            float gl = fsqrt(gx2*gx2 + gy2*gy2);
+            if (gl>0.01f){ mx = gx2/gl; my = gy2/gl; }
+        }
+        float ox0 = b->x, oy0 = b->y;
+        float nx = b->x + mx*b->speed*dt, ny = b->y + my*b->speed*dt;
+        float rad = bug_radius(b->w);
+        // chew through walls that block the way
+        int blocked=-1;
+        for (int wi=0;wi<MAXWALLS;wi++)
+            if (G.walls[wi].alive==1 && wall_box_hit(nx, ny, rad*0.8f, &G.walls[wi])){ blocked=wi; break; }
+        if (blocked>=0){
+            damage_wall(blocked, b->dmg*3.0f*dt);         // pooled health for interlocked runs
+            b->leg_ph += dt*6;                            // chewing scramble
+            b->stuck_t = 0;                               // chewing is a choice, not a stuck bug
+        } else {
+            if (!prop_collide(nx, b->y, rad*0.7f)) b->x = nx;
+            if (!prop_collide(b->x, ny, rad*0.7f)) b->y = ny;
+            // stuck? it wanted a full step and barely moved, and it is
+            // not yet in biting range — start the grease clock
+            float stepw = b->speed*dt;
+            float mvx = b->x-ox0, mvy = b->y-oy0;
+            if (stepw>0.4f && dist > rad+16 && mvx*mvx+mvy*mvy < stepw*stepw*0.0625f){
+                b->stuck_t += dt;
+                if (b->stuck_t>0.30f && b->grease_t<=0){
+                    float px2=-my, py2=mx, pr = rad+14;
+                    int lf = !prop_collide(b->x+px2*pr, b->y+py2*pr, rad*0.7f);
+                    int rf = !prop_collide(b->x-px2*pr, b->y-py2*pr, rad*0.7f);
+                    b->grease_s = (lf && !rf)? 1 : (rf && !lf)? -1 : (b->grease_s? -b->grease_s : 1);
+                    b->grease_t = 0.55f; b->stuck_t = 0;
+                }
+            } else if (b->stuck_t>0){ b->stuck_t -= dt*2; if (b->stuck_t<0) b->stuck_t=0; }
+        }
+        collide_hut(&b->x, &b->y, bug_radius(b->w));   // the mall is solid to bugs too
+        // the shield ring: bugs inside get shoved out, bugs outside stay out
+        if (shield){
+            float bd = fsqrt(b->x*b->x + b->y*b->y);
+            float rr = 152.0f + rad;
+            if (bd < rr){
+                if (bd < 0.01f){ b->x = rr; b->y = 0; }
+                else {
+                    float step = rr - bd; if (step > 260.0f*dt) step = 260.0f*dt;
+                    float s = (bd + step)/bd; b->x *= s; b->y *= s;
+                }
+                // re-measure so a shoved-out bug can't bite through the ring
+                float ddx = txp - b->x, ddy = typ - b->y;
+                dist = fsqrt(ddx*ddx + ddy*ddy);
+            }
+        }
+        // bite whatever it's chasing. A jetpacking player is ABOVE
+        // the swarm: only a near-direct meeting connects (and one
+        // landed hit ends the jet — see hurt_player).
+        float brange = (tp>=0 && G.p[tp].bean_jet>0)? rad*0.6f+8.0f : rad+13.0f;
+        if (dist < brange){
+            b->chew_t -= dt;
+            if (b->chew_t<=0){ b->chew_t = 0.8f;
+                if (tp==-2){
+                    Buddy *tb=&G.bud[b->btarget];
+                    if (tb->on_wall<0) hurt_buddy(b->btarget, b->dmg);
+                    else {   // the buddy's up on a run too: chew it down
+                        int wi=-1; float bd2=1e18f;
+                        for (int j=0;j<MAXWALLS;j++) if (G.walls[j].alive==1 && G.walls[j].grp==tb->on_wall){
+                            float ddx=G.walls[j].x-b->x, ddy=G.walls[j].y-b->y, d2=ddx*ddx+ddy*ddy;
+                            if (d2<bd2){ bd2=d2; wi=j; }
+                        }
+                        if (wi>=0) damage_wall(wi, b->dmg*2.4f);
+                    }
+                }
+                else if (G.p[tp].on_wall<0) hurt_player(tp, b->dmg);   // up on a wall run: out of biting reach — they have to chew him down
+                else {
+                    // mounted at the very lip of the run, a small bug can
+                    // reach the player's tile without ever entering the
+                    // wall box — left alone it would vibrate there forever,
+                    // neither biting nor chewing. So: chew the segment
+                    // of his run nearest to hand, at the usual chew rate.
+                    int wi=-1; float bd2=1e18f;
+                    for (int j=0;j<MAXWALLS;j++) if (G.walls[j].alive==1 && G.walls[j].grp==G.p[tp].on_wall){
+                        float ddx=G.walls[j].x-b->x, ddy=G.walls[j].y-b->y, d2=ddx*ddx+ddy*ddy;
+                        if (d2<bd2){ bd2=d2; wi=j; }
+                    }
+                    if (wi>=0) damage_wall(wi, b->dmg*2.4f);
+                }
+            }
+        }
+    }
+    // gentle separation so they don't stack into one mega-bug
+    for (int i=0;i<MAXBUGS;i++) if (G.bugs[i].alive)
+        for (int j=i+1;j<MAXBUGS;j++) if (G.bugs[j].alive){
+            Bug *a=&G.bugs[i], *c=&G.bugs[j];
+            float dx=c->x-a->x, dy=c->y-a->y;
+            float rr=(bug_radius(a->w)+bug_radius(c->w))*0.75f;
+            float d2=dx*dx+dy*dy;
+            if (d2>0.01f && d2<rr*rr){
+                float d=fsqrt(d2), push=(rr-d)*0.5f/d;
+                a->x-=dx*push*0.5f; a->y-=dy*push*0.5f;
+                c->x+=dx*push*0.5f; c->y+=dy*push*0.5f;
+            }
+        }
+    // expulsion: while the shield is up, EVERY bug inside the ring is
+    // put outside it — instantly, not shoved. The in-loop shove never
+    // reaches bugs with no living target outside (everyone is inside
+    // shopping: they `continue` before it) or breakpoint-frozen bugs,
+    // so entering the mall left the plaza still crawling (Daniel).
+    if (shield){
+        for (int i=0;i<MAXBUGS;i++){
+            Bug *b=&G.bugs[i];
+            if (!b->alive) continue;
+            float rad = bug_radius(b->w);
+            float bd = fsqrt(b->x*b->x + b->y*b->y);
+            float rr = 152.0f + rad;
+            if (bd < rr){
+                if (bd < 0.01f){ b->x = rr; b->y = 0; }
+                else { float sc = rr/bd; b->x *= sc; b->y *= sc; }
+            }
+        }
+    }
+}
+
+static void update_fx(float dt){
+    for (int i=0;i<(int)(sizeof(G.fx)/sizeof(G.fx[0]));i++){
+        CarcassFx *f=&G.fx[i];
+        if (!f->alive) continue;
+        if (f->mode==0){ f->x1=G.p[f->player].x; f->y1=G.p[f->player].y-24; }
+        if (f->mode==1){ f->x1=0; f->y1=-30; }
+        f->t += dt/f->dur;
+        if (f->t>=1){
+            f->alive=0;
+            if (f->mode==0){ hat_push(&G.p[f->player], f->w); sfx(6); }
+            if (f->mode==2 && f->wall_slot>=0){
+                int s=f->wall_slot;
+                if (++wall_build_n[s]>=3 && G.walls[s].alive==2){
+                    G.walls[s].alive=1;
+                    splat(G.walls[s].x, G.walls[s].y, COL(170,120,70), 8, 90);
+                    walls_recompute();
+                }
+            }
+        }
+    }
+    for (int i=0;i<MAXPART;i++) if (G.parts[i].alive){
+        Particle *q=&G.parts[i];
+        q->life-=dt; if (q->life<=0){ q->alive=0; continue; }
+        q->x+=q->vx*dt; q->y+=q->vy*dt; q->vx*=(1-3*dt); q->vy*=(1-3*dt);
+    }
+    for (int i=0;i<MAXFLOAT;i++) if (G.floats[i].alive){
+        Floater *q=&G.floats[i];
+        q->life-=dt; q->y-=22*dt; if (q->life<=0) q->alive=0;
+    }
+}
+
+static void hurt_buddy(int owner, float dmg){
+    Buddy *b=&G.bud[owner];
+    if (!b->active || b->fainted) return;
+    if (b->steady_t>0) return;                       // ROCK STEADY: not today
+    float f = (1.0f - 0.12f*b->up_def) * BUD_DEF[b->species%BUDN];
+    if (f<0.2f) f=0.2f;                              // training + species toughness
+    b->hp -= dmg*f; b->hurt_t = 0.2f; b->calm = 0;
+    if (b->hp<=0){
+        // buddies FAINT — they never die (Daniel's rule). A fainted
+        // buddy stays where it fell, out of the fight, until its
+        // owner hauls back to the Banzai Buddies shop for a revive.
+        b->hp=0; b->fainted=1;
+        for (int j=0;j<MAXBUGS;j++) if (G.bugs[j].btarget==owner) G.bugs[j].btarget=-1;
+        splat(b->x, b->y, COL(255,150,150), 14, 110);
+        spawn_floater(b->x, b->y-20, "FAINTED!", COL(255,120,120));
+        // and at the owner, who may be looking the other way entirely —
+        // a missed faint reads exactly like a vanished buddy (Nov 3)
+        spawn_floater(G.p[owner].x, G.p[owner].y-26, "YOUR BUDDY FAINTED!", COL(255,150,150));
+        sfx(17);
+    }
+}
+static void buddy_hit(int pi, int bi, float dmg, float kb){
+    Bug *t=&G.bugs[bi];
+    Buddy *b=&G.bud[pi];
+    if (!t->alive) return;
+    float dx=t->x-b->x, dy=t->y-b->y, d=fsqrt(dx*dx+dy*dy)+0.01f;
+    hurt_bug(bi, dmg, pi, dx/d*kb, dy/d*kb);
+    if (!t->alive) b->xp += 2 + (int)(t->w*0.6f);        // its kill, its lesson
+    else t->btarget = pi;                                 // and now it's personal
+}
+static void buddy_move2(int pi, int bi){
+    Buddy *b=&G.bud[pi]; Bug *t=&G.bugs[bi];
+    if (!t->alive) return;
+    b->energy -= BUD_EN_MOVE2; if (b->energy<0) b->energy=0;
+    b->move_cd = (b->species==2 || b->species==4)? 5.5f : 4.0f;
+    b->lunge_t = 0.22f;
+    if (b->species==0){            // POUNCE: land on it, splash the neighbours
+        b->x = t->x + rng_range(-8,8); b->y = t->y + rng_range(-8,8);
+        splat(b->x, b->y, COL(240,200,120), 8, 90);
+        for (int j=0;j<MAXBUGS;j++) if (G.bugs[j].alive){
+            float dx=G.bugs[j].x-b->x, dy=G.bugs[j].y-b->y;
+            if (dx*dx+dy*dy < 46*46) buddy_hit(pi, j, buddy_dmg(b)*1.6f, 90);
+        }
+        sfx(3);
+    } else if (b->species==1){     // RAKE: three slashes, one breath
+        for (int k=0;k<3;k++) if (t->alive) buddy_hit(pi, bi, buddy_dmg(b)*0.7f, 30);
+        sfx(3);
+    } else if (b->species==3){     // SPUR DIVE: a platypus lands, venom first
+        b->x = t->x + rng_range(-8,8); b->y = t->y + rng_range(-8,8);
+        splat(b->x, b->y, COL(150,220,170), 8, 90);
+        for (int j=0;j<MAXBUGS;j++) if (G.bugs[j].alive){
+            float dx=G.bugs[j].x-b->x, dy=G.bugs[j].y-b->y;
+            if (dx*dx+dy*dy < 44*44){ buddy_hit(pi, j, buddy_dmg(b)*1.7f, 70); if (G.bugs[j].alive) G.bugs[j].bp_t = 0.9f; }
+        }
+        sfx(3);
+    } else if (b->species==4){     // ROLL OUT: a rock goes bowling
+        float dx=t->x-b->x, dy=t->y-b->y, d=fsqrt(dx*dx+dy*dy)+0.01f;
+        float ux=dx/d, uy=dy/d;
+        float sx=b->x, sy=b->y;
+        for (int j=0;j<MAXBUGS;j++) if (G.bugs[j].alive){
+            float rx=G.bugs[j].x-sx, ry=G.bugs[j].y-sy;
+            float along = rx*ux + ry*uy, side = -rx*uy + ry*ux;
+            if (along>0 && along<d+26 && side>-22 && side<22) buddy_hit(pi, j, buddy_dmg(b)*1.5f, 320);
+        }
+        b->x = t->x + ux*14; b->y = t->y + uy*14;
+        b->roll += d/8.0f;
+        splat(b->x, b->y, COL(170,166,158), 10, 100);
+        sfx(7);
+    } else if (b->species==5){     // SPLASH DOWN: the sink objects, wetly
+        splat(b->x, b->y, COL(120,190,255), 14, 110);
+        for (int j=0;j<MAXBUGS;j++) if (G.bugs[j].alive){
+            float dx=G.bugs[j].x-b->x, dy=G.bugs[j].y-b->y;
+            if (dx*dx+dy*dy < 56*56) buddy_hit(pi, j, buddy_dmg(b)*1.4f, 150);
+        }
+        spawn_floater(b->x, b->y-22, "SPLASH!", COL(170,220,255));
+        sfx(12);
+    } else {                       // CHARGE: plow the line, end at the target
+        float dx=t->x-b->x, dy=t->y-b->y, d=fsqrt(dx*dx+dy*dy)+0.01f;
+        float ux=dx/d, uy=dy/d;
+        float sx=b->x, sy=b->y;
+        for (int j=0;j<MAXBUGS;j++) if (G.bugs[j].alive){
+            float rx=G.bugs[j].x-sx, ry=G.bugs[j].y-sy;
+            float along = rx*ux + ry*uy, side = -rx*uy + ry*ux;
+            if (along>0 && along<d+20 && side>-24 && side<24) buddy_hit(pi, j, buddy_dmg(b)*1.8f, 240);
+        }
+        b->x = t->x - ux*20; b->y = t->y - uy*20;
+        splat(b->x, b->y, COL(200,170,130), 10, 100);
+        sfx(7);
+    }
+}
+static void buddy_special(int pi, int bi){
+    { Buddy *bb=&G.bud[pi]; bb->energy -= BUD_EN_SPEC; if (bb->energy<0) bb->energy=0; }
+    Buddy *b=&G.bud[pi];
+    b->spec_cd = 9.0f;
+    b->lunge_t = 0.25f;
+    if (b->species==0){            // BARK: a freezing shout
+        spawn_floater(b->x, b->y-22, "WOOF!", COL(255,240,180));
+        for (int j=0;j<MAXBUGS;j++) if (G.bugs[j].alive){
+            float dx=G.bugs[j].x-b->x, dy=G.bugs[j].y-b->y;
+            if (dx*dx+dy*dy < 95*95){ G.bugs[j].bp_t = 1.2f; buddy_hit(pi, j, buddy_dmg(b)*0.5f, 40); }
+        }
+        sfx(12);
+    } else if (b->species==1){     // HAIRBALL: three wet ones (duck-chained shots)
+        Bug *t=&G.bugs[bi];
+        if (t->alive){
+            float base = fatan2(t->y-b->y, t->x-b->x);
+            for (int k=-1;k<=1;k++)
+                fire_proj(pi, 2, b->x, b->y-4, base + k*0.16f, buddy_dmg(b)*1.2f, -2);
+        }
+        spawn_floater(b->x, b->y-22, "HACK!", COL(200,255,200));
+        sfx(3);
+    } else if (b->species==3){     // VENOM STING: one bug, all the venom
+        Bug *t=&G.bugs[bi];
+        spawn_floater(b->x, b->y-22, "STUNG!", COL(170,255,190));
+        if (t->alive){ buddy_hit(pi, bi, buddy_dmg(b)*3.2f, 60); if (t->alive) t->bp_t = 1.6f; }
+        sfx(3);
+    } else if (b->species==4){     // ROCK STEADY: a rock cannot be moved
+        b->steady_t = 5.0f;
+        spawn_floater(b->x, b->y-22, "STEADY.", COL(220,216,205));
+        splat(b->x, b->y+6, COL(170,166,158), 10, 90);
+        for (int j=0;j<MAXBUGS;j++) if (G.bugs[j].alive){
+            float dx=G.bugs[j].x-b->x, dy=G.bugs[j].y-b->y;
+            if (dx*dx+dy*dy < 82*82) buddy_hit(pi, j, buddy_dmg(b)*1.0f, 280);
+        }
+        sfx(7);
+    } else if (b->species==5){     // OVERFLOW: the sink gives everything back
+        spawn_floater(b->x, b->y-24, "OVERFLOW!", COL(170,220,255));
+        splat(b->x, b->y, COL(120,190,255), 20, 140);
+        if (G.shake<2) G.shake=2;
+        for (int j=0;j<MAXBUGS;j++) if (G.bugs[j].alive){
+            float dx=G.bugs[j].x-b->x, dy=G.bugs[j].y-b->y;
+            if (dx*dx+dy*dy < 106*106){ if (G.bugs[j].alive) G.bugs[j].bp_t = 0.5f; buddy_hit(pi, j, buddy_dmg(b)*1.6f, 230); }
+        }
+        sfx(12);
+    } else {                       // STOMP: the ground itself objects
+        spawn_floater(b->x, b->y-24, "STOMP!", COL(255,210,150));
+        splat(b->x, b->y+8, COL(190,160,120), 16, 130);
+        if (G.shake<2) G.shake=2;
+        for (int j=0;j<MAXBUGS;j++) if (G.bugs[j].alive){
+            float dx=G.bugs[j].x-b->x, dy=G.bugs[j].y-b->y;
+            if (dx*dx+dy*dy < 74*74){ G.bugs[j].bp_t = 0.7f; buddy_hit(pi, j, buddy_dmg(b)*2.0f, 160); }
+        }
+        sfx(7);
+    }
+}
+
+// MOVE 3 (skills bit2, 60 XP): a second taught trick per species.
+static void buddy_move3(int pi, int bi){
+    Buddy *b=&G.bud[pi]; Bug *t=&G.bugs[bi];
+    if (!t->alive) return;
+    b->energy -= BUD_EN_MOVE3; if (b->energy<0) b->energy=0;
+    b->move3_cd = (b->species==2 || b->species==4)? 8.0f : 7.0f;
+    b->lunge_t = 0.22f;
+    if (b->species==0){            // FETCH: the far one. There and back again.
+        int far=bi; float fd=-1;
+        for (int j=0;j<MAXBUGS;j++) if (G.bugs[j].alive){
+            float dx=G.bugs[j].x-b->x, dy=G.bugs[j].y-b->y, d2=dx*dx+dy*dy;
+            if (d2<280*280 && d2>fd){ fd=d2; far=j; }
+        }
+        Bug *f=&G.bugs[far]; float sx=b->x, sy=b->y;
+        b->x = f->x; b->y = f->y;
+        splat(b->x, b->y, COL(240,200,120), 8, 90);
+        buddy_hit(pi, far, buddy_dmg(b)*2.2f, 120);
+        spawn_floater(b->x, b->y-22, "FETCHED!", COL(255,235,180));
+        b->x = sx; b->y = sy;      // and back, pleased with itself
+        sfx(3);
+    } else if (b->species==1){     // FLYING CLAWS: a fan of five
+        float base = fatan2(t->y-b->y, t->x-b->x);
+        for (int k=-2;k<=2;k++)
+            fire_proj(pi, 2, b->x, b->y-4, base + k*0.15f, buddy_dmg(b)*0.85f, -2);
+        spawn_floater(b->x, b->y-22, "CLAWS OUT!", COL(255,215,235));
+        sfx(3);
+    } else if (b->species==3){     // BILL SLAM: one bug, thoroughly billed
+        buddy_hit(pi, bi, buddy_dmg(b)*2.6f, 90);
+        if (t->alive) t->bp_t = 1.2f;
+        splat(t->x, t->y, COL(150,220,170), 10, 100);
+        spawn_floater(b->x, b->y-22, "BILLED!", COL(190,255,205));
+        sfx(7);
+    } else if (b->species==4){     // SEDIMENT SLAM: a short, heavy roll
+        float dx=t->x-b->x, dy=t->y-b->y, d=fsqrt(dx*dx+dy*dy)+0.01f;
+        float ux=dx/d, uy=dy/d, sx=b->x, sy=b->y;
+        for (int j=0;j<MAXBUGS;j++) if (G.bugs[j].alive){
+            float rx=G.bugs[j].x-sx, ry=G.bugs[j].y-sy;
+            float along = rx*ux + ry*uy, side = -rx*uy + ry*ux;
+            if (along>0 && along<110 && side>-26 && side<26) buddy_hit(pi, j, buddy_dmg(b)*2.0f, 340);
+        }
+        b->x = sx + ux*44; b->y = sy + uy*44; b->roll += 2.2f;
+        splat(b->x, b->y, COL(170,166,158), 10, 100);
+        spawn_floater(b->x, b->y-22, "SLAM!", COL(225,220,205));
+        sfx(7);
+    } else if (b->species==5){     // DISPOSAL: the weakest link, ground up
+        int weak=bi; float wh=1e18f;
+        for (int j=0;j<MAXBUGS;j++) if (G.bugs[j].alive){
+            float dx=G.bugs[j].x-b->x, dy=G.bugs[j].y-b->y;
+            if (dx*dx+dy*dy < 160*160 && G.bugs[j].hp<wh){ wh=G.bugs[j].hp; weak=j; }
+        }
+        buddy_hit(pi, weak, buddy_dmg(b)*3.5f, 40);
+        splat(G.bugs[weak].x, G.bugs[weak].y, COL(150,150,160), 12, 110);
+        spawn_floater(b->x, b->y-22, "DISPOSED!", COL(200,225,255));
+        sfx(12);
+    } else {                       // ANTLER SWEEP: a wide, branching arc
+        float base = fatan2(t->y-b->y, t->x-b->x);
+        for (int j=0;j<MAXBUGS;j++) if (G.bugs[j].alive){
+            float dx=G.bugs[j].x-b->x, dy=G.bugs[j].y-b->y, d2=dx*dx+dy*dy;
+            if (d2 < 98*98){
+                float da = fatan2(dy, dx) - base;
+                while (da>3.14159f) da -= 6.28318f; while (da<-3.14159f) da += 6.28318f;
+                if (da>-1.1f && da<1.1f) buddy_hit(pi, j, buddy_dmg(b)*1.8f, 200);
+            }
+        }
+        splat(b->x + fcos(base)*40, b->y + fsin(base)*40, COL(200,170,130), 10, 100);
+        spawn_floater(b->x, b->y-24, "SWEEP!", COL(255,220,170));
+        sfx(7);
+    }
+}
+// MOVE 4 (skills bit3, 120 XP): the big one. Rare, pricey, worth it.
+static void buddy_move4(int pi, int bi){
+    Buddy *b=&G.bud[pi]; Bug *t=&G.bugs[bi];
+    if (!t->alive) return;
+    b->energy -= BUD_EN_MOVE4; if (b->energy<0) b->energy=0;
+    b->move4_cd = (b->species==4)? 14.0f : 12.0f;
+    b->lunge_t = 0.26f;
+    if (b->species==0){            // PUPPY EYES: nobody can hit a puppy
+        for (int j=0;j<MAXBUGS;j++) if (G.bugs[j].alive){
+            float dx=G.bugs[j].x-b->x, dy=G.bugs[j].y-b->y;
+            if (dx*dx+dy*dy < 132*132){ if (G.bugs[j].alive) G.bugs[j].bp_t = 2.5f; buddy_hit(pi, j, buddy_dmg(b)*0.5f, 0); }
+        }
+        spawn_floater(b->x, b->y-26, "PUPPY EYES!", COL(255,200,225));
+        sfx(11);
+    } else if (b->species==1){     // AMBUSH: behind the biggest one
+        int big=bi; float bw2=-1;
+        for (int j=0;j<MAXBUGS;j++) if (G.bugs[j].alive){
+            float dx=G.bugs[j].x-b->x, dy=G.bugs[j].y-b->y, d2=dx*dx+dy*dy;
+            if (d2<320*320 && G.bugs[j].w>bw2){ bw2=G.bugs[j].w; big=j; }
+        }
+        Bug *f=&G.bugs[big];
+        b->x = f->x - fcos(b->aim)*18; b->y = f->y - fsin(b->aim)*18;
+        buddy_hit(pi, big, buddy_dmg(b)*3.0f, 80);
+        for (int j=0;j<MAXBUGS;j++) if (j!=big && G.bugs[j].alive){
+            float dx=G.bugs[j].x-b->x, dy=G.bugs[j].y-b->y;
+            if (dx*dx+dy*dy < 52*52) buddy_hit(pi, j, buddy_dmg(b)*1.2f, 60);
+        }
+        splat(b->x, b->y, COL(255,215,235), 10, 100);
+        spawn_floater(b->x, b->y-22, "AMBUSH!", COL(255,200,235));
+        sfx(3);
+    } else if (b->species==3){     // SIXTH SENSE: the chain finds four
+        int done[4] = { -1, -1, -1, -1 }, hitn=0;
+        for (int j=0;j<4;j++){
+            int best=-1; float bd2=170*170;
+            for (int k2=0;k2<MAXBUGS;k2++) if (G.bugs[k2].alive){
+                int seen=0; for (int m=0;m<4;m++) if (done[m]==k2) seen=1;
+                if (seen) continue;
+                float dx=G.bugs[k2].x-b->x, dy=G.bugs[k2].y-b->y, d2=dx*dx+dy*dy;
+                if (d2<bd2){ bd2=d2; best=k2; }
+            }
+            if (best<0) break;
+            done[hitn++]=best;
+            splat(G.bugs[best].x, G.bugs[best].y, COL(170,255,230), 6, 80);
+            buddy_hit(pi, best, buddy_dmg(b)*1.5f, 30);
+        }
+        spawn_floater(b->x, b->y-22, "IT KNOWS!", COL(190,255,230));
+        sfx(11);
+    } else if (b->species==4){     // AVALANCHE: the hill comes down
+        int drops=0;
+        for (int j=0;j<MAXBUGS && drops<6;j++) if (G.bugs[j].alive){
+            float dx=G.bugs[j].x-b->x, dy=G.bugs[j].y-b->y;
+            if (dx*dx+dy*dy < 195*195){
+                splat(G.bugs[j].x, G.bugs[j].y, COL(170,166,158), 8, 100);
+                buddy_hit(pi, j, buddy_dmg(b)*1.3f, 120);
+                drops++;
+            }
+        }
+        if (G.shake<2) G.shake=2;
+        spawn_floater(b->x, b->y-24, "AVALANCHE!", COL(225,220,205));
+        sfx(7);
+    } else if (b->species==5){     // EVERYTHING: including the sink
+        int shots=0;
+        for (int j=0;j<MAXBUGS && shots<8;j++) if (G.bugs[j].alive){
+            float dx=G.bugs[j].x-b->x, dy=G.bugs[j].y-b->y;
+            if (dx*dx+dy*dy < 265*265){
+                fire_proj(pi, 2, b->x, b->y-4, fatan2(dy, dx), buddy_dmg(b)*0.7f, -2);
+                shots++;
+            }
+        }
+        if (!shots){ float base=b->aim; for (int k2=0;k2<5;k2++) fire_proj(pi, 2, b->x, b->y-4, base + (k2-2)*0.18f, buddy_dmg(b)*0.7f, -2); }
+        spawn_floater(b->x, b->y-24, "EVERYTHING!", COL(200,225,255));
+        sfx(12);
+    } else {                       // TIMBER!: the line comes down
+        float dx=t->x-b->x, dy=t->y-b->y, d=fsqrt(dx*dx+dy*dy)+0.01f;
+        float ux=dx/d, uy=dy/d;
+        for (int j=0;j<MAXBUGS;j++) if (G.bugs[j].alive){
+            float rx=G.bugs[j].x-b->x, ry=G.bugs[j].y-b->y;
+            float along = rx*ux + ry*uy, side = -rx*uy + ry*ux;
+            if (along>0 && along<145 && side>-34 && side<34) buddy_hit(pi, j, buddy_dmg(b)*2.4f, 380);
+        }
+        if (G.shake<3) G.shake=3;
+        splat(b->x + ux*70, b->y + uy*70, COL(170,140,100), 14, 120);
+        spawn_floater(b->x, b->y-26, "TIMBER!", COL(255,220,170));
+        sfx(7);
+    }
+}
+static void update_buddies(float dt){
+    for (int i=0;i<MAXP;i++){
+        Buddy *b=&G.bud[i];
+        if (!b->active) continue;
+        if (b->in_bw) continue;   // in Banzai World: bw_update drives it
+        Player *o=&G.p[i];
+        if (b->mv_t>0) b->mv_t-=dt;
+        if (b->atk_cd>0) b->atk_cd-=dt;
+        if (b->move_cd>0) b->move_cd-=dt;
+        if (b->spec_cd>0) b->spec_cd-=dt;
+        if (b->move3_cd>0) b->move3_cd-=dt;
+        if (b->move4_cd>0) b->move4_cd-=dt;
+        if (!b->fainted && b->energy<BUD_ENERGY_MAX){   // energy comes back as you go
+            b->energy += BUD_EN_REGEN*dt; if (b->energy>BUD_ENERGY_MAX) b->energy=BUD_ENERGY_MAX;
+        }
+        if (b->lunge_t>0) b->lunge_t-=dt;
+        if (b->hurt_t>0) b->hurt_t-=dt;
+        if (b->steady_t>0) b->steady_t-=dt;
+        b->calm += dt;              // a quiet stretch and a buddy catches its breath
+        if (!b->fainted && b->calm>4.0f && b->hp<b->maxhp){
+            b->hp += 2.2f*dt; if (b->hp>b->maxhp) b->hp=b->maxhp;   // weakened Nov 2 (was 3.5/s after 3s): buddies should faint sometimes
+        }
+        if (b->fainted) continue;   // out cold where it fell — only the shop brings it back
+        if (!o->connected) continue;
+        // zones: 0 the field, 1 the mall, 2 the arcade — the buddy
+        // trots through whichever door you used to stay in your zone
+        int owner_zone = o->in_arcade? 2 : o->in_mall? 1 : 0;
+        int buddy_zone = (b->y > ARC_CY-300 && b->y < ARC_CY+300)? 2
+                       : (b->y > MALL_CY-300 && b->y < MALL_CY+300)? 1 : 0;
+        int owner_mall = owner_zone!=0;
+        if (owner_zone != buddy_zone){   // trotting through the door after you
+            b->x = o->x+26; b->y = o->y+14;
+            splat(b->x, b->y, COL(255,240,180), 6, 70);
+        }
+        int tgt=-1; float td=300*300;
+        if (!owner_mall)
+            for (int j=0;j<MAXBUGS;j++) if (G.bugs[j].alive){
+                float dx=G.bugs[j].x-b->x, dy=G.bugs[j].y-b->y, d2=dx*dx+dy*dy;
+                if (d2<td){ td=d2; tgt=j; }
+            }
+        float gx, gy;
+        if (tgt>=0){
+            Bug *t=&G.bugs[tgt];
+            float dx=t->x-b->x, dy=t->y-b->y, d=fsqrt(dx*dx+dy*dy)+0.01f;
+            b->aim = fatan2(dy, dx);
+            float rr = bug_radius(t->w) + 15;
+            if (d > rr){ gx=t->x; gy=t->y; }
+            else {
+                gx=b->x; gy=b->y;
+                if (b->atk_cd<=0){
+                    b->atk_cd = BUD_CD0[b->species%BUDN];
+                    b->lunge_t = 0.16f;
+                    buddy_hit(i, tgt, buddy_dmg(b), 60);
+                }
+                if (t->alive && (b->skills&1) && b->move_cd<=0 && b->energy>=BUD_EN_MOVE2) buddy_move2(i, tgt);
+                { int near=0;
+                  for (int j=0;j<MAXBUGS;j++) if (G.bugs[j].alive){
+                      float ddx=G.bugs[j].x-b->x, ddy=G.bugs[j].y-b->y;
+                      if (ddx*ddx+ddy*ddy<110*110) near++;
+                  }
+                  if (t->alive && (b->skills&2) && b->spec_cd<=0 && b->energy>=BUD_EN_SPEC && (near>=2 || t->w>25)) buddy_special(i, tgt);
+                  if (t->alive && (b->skills&4) && b->move3_cd<=0 && b->energy>=BUD_EN_MOVE3 && (near>=2 || t->w>30)) buddy_move3(i, tgt);
+                  if (t->alive && (b->skills&8) && b->move4_cd<=0 && b->energy>=BUD_EN_MOVE4 && (near>=3 || t->w>45)) buddy_move4(i, tgt);
+                }
+            }
+            if (d>60 && d<170 && (b->skills&1) && b->move_cd<=0 && b->energy>=BUD_EN_MOVE2) buddy_move2(i, tgt);   // gap-close
+        } else {
+            gx = o->x - fcos(o->aim)*30 + 12;
+            gy = o->y - fsin(o->aim)*30 + 16;
+            float dx=gx-b->x, dy=gy-b->y, d=fsqrt(dx*dx+dy*dy);
+            if (d>4) b->aim = fatan2(dy, dx);
+            if (d>420){ b->x=gx; b->y=gy; b->on_wall=-1; splat(b->x, b->y, COL(255,240,180), 6, 70); }
+        }
+        float dx=gx-b->x, dy=gy-b->y, d=fsqrt(dx*dx+dy*dy);
+        if (d>2){
+            float sp=BUD_SPD[b->species%BUDN];
+            if (b->species==4){
+                // an oblong rock rolls awkwardly: it crawls as it
+                // climbs up onto its end, then lurches over the flop
+                float ph = b->roll; ph -= (int)(ph/3.14159f)*3.14159f; if (ph<0) ph+=3.14159f;
+                float tri = ph<1.5708f? ph/1.5708f : (3.14159f-ph)/1.5708f;
+                sp *= 0.68f + 0.6f*tri;
+            }
+            float step=sp*dt; if (step>d) step=d;
+            if (b->species==4) b->roll += step/20.0f;   // the rock rolls
+            float hx = dx/d, hy = dy/d;
+            // GREASE (Daniel, Nov 10): same medicine as the bugs — a
+            // buddy pinned behind a prop bends its heading to the open
+            // side and slides around instead of hugging it forever
+            if (b->grease_t>0){
+                b->grease_t -= dt;
+                float gx2 = hx*0.22f + (-hy)*b->grease_s, gy2 = hy*0.22f + hx*b->grease_s;
+                float gl = fsqrt(gx2*gx2 + gy2*gy2);
+                if (gl>0.01f){ hx = gx2/gl; hy = gy2/gl; }
+            }
+            float nx=b->x + hx*step, ny=b->y + hy*step;
+            if (owner_mall){
+                float zcy = o->in_arcade? ARC_CY : MALL_CY;
+                b->x=nx; b->y=ny;
+                if (b->x<-282) b->x=-282; if (b->x>282) b->x=282;
+                if (b->y<zcy-160) b->y=zcy-160; if (b->y>zcy+154) b->y=zcy+154;
+            } else {
+                float ox0=b->x, oy0=b->y;
+                if (!prop_collide(nx, b->y, 9)) b->x=nx;
+                if (!prop_collide(b->x, ny, 9)) b->y=ny;
+                // walls resolve in buddy_wall_step below: a climbable
+                // run is a floor to him, not a wall (Daniel)
+                float mvx=b->x-ox0, mvy=b->y-oy0;
+                if (step>0.4f && d>26 && mvx*mvx+mvy*mvy < step*step*0.0625f){
+                    b->stuck_t += dt;
+                    if (b->stuck_t>0.30f && b->grease_t<=0){
+                        float px2=-hy, py2=hx, pr=24;
+                        int lf = !prop_collide(b->x+px2*pr, b->y+py2*pr, 9);
+                        int rf = !prop_collide(b->x-px2*pr, b->y-py2*pr, 9);
+                        b->grease_s = (lf && !rf)? 1 : (rf && !lf)? -1 : (b->grease_s? -b->grease_s : 1);
+                        b->grease_t = 0.55f; b->stuck_t = 0;
+                    }
+                } else if (b->stuck_t>0){ b->stuck_t -= dt*2; if (b->stuck_t<0) b->stuck_t=0; }
+            }
+            b->walk_ph += dt*sp*0.06f;
+            b->mv_t = 0.15f;
+        }
+        if (!owner_mall) buddy_wall_step(b);
+    }
+}
+
+static void update_sim(float dt){
+    G.time += dt;
+    { static int prev_shield = 0; int sh = shield_active();
+      if (sh && !prev_shield) sfx(8);                 // shield rises: firewall ping
+      prev_shield = sh; }
+    update_players(dt);
+    update_projectiles(dt);
+    update_bugs(dt);
+    // Bug Bowl games tick for whoever is standing at the lanes
+    for (int i=0;i<MAXP;i++) if (G.p[i].connected && G.p[i].in_store && G.p[i].station==4)
+        bowl_update(i, dt);
+    update_buddies(dt);
+    update_fx(dt);
+    update_payment(dt);
+    spawner(dt);
+    // game over: everyone connected is dead
+    int any_conn=0, any_alive=0;
+    for (int i=0;i<MAXP;i++) if (G.p[i].connected){ any_conn=1; if (G.p[i].alive) any_alive=1; }
+    if (any_conn && !any_alive && (G.state==GS_PLAY || G.state==GS_STORE)){
+        G.state=GS_OVER; G.gameover_t=0; G.has_save=0;
+        // the run is finished: empty its slot so CONTINUE can't
+        // resurrect it (records are banked by save_records below)
+        if (G.slot>=1 && G.slot<=3 && G.slot_has[G.slot]){
+            plat_save_slot(G.slot, "TSG3\n", 5);
+            G.slot_has[G.slot]=0; refresh_has_save();
+        }
+        save_records();
+        sfx(18);
+    }
+    // autosave
+    G.autosave_t -= dt;
+    if (G.autosave_t<=0){ G.autosave_t=5.0f; if (G.state==GS_PLAY||G.state==GS_STORE) do_save(); }
+}
+
+// ---------------------------------------------------------------------------
+// Rendering — the cartoony world
+// ---------------------------------------------------------------------------
+static int SX(float wx){ float z = G.zoom>0.01f? G.zoom : 1.0f; int vw = G.view_w>0? G.view_w : VW; return (int)((wx - G.camx)*z + G.view_x0 + vw/2); }
+static int SY(float wy){ float z = G.zoom>0.01f? G.zoom : 1.0f; int vh = G.view_h>0? G.view_h : VH; return (int)((wy - G.camy)*z + G.view_y0 + vh/2); }
+
+// ---------------------------------------------------------------------------
+// EDDIE MODE sprites: every bug is a fuzzy orange puffball — round fur,
+// cream belly, two shuffling feet and one very big shiny red nose. An
+// original generic puff-critter design (Daniel's mode, Daniel's name).
+// ---------------------------------------------------------------------------
+static void draw_eddie_carcass(int x, int y, int s, float tilt){
+    int o = (int)(tilt*3);
+    ellipse_fill(x+o, y, s+6, s+1, OUTLINE);
+    ellipse_shade(x+o, y, s+4, s-1>2? s-1:2, COL(243,146,44));
+    for (int i=0;i<5;i++){   // flattened fuzz bumps along the top
+        int fx = x-s+2 + i*(s/2) + o;
+        circle_fill(fx, y-s+1, 2, COL(243,146,44));
+    }
+    ellipse_fill(x+o, y, s/2+2, 2, OUTLINE);                 // squished nose
+    ellipse_shade(x+o, y, s/2, 1, COL(228,54,46));
+    line_thick(x-5+o, y-2, x-2+o, y+1, 1, OUTLINE); line_thick(x-5+o, y+1, x-2+o, y-2, 1, OUTLINE);
+    line_thick(x+3+o, y-2, x+6+o, y+1, 1, OUTLINE); line_thick(x+3+o, y+1, x+6+o, y-2, 1, OUTLINE);
+    line_thick(x-3+o, y-s+1, x-3+o, y-s-3, 1, OUTLINE);      // feet in the air
+    line_thick(x+4+o, y-s+1, x+4+o, y-s-3, 1, OUTLINE);
+}
+static void draw_eddie_full(Bug *b, int x, int y, int r){
+    int flash = b->hit_t>0;
+    u32 fur  = flash? COL(255,255,255) : COL(243,146,44);
+    u32 fsh  = flash? COL(230,230,230) : COL(214,116,32);
+    u32 belly= flash? COL(255,255,255) : COL(255,224,168);
+    u32 nose = flash? COL(255,255,255) : COL(228,54,46);
+    shadow_ellipse(x, y+r-1, r+3, r/3+1);
+    // two little feet, shuffling with the leg phase
+    int fo = (int)(fsin(b->leg_ph)*2.0f);
+    ellipse_fill(x-r/2+fo, y+r-2, r/3+2, 3, OUTLINE);
+    ellipse_fill(x+r/2-fo, y+r-2, r/3+2, 3, OUTLINE);
+    ellipse_shade(x-r/2+fo, y+r-2, r/3, 2, COL(146,84,30));
+    ellipse_shade(x+r/2-fo, y+r-2, r/3, 2, COL(146,84,30));
+    // fuzz: bumps all around the rim, jittered by the bug's own seed
+    for (int i=0;i<12;i++){
+        float a = i*0.5236f + b->seed*3.0f;
+        int bx = x + (int)(fcos(a)*(r+1)), by = y + (int)(fsin(a)*(r*3/4+1));
+        circle_fill(bx, by, r/6+2, fur);
+    }
+    // round body + cream belly
+    ellipse_fill(x, y, r+4, r*3/4+4, OUTLINE);
+    ellipse_shade(x, y, r+2, r*3/4+2, fur);
+    ellipse_shade(x, y, r, r*3/4, fsh);
+    ellipse_shade(x, y+r/3, r*3/5, r/3, belly);
+    gloss(x, y, r+2);
+    // googly eyes above the nose, tracking like any bug's
+    int look = (int)(fsin(G.anim_t*2 + b->seed)*1.5f);
+    int ey = y - r/3, ex1 = x - r/3, ex2 = x + r/3, er = r/5+2;
+    circle_fill(ex1, ey, er+1, OUTLINE); circle_fill(ex2, ey, er+1, OUTLINE);
+    circle_fill(ex1, ey, er, COL(255,255,255)); circle_fill(ex2, ey, er, COL(255,255,255));
+    circle_fill(ex1+look, ey, er/2+1, OUTLINE); circle_fill(ex2+look, ey, er/2+1, OUTLINE);
+    pset(ex1+look-1, ey-1, COL(255,255,255)); pset(ex2+look-1, ey-1, COL(255,255,255));
+    // THE nose: one big shiny red button right in the middle
+    int nr = r*55/100; if (nr<3) nr=3;
+    circle_fill(x, y+2, nr+2, OUTLINE);
+    circle_shade(x, y+2, nr, nose);
+    pset_blend(x-nr/3, y+2-nr/3, COL(255,255,255), 200);
+    pset_blend(x-nr/3+1, y+2-nr/3, COL(255,255,255), 140);
+    pset_blend(x-nr/3, y+2-nr/3+1, COL(255,255,255), 140);
+    // hp bar on big bugs + breakpoint symbol, same as any bug
+    if (b->maxhp>=40 && b->hp<b->maxhp){
+        int wpx = r*2;
+        rect_fill(x-r, y-r-10, wpx, 3, COL(40,30,40));
+        rect_fill(x-r, y-r-10, (int)(wpx*b->hp/b->maxhp), 3, COL(120,230,90));
+    }
+    if (b->bp_t>0){
+        circle_out(x+r-2, y-r-4, 7, COL(70,140,255));
+        rect_fill(x+r-5, y-r-8, 2, 7, COL(255,255,255));
+        rect_fill(x+r-1, y-r-8, 2, 7, COL(255,255,255));
+    }
+}
+static int g_gold_carcass = 0;   // Whales Only: the hat being drawn is golden
+static void draw_carcass(int x, int y, int s, int kind, float tilt){
+    if (G.eddie){ draw_eddie_carcass(x, y, s, tilt); return; }
+    // a dead bug, belly-up: squished body, legs in the air, X eyes
+    u32 col = g_gold_carcass? COL(226,168,44) : BUG_COL[kind&3];
+    int o = (int)(tilt*3);
+    ellipse_fill(x+o, y, s+5, s+2, OUTLINE);
+    ellipse_shade(x+o, y, s+3, s, g_gold_carcass? COL(255,224,130) : BUG_BELLY[kind&3]);
+    ellipse_shade(x+o, y-1, s, s-2>2? s-2:2, col);   // a patch of shell color
+    pset_blend(x-2+o, y-3, COL(255,255,255), 120);   // waxy sheen
+    pset_blend(x-1+o, y-3, COL(255,255,255), 90);
+    for (int l=0;l<3;l++){
+        int lx = x - s + l*(s) + o;
+        line_thick(lx, y-2, lx-3, y-7-(l&1)*2, 1, OUTLINE);
+        line_thick(lx+4, y-2, lx+7, y-7-((l+1)&1)*2, 1, OUTLINE);
+    }
+    // X eyes
+    line_thick(x-4+o, y-3, x-1+o, y, 1, OUTLINE); line_thick(x-4+o, y, x-1+o, y-3, 1, OUTLINE);
+    line_thick(x+2+o, y-3, x+5+o, y, 1, OUTLINE); line_thick(x+2+o, y, x+5+o, y-3, 1, OUTLINE);
+}
+static void draw_bug_sprite(Bug *b){
+    int x=SX(b->x), y=SY(b->y);
+    if (x<-70||x>VW+70||y<-70||y>VH+70) return;
+    int r=(int)(bug_radius(b->w)*(G.zoom>0.01f? G.zoom : 1.0f)); if (r<3) r=3;
+    if (G.eddie){ draw_eddie_full(b, x, y, r); return; }
+    u32 col = b->hit_t>0? COL(255,255,255) : BUG_COL[b->kind];
+    u32 dark = col_shade(col, 0.72f);
+    shadow_ellipse(x, y+r-1, r+3, r/3+1);
+    // legs: 6 (spiders 8), two-segment with a knee, scuttling with leg_ph
+    int legs = b->kind==2? 8 : 6;
+    for (int l=0;l<legs;l++){
+        float side = (l%2==0)? -1.0f: 1.0f;
+        float row = (float)(l/2)/(legs/2-1) - 0.5f;      // -0.5..0.5 along body
+        float wig = fsin(b->leg_ph + l*1.7f)*3.0f;
+        int lx = x + (int)(row*r*1.2f);
+        int ly = y + (int)(side*r*0.55f);
+        int kx = lx + (int)(wig*0.6f + row*3), ky = ly + (int)(side*(r*0.38f));
+        int fx2 = lx + (int)(wig + row*5), fy2 = ly + (int)(side*(r*0.68f));
+        line_thick(lx, ly, kx, ky, 1, OUTLINE);
+        line_thick(kx, ky, fx2, fy2, 1, OUTLINE);
+        pset(fx2, fy2, dark);
+    }
+    if (b->kind==3){ // moth wings: shaded, spotted, gently translucent tips
+        int flap = (int)(fsin(b->leg_ph*1.6f)*4);
+        ellipse_fill(x-r-4, y-4-flap, r/2+5, r/3+4, OUTLINE);
+        ellipse_fill(x+r+4, y-4-flap, r/2+5, r/3+4, OUTLINE);
+        ellipse_shade(x-r-4, y-4-flap, r/2+3, r/3+2, BUG_BELLY[3]);
+        ellipse_shade(x+r+4, y-4-flap, r/2+3, r/3+2, BUG_BELLY[3]);
+        circle_fill(x-r-6, y-6-flap, 2, col_shade(BUG_BELLY[3],0.8f));
+        circle_fill(x+r+2, y-6-flap, 2, col_shade(BUG_BELLY[3],0.8f));
+    }
+    if (b->kind==2){ // spider abdomen bulging out the back
+        circle_fill(x, y+r/2, r*3/4+2, OUTLINE);
+        circle_shade(x, y+r/2, r*3/4, dark);
+        circle_fill(x-3, y+r/2-2, 2, col); circle_fill(x+4, y+r/2+3, 2, col);
+    }
+    // body: outlined, sphere-shaded, glossed
+    ellipse_fill(x, y, r+4, r*3/4+4, OUTLINE);
+    ellipse_shade(x, y, r+2, r*3/4+2, col);
+    gloss(x, y, r+2);
+    // shell markings, per kind
+    if (b->kind==0){ // roach: two darker bands across the shell
+        line_thick(x-r*2/3, y-r/4, x+r*2/3, y-r/4, 2, dark);
+        line_thick(x-r*3/4, y+r/6, x+r*3/4, y+r/6, 2, dark);
+    } else if (b->kind==1){ // beetle: dorsal seam + rivet dots
+        line_thick(x, y-r*2/3, x, y+r*2/3, 1, dark);
+        circle_fill(x-r/3, y-r/5, 1, dark); circle_fill(x+r/3, y-r/5, 1, dark);
+        circle_fill(x-r/3, y+r/4, 1, dark); circle_fill(x+r/3, y+r/4, 1, dark);
+    } else if (b->kind==2){ // spider: warning chevrons
+        line_thick(x-4, y-3, x, y+1, 1, COL(255,220,90));
+        line_thick(x, y+1, x+4, y-3, 1, COL(255,220,90));
+    }
+    ellipse_shade(x, y+2, r*3/5, r/2, BUG_BELLY[b->kind]);
+    // head + googly eyes that track the wobble
+    int hx = x + (int)(fcos(b->wobble)*2), hy = y - r/3;
+    circle_fill(hx, hy, r/2+3, OUTLINE);
+    circle_shade(hx, hy, r/2+1, col);
+    int look = (int)(fsin(G.anim_t*2 + b->seed)*1.5f);
+    circle_fill(hx-r/4, hy-1, r/4+1, COL(255,255,255));
+    circle_fill(hx+r/4, hy-1, r/4+1, COL(255,255,255));
+    circle_fill(hx-r/4+look, hy-1, r/8+1, OUTLINE);
+    circle_fill(hx+r/4+look, hy-1, r/8+1, OUTLINE);
+    pset(hx-r/4+look-1, hy-2, COL(255,255,255));
+    pset(hx+r/4+look-1, hy-2, COL(255,255,255));
+    // antennae: jointed, with shaded tips
+    line_thick(hx-3, hy-r/3, hx-5, hy-r/3-3, 1, OUTLINE);
+    line_thick(hx-5, hy-r/3-3, hx-7, hy-r/3-6, 1, OUTLINE);
+    line_thick(hx+3, hy-r/3, hx+5, hy-r/3-3, 1, OUTLINE);
+    line_thick(hx+5, hy-r/3-3, hx+7, hy-r/3-6, 1, OUTLINE);
+    circle_fill(hx-7, hy-r/3-6, 2, dark); circle_fill(hx+7, hy-r/3-6, 2, dark);
+    gloss(hx, hy, r/2+1);   // shiny little head
+    // a determined little mouth
+    line_thick(hx-3, hy+r/4+2, hx, hy+r/4, 1, dark);
+    line_thick(hx, hy+r/4, hx+3, hy+r/4+2, 1, dark);
+    // hp bar on big bugs
+    if (b->maxhp>=40 && b->hp<b->maxhp){
+        int wpx = r*2;
+        rect_fill(x-r, y-r-10, wpx, 3, COL(40,30,40));
+        rect_fill(x-r, y-r-10, (int)(wpx*b->hp/b->maxhp), 3, COL(120,230,90));
+    }
+    if (b->bp_t>0){ // breakpoint: paused, with the universal symbol
+        circle_out(x+r-2, y-r-4, 7, COL(70,140,255));
+        rect_fill(x+r-5, y-r-8, 2, 7, COL(255,255,255));
+        rect_fill(x+r-1, y-r-8, 2, 7, COL(255,255,255));
+    }
+}
+// Hat shape: the stack grows UP to HAT_ROWS rows — then it stops getting
+// taller and starts getting WIDER, spreading sideways row by row until it
+// is four carcasses across. A wide hat sways much more: properly unwieldy.
+#define HAT_ROWS 14
+#define HAT_VIS_MAX MAXSTACK
+// the hat grows UP to HAT_ROWS first — then it stops being polite and
+// spreads SIDEWAYS, wider and wider, rows creeping up only slowly.
+// At 420 carcasses it is a 14-wide, 30-row monument.
+static void hat_shape_c(int n, int cap, int rowcap, int *rows, int *max_across){
+    int vis = n>cap? cap : n;
+    if (vis<=0){ if (rows) *rows=0; if (max_across) *max_across=0; return; }
+    int r = vis<=HAT_ROWS? vis : HAT_ROWS + (vis-HAT_ROWS)/24;
+    if (r>rowcap) r=rowcap;
+    int base = vis/r, extra = vis%r;
+    if (rows) *rows = r;
+    if (max_across) *max_across = base + (extra? 1:0);
+}
+static void hat_shape(int n, int *rows, int *max_across){ hat_shape_c(n, HAT_VIS_MAX, 30, rows, max_across); }
+static int hat_across_c(int n, int row, int cap, int rowcap){
+    // carcasses across on a given row (row 0 = bottom); bottom rows widen first
+    int vis = n>cap? cap : n;
+    if (vis<=0) return 0;
+    int r = vis<=HAT_ROWS? vis : HAT_ROWS + (vis-HAT_ROWS)/24;
+    if (r>rowcap) r=rowcap;
+    if (row>=r) return 0;
+    int base = vis/r, extra = vis%r;
+    return base + (row<extra? 1:0);
+}
+static int hat_across(int n, int row){ return hat_across_c(n, row, HAT_VIS_MAX, 30); }
+static void draw_hat(Player *p, int x, int y){
+    // the carcass stack on the player's head, growing through tier shapes
+    int n = p->stack_n;
+    if (n<=0) return;
+    g_gold_carcass = (p->whale_on & 1) != 0;   // Whales Only: golden hat
+    // (The Psychic Hat Stand that once floated the pile beside its
+    // owner — bonus height and all — was removed with the Gallery
+    // on Nov 2. The hat is worn, and shows what you carry.)
+    int vis_n = n;
+    int cap = HAT_VIS_MAX;
+    int rowcap = 30;
+    int hx2 = x, hy2 = y;
+    if (0){
+        ellipse_fill(hx2, hy2+1, 10, 3, COL(190,150,255));
+        ellipse_fill(hx2, hy2, 7, 2, COL(230,210,255));
+    }
+    int rows, maxa; hat_shape_c(vis_n, cap, rowcap, &rows, &maxa);
+    int wide = maxa>1;
+    float sway_amp = 0.6f + (wide? (maxa-1)*0.55f : 0.0f);   // width = wobble
+    // the hat lives in the world, so it shrinks with the camera zoom
+    float z = G.zoom>0.01f? G.zoom : 1.0f;
+    int stepx = (int)(10*z+0.5f); if (stepx<5) stepx=5;
+    int stepy = (int)(7*z+0.5f);  if (stepy<4) stepy=4;
+    int cs = (int)(6*z+0.5f);     if (cs<3) cs=3; if (maxa>10 && cs>5) cs=5;
+    int idx = 0;
+    int top_sway = 0;
+    for (int i=0;i<rows;i++){
+        int a = hat_across_c(vis_n, i, cap, rowcap);
+        int cy = hy2 - 16 - i*stepy;
+        // each row sways a little more than the one below; a wide stack
+        // also leans slowly side to side like it's about to go over
+        float sway = fsin(G.anim_t*2.2f + p->walk_ph + i*0.35f) * (sway_amp + i*0.30f);
+        float lean = wide? fsin(G.anim_t*0.8f + p->walk_ph*0.5f) * (maxa-1) * ((float)i/rows) * 1.6f : 0.0f;
+        int rowx = hx2 + (int)(sway + lean);
+        if (i==rows-1) top_sway = (int)(sway+lean);
+        for (int k=0;k<a;k++){
+            int off = (int)((k - (a-1)*0.5f)*stepx);
+            draw_carcass(rowx + off + ((idx%2)? 1 : -1), cy, cs,
+                         (idx < p->stack_n? (int)(p->stack[idx]) : idx*7)%4, fsin(idx*2.3f));
+            idx++;
+        }
+    }
+    int top_y = hy2 - 16 - rows*stepy;
+    if (vis_n>=19){ // CROWN: a golden bug reigns
+        draw_carcass(hx2+top_sway, top_y-4, 7, 1, 0);
+        tri_fill(hx2-6+top_sway, top_y-12, hx2+top_sway, top_y-18, hx2+6+top_sway, top_y-12, COL(255,205,40));
+    }
+    if (vis_n>=36){ // LEGACY SYSTEM: scaffolding + warning light, sized to the stack
+        int hw = maxa*stepx/2 + 8;
+        line_thick(hx2-hw, hy2-14, hx2-hw, top_y, 1, COL(120,120,130));
+        line_thick(hx2+hw, hy2-14, hx2+hw, top_y, 1, COL(120,120,130));
+        if (((int)(G.anim_t*2))%2) circle_fill(hx2+top_sway, top_y-14, 3, COL(255,60,60));
+    }
+    if (n>=4){ // weight label (the REAL weight, stand or no stand)
+        char b[20]; fmt_int(b, "", (int)p->carried, "KG");
+        draw_text_center(hx2, top_y - (vis_n>=19? 26:12), b, 1, COL(255,240,180));
+    }
+    g_gold_carcass = 0;
+}
+static const u32 HAIR_COL[MAXP] = { COL(96,64,40), COL(38,34,38), COL(158,116,62), COL(72,50,34) };
+static const u32 SKIN = COL(245,205,160);
+static int g_bud_monocle = 0;   // WHALES ONLY: this buddy's owner bought the monocle
+static int g_bud_crown = 0;     // WHALES ONLY: ROYAL BUDDY
+static int g_bud_space = 0;     // WHALES ONLY: SPACE BUDDY
+// buddies wear the same comically big nerd glasses as their DEV
+// (Daniel, Nov 2): pale sheen, chunky frames, wider than the face.
+static void draw_bud_glasses(int cx, int cy, int lw, int lh){
+    int gl = cx - lw - 1, gr = cx + 1, gy = cy - lh/2;
+    blend_rect(gl, gy, lw, lh, COL(200,230,255), 60);
+    blend_rect(gr, gy, lw, lh, COL(200,230,255), 60);
+    for (int s2=0;s2<2;s2++){
+        rect_line(gl-s2, gy-s2, lw+2*s2, lh+2*s2, OUTLINE);
+        rect_line(gr-s2, gy-s2, lw+2*s2, lh+2*s2, OUTLINE);
+    }
+    rect_fill(gl+lw, cy-1, gr-(gl+lw), 2, OUTLINE);
+    pset_blend(gl+2, gy+lh-2, COL(255,255,255), 170);
+    pset_blend(gl+3, gy+lh-3, COL(255,255,255), 140);
+    pset_blend(gr+2, gy+lh-2, COL(255,255,255), 170);
+    pset_blend(gr+3, gy+lh-3, COL(255,255,255), 140);
+    if (g_bud_space){   // WHALES ONLY: SPACE BUDDY — a bubble over the whole head
+        int br = lw + 8;
+        for (int a2=0;a2<28;a2++){
+            float an = (float)a2 * (6.2831853f/28.0f);
+            pset_blend(cx + (int)(fcos(an)*(float)br), cy - 2 + (int)(fsin(an)*(float)(br*3/4)), COL(200,235,255), 190);
+        }
+        line_thick(cx-br+4, cy-2-br/2, cx-br+9, cy-2-br/4, 1, COL(240,250,255));   // the shine
+    }
+    if (g_bud_crown){   // WHALES ONLY: ROYAL BUDDY — three gold points on a band
+        int cw2 = lw + 4, cx0 = cx - cw2/2, cy0 = cy - lh - 5;
+        rect_fill(cx0, cy0+4, cw2, 4, COL(232,184,60));
+        tri_fill(cx0, cy0+4, cx0+5, cy0+4, cx0+2, cy0-3, COL(255,205,60));
+        tri_fill(cx0+cw2/2-3, cy0+4, cx0+cw2/2+3, cy0+4, cx0+cw2/2, cy0-4, COL(255,205,60));
+        tri_fill(cx0+cw2-5, cy0+4, cx0+cw2, cy0+4, cx0+cw2-2, cy0-3, COL(255,205,60));
+        pset(cx0+cw2/2, cy0+5, COL(230,60,90));
+    }
+    if (g_bud_monocle){   // WHALES ONLY: THE FORBIDDEN MONOCLE, on a chain
+        int mx2 = gr + lw/2, my2 = gy + lh/2;
+        for (int a2=0;a2<20;a2++){
+            float an = (float)a2 * (6.2831853f/20.0f);
+            pset(mx2 + (int)(fcos(an)*(float)(lw/2+2)), my2 + (int)(fsin(an)*(float)(lh/2+2)), COL(232,184,60));
+        }
+        line_thick(mx2+lw/2, my2+lh/2, mx2+lw/2+3, gy+lh+7, 1, COL(232,184,60));
+    }
+}
+static void draw_buddy(Buddy *b){
+    int owner = (int)(b - G.bud);
+    g_bud_monocle = (owner>=0 && owner<MAXP && (G.p[owner].whale_on & 16) && !b->fainted);
+    g_bud_crown   = (owner>=0 && owner<MAXP && (G.p[owner].whale_on & 128) && !b->fainted);
+    g_bud_space   = (owner>=0 && owner<MAXP && (G.p[owner].whale_on & 4096) && !b->fainted);
+    int x=SX(b->x), y=SY(b->y);
+    if (x<-50||x>VW+50||y<-60||y>VH+50) return;
+    u32 collar = (owner>=0 && owner<MAXP)? HOODIE[G.p[owner].color&3] : COL(200,60,60);
+    float fx = fcos(b->aim), fy = fsin(b->aim);
+    int hx = (int)(fx*8), hy = (int)(fy*5);            // head leads toward facing
+    int lx = (int)(fx * b->lunge_t * 34), ly = (int)(fy * b->lunge_t * 34);   // the lunge
+    int flash = (b->hurt_t>0 && ((int)(G.anim_t*20))%2);
+    shadow_ellipse(x, y+10, 12, 3);
+    if (b->on_wall>=0) y-=8;          // up on top of an interlocked wall run, like his DEV
+    if (b->fainted){
+        // flat out, seeing stars — fainted, not gone. The Banzai
+        // Buddies shop revives it; until then it naps right here.
+        if (b->species==4){   // a fainted rock is a flat cracked slab
+            rect_fill(x-13, y+2, 26, 5, COL(120,110,110));
+            rect_fill(x-10, y-1, 19, 3, COL(120,110,110));
+            rect_fill(x-5, y-3, 8, 2, COL(120,110,110));
+            line_thick(x-7, y+1, x-1, y+5, 1, OUTLINE);
+            line_thick(x-1, y+5, x+5, y+2, 1, OUTLINE);
+            line_thick(x+2, y+2, x+4, y+7, 1, OUTLINE);
+        } else {
+            ellipse_fill(x, y+4, 13, 6, COL(120,110,110));
+            circle_fill(x-8, y+2, 5, COL(120,110,110));
+        }
+        for (int s=0;s<3;s++){
+            float a = G.anim_t*2.4f + s*(TAU/3);
+            disc_fill(x + (int)(fcos(a)*10), y-8 + (int)(fsin(a)*3), 1, COL(255,230,120));
+        }
+        draw_text_center(x, y-18, "FAINTED", 1, COL(255,150,150));
+        return;
+    }
+    int bob = (int)(fsin(G.anim_t*3.0f + owner*1.7f)*1.0f);          // breathing
+    int step = (int)(fsin(b->walk_ph)*3);
+    // THE WALK (Daniel, Nov 6): no wiggle. While actually moving,
+    // the body F L O P S — a rigid square-wave lean locked to the
+    // same phase that steps the feet: the head tips the full flop,
+    // the body half of it, the shadow stays planted. Breathing
+    // pauses mid-stride. The pet rock is exempt: it already flops
+    // end over end on its own roll.
+    int walking = (b->mv_t>0 && b->species!=4);
+    int wflop = walking? ((fsin(b->walk_ph)>=0)? 3 : -3) : 0;
+    if (walking){ bob = 0; hx += wflop; lx += wflop/2; }
+    if (b->species==0){          // PUPPY: tan, floppy ears, eternal tail
+        u32 body = flash? COL(255,255,255) : bud_coat(b, COL(199,152,94));
+        u32 dark = col_shade(body, 0.7f);
+        // tail: wagging is a full-time job
+        float wag = fsin(G.anim_t*11.0f + owner)*0.6f;
+        int tx2 = x - hx - (int)(fx*6), ty2 = y - hy + 2;
+        line_thick(tx2, ty2, tx2 + (int)(-fx*7 - fy*wag*7), ty2 + (int)(-fy*7 + fx*wag*7) - 3, 2, dark);
+        ellipse_shade(x+lx, y+ly+bob, 12, 9, body);
+        for (int lg=0;lg<4;lg++){   // trotters
+            int ox = (lg%2? 6:-6), oy = (lg<2? 4:8);
+            disc_fill(x+lx+ox, y+ly+oy + ((lg+ (step>0?0:1))%2? 0:1), 2, dark);
+        }
+        rect_fill(x+lx-5, y+ly-3+bob, 10, 4, collar);                // collar band
+        int hxx = x+lx+hx, hyy = y+ly+hy+bob;
+        circle_fill(hxx, hyy, 8, OUTLINE); circle_shade(hxx, hyy, 7, body); gloss(hxx, hyy, 7);
+        // floppy ears, mid-flop (at a walk they ride the head rigidly)
+        int flop = walking? 0 : (int)(fsin(b->walk_ph*1.4f)*1.5f);
+        ellipse_fill(hxx-6, hyy-3+flop, 3, 5, dark);
+        ellipse_fill(hxx+6, hyy-3-flop, 3, 5, dark);
+        circle_fill(hxx + (int)(fx*5), hyy + (int)(fy*3) + 2, 2, COL(60,40,36));   // snout nose
+        circle_fill(hxx-3, hyy-2, 1, OUTLINE); circle_fill(hxx+3, hyy-2, 1, OUTLINE);
+        draw_bud_glasses(hxx + (int)(fx*3), hyy-2, 8, 8);
+        if (b->lunge_t>0){   // jaw snap
+            line_thick(hxx + (int)(fx*6), hyy+2, hxx + (int)(fx*10), hyy+4, 1, OUTLINE);
+            line_thick(hxx + (int)(fx*6), hyy+4, hxx + (int)(fx*10), hyy+2, 1, OUTLINE);
+        }
+    } else if (b->species==1){   // KITTY: orange, striped, unbothered
+        u32 body = flash? COL(255,255,255) : bud_coat(b, COL(228,152,72));
+        u32 dark = col_shade(body, 0.72f);
+        // tail: a slow question mark
+        float curl = fsin(G.anim_t*2.0f + owner*2.0f)*3.0f;
+        int tx2 = x - hx - (int)(fx*7), ty2 = y - hy + 3;
+        line_thick(tx2, ty2, tx2 - (int)(fx*6), ty2 - 5, 2, dark);
+        line_thick(tx2 - (int)(fx*6), ty2 - 5, tx2 - (int)(fx*6) + (int)curl, ty2 - 10, 2, dark);
+        ellipse_shade(x+lx, y+ly+bob, 11, 8, body);
+        line_thick(x+lx-6, y+ly-4+bob, x+lx-4, y+ly+5+bob, 1, dark);   // tabby stripes
+        line_thick(x+lx+1, y+ly-5+bob, x+lx+3, y+ly+5+bob, 1, dark);
+        for (int lg=0;lg<4;lg++){
+            int ox = (lg%2? 5:-5), oy = (lg<2? 3:7);
+            disc_fill(x+lx+ox, y+ly+oy + ((lg + (step>0?0:1))%2? 0:1), 2, dark);
+        }
+        rect_fill(x+lx-5, y+ly-3+bob, 10, 4, collar);
+        int hxx = x+lx+hx, hyy = y+ly+hy+bob;
+        circle_fill(hxx, hyy, 7, OUTLINE); circle_shade(hxx, hyy, 6, body); gloss(hxx, hyy, 6);
+        tri_fill(hxx-6, hyy-4, hxx-4, hyy-10, hxx-1, hyy-5, dark);     // ears: triangles, obviously
+        tri_fill(hxx+6, hyy-4, hxx+4, hyy-10, hxx+1, hyy-5, dark);
+        circle_fill(hxx + (int)(fx*4), hyy + (int)(fy*2) + 1, 1, COL(200,90,90));
+        circle_fill(hxx-2, hyy-1, 1, OUTLINE); circle_fill(hxx+2, hyy-1, 1, OUTLINE);
+        draw_bud_glasses(hxx + (int)(fx*2), hyy-1, 7, 7);
+        line_thick(hxx-8, hyy+1, hxx-4, hyy+1, 1, dark);               // whiskers
+        line_thick(hxx+4, hyy+1, hxx+8, hyy+1, 1, dark);
+        if (b->lunge_t>0){   // paw swipe, alternating
+            int sw = ((int)(b->walk_ph*2))%2? 1 : -1;
+            int sxp = hxx + (int)(fx*8) - (int)(fy*sw*5), syp = hyy + (int)(fy*8) + (int)(fx*sw*5);
+            line_thick(sxp-3, syp-3, sxp+3, syp+3, 1, COL(255,255,255));
+            line_thick(sxp-3, syp+1, sxp+3, syp-3, 1, COL(255,255,255));
+        }
+    } else if (b->species==2){   // MOOSE: a walking wall with antlers
+        u32 body = flash? COL(255,255,255) : bud_coat(b, COL(143,106,68));
+        u32 dark = col_shade(body, 0.7f);
+        int sway = walking? 0 : (int)(fsin(G.anim_t*1.1f + owner)*1.2f);   // the great sway (idle only — walking is the flop)
+        ellipse_shade(x+lx, y+ly+bob, 15, 11, body);
+        for (int lg=0;lg<4;lg++){   // sturdy legs
+            int ox = (lg%2? 8:-8), oy = (lg<2? 5:10);
+            rect_fill(x+lx+ox-2, y+ly+oy-2, 4, 5, dark);
+        }
+        rect_fill(x+lx-6, y+ly-4+bob, 12, 4, collar);
+        int hxx = x+lx+hx+sway, hyy = y+ly+hy-2+bob;
+        ellipse_fill(hxx, hyy, 9, 7, OUTLINE); ellipse_shade(hxx, hyy, 8, 6, body);
+        ellipse_fill(hxx + (int)(fx*6), hyy + (int)(fy*3) + 2, 5, 3, dark);    // the great snout
+        circle_fill(hxx-2, hyy-1, 1, OUTLINE); circle_fill(hxx+3, hyy-1, 1, OUTLINE);
+        draw_bud_glasses(hxx + (int)(fx*3), hyy-1, 9, 7);
+        // antlers: two racks of pure punctuation
+        u32 ant = COL(226,204,160);
+        for (int s=-1;s<=1;s+=2){
+            int ax = hxx + s*7, ay = hyy - 5;
+            line_thick(ax, ay, ax + s*5, ay - 6, 2, ant);
+            line_thick(ax + s*2, ay - 3, ax + s*2, ay - 8, 1, ant);
+            line_thick(ax + s*4, ay - 5, ax + s*7, ay - 9, 1, ant);
+        }
+        if (b->lunge_t>0){   // the head swing behind every swipe
+            int ax = hxx + (int)(fx*8), ay = hyy + (int)(fy*6);
+            line_thick(ax-6, ay, ax+6, ay, 2, ant);
+        }
+    }
+    else if (b->species==3){   // PLATYPUS: brown, billed, gloriously odd
+        u32 body = flash? COL(255,255,255) : bud_coat(b, COL(128,92,58));
+        u32 dark = col_shade(body, 0.7f);
+        int sway = walking? 0 : (int)(fsin(G.anim_t*4.0f + owner*1.3f)*1.0f);   // a swimmy wiggle (idle only — walking is the flop)
+        // the flat paddle tail, behind everything
+        int tx2 = x - hx - (int)(fx*9), ty2 = y - hy + 3;
+        ellipse_fill(tx2, ty2, 8, 4, dark); ellipse_fill(tx2, ty2, 7, 3, body);
+        ellipse_shade(x+lx, y+ly+bob+sway/2, 12, 8, body);
+        for (int lg=0;lg<4;lg++){   // webbed feet, roughly
+            int ox = (lg%2? 6:-6), oy = (lg<2? 4:8);
+            disc_fill(x+lx+ox, y+ly+oy + ((lg + (step>0?0:1))%2? 0:1), 2, dark);
+        }
+        rect_fill(x+lx-5, y+ly-3+bob, 10, 4, collar);
+        int hxx = x+lx+hx, hyy = y+ly+hy+bob;
+        circle_fill(hxx, hyy, 7, OUTLINE); circle_shade(hxx, hyy, 6, body); gloss(hxx, hyy, 6);
+        // THE bill: wide, flat, faintly smug
+        int bx2 = hxx + (int)(fx*7), by2 = hyy + (int)(fy*3) + 2;
+        ellipse_fill(bx2, by2, 7, 3, OUTLINE); ellipse_fill(bx2, by2, 6, 2, COL(216,186,128));
+        circle_fill(hxx-3, hyy-2, 1, OUTLINE); circle_fill(hxx+3, hyy-2, 1, OUTLINE);
+        draw_bud_glasses(hxx + (int)(fx*2), hyy-2, 8, 7);
+        if (b->lunge_t>0){   // the spur flashes
+            int sxp = x+lx - (int)(fx*10), syp = y+ly + 6;
+            line_thick(sxp, syp, sxp - (int)(fx*5), syp+3, 1, COL(190,255,200));
+        }
+    } else if (b->species==4){   // PET ROCK: a flat-bottomed crag
+        u32 body = flash? COL(255,255,255) : bud_coat(b, COL(148,144,138));
+        u32 dark = col_shade(body, 0.7f);
+        // Daniel's spec (Nov 2): flat bottom, jagged hilly top, and
+        // it FLOPS over as it travels — the slab tips end over end,
+        // its peaks shearing across the base, with a little hop at
+        // each flop. tip runs -1..1 over the roll cycle.
+        float ph = b->roll; ph -= (int)(ph/6.28318f)*6.28318f; if (ph<0) ph+=6.28318f;
+        float tip = fsin(ph);
+        int lift = -(int)((tip>0? tip : -tip)*3.0f);
+        int cx = x+lx + (int)(tip*2.0f);
+        int base = y+ly+bob+lift + 9;                 // the flat bottom line
+        int shear = (int)(tip*5.0f);                  // top leans into the flop
+        // the silhouette in horizontal slices, bottom to top: full
+        // width at the flat base, stepping in jaggedly to two humps
+        static const int PROF[9] = { 15, 15, 14, 13, 12, 12, 9, 8, 5 };
+        for (int r2=0;r2<9;r2++){
+            int hw = PROF[r2];
+            int off = (shear * r2) / 8;               // upper slices lean most
+            int yy = base - r2*2;
+            rect_fill(cx - hw + off, yy-1, hw*2, 2, r2==0? dark : body);
+            if (r2==6) rect_fill(cx - hw + off - 3, yy-1, 4, 2, body);   // the left shoulder juts
+            if (r2==8) rect_fill(cx + off + 1, yy-3, 5, 2, body);        // the tall peak
+        }
+        // speckles riding the slab as it flops
+        for (int s2=0;s2<5;s2++){
+            float a = b->roll + s2*2.4f + (float)(s2%3)*0.7f;
+            int sx2 = cx + (int)(fcos(a)*9.0f) + (shear * (s2%3)) / 2;
+            int sy2 = base - 3 - (s2%4)*3;
+            disc_fill(sx2, sy2, 1, dark);
+        }
+        // googly eyes up on the ridge, glasses over them, both
+        // shearing with the flop
+        int ey = base - 15 + (int)(tip*1.0f), exx = (int)(fx*2), eoff = (shear * 7) / 8;
+        for (int s2=-1;s2<=1;s2+=2){
+            circle_fill(cx+eoff+s2*5, ey, 3, OUTLINE);
+            circle_fill(cx+eoff+s2*5, ey, 2, COL(246,246,246));
+            disc_fill(cx+eoff+s2*5+exx, ey + (int)(fy*1), 1, OUTLINE);
+        }
+        draw_bud_glasses(cx+eoff, ey, 9, 8);
+        line_thick(cx-2, base-3, cx+2, base-3, 1, dark);   // a determined mouth, low on the slab
+        if (b->steady_t>0) circle_out(cx, base-8, 19, COL(255,214,64));   // ROCK STEADY ring
+        if (b->lunge_t>0) circle_out(cx, base-8, 17, COL(230,226,218));
+    } else if (b->species==5){   // KITCHEN SINK: porcelain, plumbed, present
+        u32 body = flash? COL(255,255,255) : bud_coat(b, COL(238,240,242));
+        u32 dark = col_shade(body, 0.8f);
+        u32 chrome = COL(168,174,182);
+        int hop = walking? 0 : (int)(fsin(b->walk_ph*1.4f)*1.2f);   // no hopping at a walk — the whole sink tips instead
+        // stubby pipe legs
+        rect_fill(x+lx-9, y+ly+8, 4, 5, chrome); rect_fill(x+lx+5, y+ly+8, 4, 5, chrome);
+        // the basin
+        rect_fill(x+lx-14, y+ly-1+bob+hop, 28, 11, body); rect_line(x+lx-14, y+ly-1+bob+hop, 28, 11, dark);
+        ellipse_fill(x+lx, y+ly-2+bob+hop, 14, 5, body); ellipse_fill(x+lx, y+ly-2+bob+hop, 13, 4, dark);
+        // water, sloshing as it goes
+        int slosh = walking? wflop : (int)(fsin(b->walk_ph*1.6f)*2.0f);   // at a walk the water tips rigidly with the basin
+        ellipse_fill(x+lx+slosh, y+ly-2+bob+hop, 10, 3, COL(126,192,242));
+        disc_fill(x+lx+slosh+3, y+ly-3+bob+hop, 1, COL(220,245,255));
+        // backsplash with twin faucets and cross handles
+        rect_fill(x+lx-11, y+ly-11+bob+hop, 22, 6, body); rect_line(x+lx-11, y+ly-11+bob+hop, 22, 6, dark);
+        for (int s2=-1;s2<=1;s2+=2){
+            rect_fill(x+lx+s2*6-1, y+ly-14+bob+hop, 2, 4, chrome);
+            line_thick(x+lx+s2*6-3, y+ly-14+bob+hop, x+lx+s2*6+3, y+ly-14+bob+hop, 1, chrome);
+            line_thick(x+lx+s2*6, y+ly-16+bob+hop, x+lx+s2*6, y+ly-12+bob+hop, 1, chrome);
+        }
+        // centre spout + the occasional drip of destiny
+        rect_fill(x+lx-1, y+ly-13+bob+hop, 2, 3, chrome);
+        if (((int)(G.anim_t*0.9f + owner))%3==0) disc_fill(x+lx, y+ly-6+bob+hop, 1, COL(126,192,242));
+        // a face on the porcelain front, drain for a nose
+        circle_fill(x+lx-5, y+ly+3+bob+hop, 1, OUTLINE); circle_fill(x+lx+5, y+ly+3+bob+hop, 1, OUTLINE);
+        circle_fill(x+lx, y+ly+5+bob+hop, 2, dark);
+        draw_bud_glasses(x+lx, y+ly+3+bob+hop, 8, 7);
+        if (b->lunge_t>0){   // it splashes toward the fight
+            for (int s2=0;s2<3;s2++)
+                disc_fill(x+lx + (int)(fx*14) + s2*2 - 2, y+ly + (int)(fy*10) + (s2%2)*3 - 1, 1, COL(126,192,242));
+        }
+    }
+    draw_text_center(x, y+16, BUD_ELF[b->name_idx%BUD_NAMES_N], 1, COL(255,244,210));
+    if (b->hp < b->maxhp){
+        float frac = b->maxhp>0? b->hp/b->maxhp : 0; if (frac<0) frac=0;
+        rect_fill(x-12, y-24, 24, 3, COL(40,30,40));
+        rect_fill(x-12, y-24, (int)(24*frac), 3, frac>0.35f? COL(120,230,90) : COL(255,170,60));
+    }
+    if (b->energy < BUD_ENERGY_MAX - 0.5f){   // the blue thread under the health
+        float ef = b->energy/BUD_ENERGY_MAX; if (ef<0) ef=0;
+        rect_fill(x-12, y-20, 24, 2, COL(40,30,40));
+        rect_fill(x-12, y-20, (int)(24*ef), 2, COL(120,200,255));
+    }
+}
+
+static void draw_player_sprite(Player *p){
+    { int pi = (int)(p - G.p);   // WHALES ONLY: PARADE DUCK, drawn at its own spot
+      if (pi>=0 && pi<MAXP && duck_on[pi] && p->alive){
+        int dx2 = SX(duck_x[pi]), dy2 = SY(duck_y[pi]);
+        if (dx2>-30 && dx2<VW+30 && dy2>-30 && dy2<VH+30){
+            float dhop = fsin(duck_ph[pi]); if (dhop<0) dhop = -dhop;
+            int hop = (int)(dhop*3.0f), fc = duck_face[pi]? duck_face[pi] : 1;
+            shadow_ellipse(dx2, dy2+6, 8, 2);
+            ellipse_fill(dx2, dy2-hop, 9, 6, COL(250,215,80));
+            tri_fill(dx2-fc*7, dy2-2-hop, dx2-fc*12, dy2-5-hop, dx2-fc*7, dy2+1-hop, COL(240,200,70));
+            disc_fill(dx2+fc*7, dy2-5-hop, 4, COL(250,220,95));
+            tri_fill(dx2+fc*10, dy2-1-hop, dx2+fc*15, dy2+1-hop, dx2+fc*10, dy2+3-hop, COL(240,130,40));
+            pset(dx2+fc*8, dy2-6-hop, COL(30,26,44));
+        }
+      } }
+    int x=SX(p->x), y=SY(p->y);
+    if (x<-90||x>VW+90||y<-190||y>VH+40) return;
+    if ((p->whale_on & 2048) && p->alive){   // WHALES ONLY: AURA OF IMPORTANCE
+        int pr = 17 + (int)(fsin(G.anim_t*3.0f + (float)(p->color&3))*2);
+        ellipse_fill(x, y+11, pr, 5, COL(240,196,80));
+        ellipse_fill(x, y+11, pr-5, 3, COL(255,226,130));
+    }
+    // bean-borne: dropping out of the sky onto the plaza — the body
+    // rides high and settles; the shadow stays on the ground
+    int bean_lift=0;
+    if (p->bean_t>0){ float e=1.6f-p->bean_t;
+        if (e>=0.45f && e<1.05f){ float k=(e-0.45f)/0.6f; bean_lift=(int)((1.0f-k)*(1.0f-k)*90.0f); } }
+    if (p->bean_jet>0) bean_lift = 13 + (int)(fsin(G.anim_t*7.0f)*2.0f);   // the jetpack hover
+    else if (p->jet_fall>0) bean_lift = (int)(p->jet_fall*30.0f);          // tumbling back down
+    shadow_ellipse(x, y+11, 13, 4);
+    if (bean_lift>0) y-=bean_lift;
+    if (p->on_wall>=0) y-=8;          // up on top of an interlocked wall run
+    if ((p->whale_on & 4) && p->alive){   // WHALES ONLY: the ROYAL CAPE, worn behind everything
+        int bx2 = x - (int)(fcos(p->aim)*9), by2 = y + 2 - (int)(fsin(p->aim)*5);
+        int sway = (int)(fsin(G.anim_t*2.4f + (float)(p->color&3))*3);
+        tri_fill(x-7, y-10, x+7, y-10, bx2-11+sway, by2+22, COL(150,30,44));
+        tri_fill(x+7, y-10, bx2+11+sway, by2+22, bx2-11+sway, by2+22, COL(150,30,44));
+        tri_fill(x-7, y-10, bx2-11+sway, by2+22, bx2, by2+16, COL(120,22,36));
+        disc_fill(x, y-10, 2, COL(255,214,90));   // the gold clasp
+    }
+    int ibob=0, iblink=0;             // idle breathing/blink (set in the body draw)
+    if (!p->alive){
+        draw_carcass(x, y+4, 9, 0, 0.4f);                          // knocked out
+        draw_text_center(x, y-18, "DOWN", 1, COL(255,120,120));
+        return;
+    }
+    if (p->hurt_t>0 && ((int)(G.anim_t*20))%2) { /* flash: skip body this blink */ }
+    else {
+        u32 hood = HOODIE[p->color&3];
+        u32 hair = HAIR_COL[p->color&3];
+        // the face leans toward the facing direction
+        int fx = (int)(fcos(p->aim)*3), fy = (int)(fsin(p->aim)*2);
+        // idle life: standing still, the DEV breathes (a slow bob that
+        // carries the head and the whole hat with it), blinks every few
+        // seconds, and after a while starts glancing around for bugs
+        if (p->idle_t>0.25f){
+            ibob = (int)(fsin(G.anim_t*2.1f + (float)(p->color&3)*1.7f)*1.2f);
+            float ph = G.anim_t + (float)(p->color&3)*1.31f; ph -= (int)(ph/3.4f)*3.4f;
+            iblink = (ph < 0.11f);
+            if (p->idle_t>1.5f) fx += (int)(fsin(G.anim_t*0.55f + (float)(p->color&3)*2.3f)*2.0f);
+        }
+        // legs and animated feet: alternating stride along the facing
+        // direction, and each shoe lifts as it swings forward
+        int lp = (int)(fsin(p->walk_ph)*4);
+        float sax = fcos(p->aim), say = fsin(p->aim);
+        float swl = fsin(p->walk_ph), swr = fsin(p->walk_ph + PI);
+        float cl = fcos(p->walk_ph), cr = fcos(p->walk_ph + PI);
+        int lfx = x-5 + (int)(sax*swl*4), lfy = y+11 + (int)(say*swl*3) - (cl>0? (int)(cl*2):0);
+        int rfx = x+4 + (int)(sax*swr*4), rfy = y+11 + (int)(say*swr*3) - (cr>0? (int)(cr*2):0);
+        line_thick(x-5, y+3, lfx, lfy-1, 5, COL(64,64,104));   // jeans down to each shoe
+        line_thick(x+4, y+3, rfx, rfy-1, 5, COL(64,64,104));
+        ellipse_fill(lfx, lfy, 5, 3, COL(42,36,46));           // shoes
+        ellipse_fill(rfx, rfy, 5, 3, COL(42,36,46));
+        line_thick(lfx-4, lfy+3, lfx+4, lfy+3, 1, COL(205,200,210));  // soles
+        line_thick(rfx-4, rfy+3, rfx+4, rfy+3, 1, COL(205,200,210));
+        // torso: shaded hoodie, pocket, zipper
+        ellipse_fill(x, y, 13, 14, OUTLINE);
+        ellipse_shade(x, y, 11, 12, hood);
+        rect_fill(x-6, y+5, 12, 4, col_shade(hood, 0.8f));
+        line_thick(x, y-10, x, y+4, 1, col_shade(hood, 0.68f));
+        // hoodie drawstrings with little aglets
+        line_thick(x-3, y-8, x-3, y-3, 1, COL(235,235,240));
+        line_thick(x+3, y-8, x+3, y-3, 1, COL(235,235,240));
+        circle_fill(x-3, y-2, 1, COL(235,235,240));
+        circle_fill(x+3, y-2, 1, COL(235,235,240));
+        // free arm, swinging against the stride
+        line_thick(x-9, y-3, x-12, y+3+(lp>0?-1:1), 3, col_shade(hood, 0.9f));
+        circle_fill(x-12, y+4+(lp>0?-1:1), 2, SKIN);
+        // ---- the person: neck, ears, shaded head, hair, and the glasses
+        // (drawn before the aim arm so the weapon stays on top)
+        rect_fill(x-3, y-11+ibob, 6, 4, col_shade(SKIN, 0.94f));
+        circle_fill(x-8, y-14+ibob, 2, SKIN);
+        circle_fill(x+8, y-14+ibob, 2, SKIN);
+        circle_fill(x, y-15+ibob, 9, OUTLINE);
+        circle_shade(x, y-15+ibob, 8, SKIN);
+        gloss(x, y-15+ibob, 8);
+        // hair: a cap swept across the top, thinning at the temples
+        ellipse_fill(x-fx/2, y-20+ibob, 8, 4, hair);
+        rect_fill(x-8-fx/2, y-20+ibob, 3, 5, hair);
+        rect_fill(x+5-fx/2, y-20+ibob, 3, 4, hair);
+        // COMICALLY BIG NERD GLASSES: the lenses are wider than the head.
+        // Chunky triple frames, pale lenses with a glint, eyes behind them.
+        // The whole face rides a few px toward the facing direction.
+        int gw2 = (p->whale_on & 2)? 19 : 13, gh2 = (p->whale_on & 2)? 16 : 12;   // WHALES ONLY: ENORMOUS-ER
+        int gy = y-22+fy+ibob - (gh2-12)/2;
+        int gl = x-16+fx - (gw2-13), gr = x+3+fx;       // lens box origins, pulled apart so the two lenses read as separate glasses
+        line_thick(gl+1, gy+4, x-9, y-14+ibob, 2, OUTLINE);  // temple arms
+        line_thick(gr+gw2-1, gy+4, x+9, y-14+ibob, 2, OUTLINE);
+        blend_rect(gl, gy, gw2, gh2, COL(200,230,255), 60); // lens sheen
+        blend_rect(gr, gy, gw2, gh2, COL(200,230,255), 60);
+        for (int s=0;s<3;s++){                          // triple-drawn frames
+            rect_line(gl-s, gy-s, gw2+2*s, gh2+2*s, OUTLINE);
+            rect_line(gr-s, gy-s, gw2+2*s, gh2+2*s, OUTLINE);
+        }
+        rect_fill(gl+gw2, gy+3, gr-(gl+gw2), 2, OUTLINE); // slim bridge, clear space between the lenses
+        // diagonal glints on each lens
+        pset_blend(gl+3, gy+8, COL(255,255,255), 170); pset_blend(gl+4, gy+7, COL(255,255,255), 170);
+        pset_blend(gl+5, gy+6, COL(255,255,255), 170); pset_blend(gl+6, gy+5, COL(255,255,255), 140);
+        pset_blend(gr+3, gy+8, COL(255,255,255), 170); pset_blend(gr+4, gy+7, COL(255,255,255), 170);
+        pset_blend(gr+5, gy+6, COL(255,255,255), 170); pset_blend(gr+6, gy+5, COL(255,255,255), 140);
+        if (iblink){                                    // closed for a blink
+            line_thick(x-9+fx, gy+6, x-5+fx, gy+6, 1, OUTLINE);
+            line_thick(x+5+fx, gy+6, x+9+fx, gy+6, 1, OUTLINE);
+        } else {
+            circle_fill(x-7+fx, gy+6, 2, OUTLINE);          // eyes, magnified by the lenses
+            circle_fill(x+7+fx, gy+6, 2, OUTLINE);
+            pset(x-8+fx, gy+5, COL(255,255,255));
+            pset(x+6+fx, gy+5, COL(255,255,255));
+        }
+        line_thick(x-11+fx, gy-3, x-5+fx, gy-3, 1, hair);  // brows peek over the top
+        line_thick(x+5+fx, gy-3, x+11+fx, gy-3, 1, hair);
+        line_thick(x-2+fx, y-8+fy+ibob, x, y-7+fy+ibob, 1, COL(196,128,104));  // smile below the frames
+        line_thick(x, y-7+fy+ibob, x+2+fx, y-8+fy+ibob, 1, COL(196,128,104));
+        // aim arm: hoodie sleeve to the elbow, skin to the grip
+        int hx = x + (int)(fcos(p->aim)*13), hy = y-4 + (int)(fsin(p->aim)*10);
+        int ex = (x+hx)/2, ey = (y-3+hy)/2;
+        line_thick(x, y-3, ex, ey, 4, col_shade(hood, 0.92f));
+        line_thick(ex, ey, hx, hy, 3, SKIN);
+        int w = p->weapon;
+        if (w==0){ rect_fill(hx-6, hy-3, 13, 7, OUTLINE); rect_fill(hx-5, hy-2, 11, 5, COL(200,200,215));
+                   for (int k=0;k<3;k++) rect_fill(hx-3+k*4, hy-1, 2, 2, COL(90,90,120)); }
+        else if (w==1){ ellipse_out(hx, hy, 5, 4, COL(170,170,190)); circle_fill(hx+1, hy-1, 1, COL(240,80,80)); }
+        else if (w==2){ circle_out(hx, hy, 5, COL(255,215,60)); circle_fill(hx+4, hy-2, 2, COL(255,150,40)); }
+        else if (w==3){ rect_fill(hx-4, hy-5, 10, 8, COL(120,80,40)); rect_fill(hx-4, hy-5, 10, 3, COL(90,60,30));
+                        draw_text_plain(hx-3, hy-4, "PM", 1, COL(255,230,150)); }
+        else { rect_fill(hx-5, hy-2, 11, 5, COL(60,60,80)); circle_fill(hx+6, hy, 2, COL(255,60,60)); }
+        if (w==4 && beam_vis[p-G.p]>0){
+            int nb = beam_n[p-G.p]; if (nb<1) nb=1;
+            float bf = beam_frac[p-G.p]; if (bf<=0) bf=1;
+            int bl = (int)(beam_len[p-G.p] * bf); if (bl<2) bl=2;
+            for (int k=0;k<nb;k++){
+                float ba = beam_ang[p-G.p][k];
+                int bx = x + (int)(fcos(ba)*bl), by = y-4 + (int)(fsin(ba)*bl);
+                line_thick(x, y-4, bx, by, 3, COL(120,200,255));
+                line_thick(x, y-4, bx, by, 1, COL(230,250,255));
+                circle_fill(bx, by, 4, COL(160,220,255));
+            }
+        }
+        // shield bubble: a ring of firewall sparks orbiting the player
+        if (p->shield>0){
+            for (int a=0;a<14;a++){
+                float t = G.anim_t*0.9f + a*(TAU/14);
+                int px2 = x+(int)(fcos(t)*19), py2 = y-6+(int)(fsin(t)*22);
+                pset(px2, py2, COL(170,220,255)); pset(px2+1, py2, COL(120,190,255));
+            }
+        }
+        // rollback grace: a green time-ring while you're untouchable
+        if (p->revive_t>0){
+            for (int a=0;a<14;a++){
+                float t = -G.anim_t*2.4f + a*(TAU/14);
+                int px2 = x+(int)(fcos(t)*20), py2 = y-6+(int)(fsin(t)*23);
+                disc_fill(px2, py2, 2, COL(120,255,160));
+            }
+        }
+    }
+    draw_hat(p, x, y + ibob);
+    // name tag
+    draw_text_center(x, y+18, p->name, 1, COL(255,255,255));
+    if (p->whale_on & 64)   // WHALES ONLY: the title, floating in gold
+        draw_text_center(x, y+29, "~ WHALE ~", 1, COL(255,205,40));
+    if (p->whale_on & 32){  // WHALES ONLY: DRAMATIC RAIN — on this player, only this player
+        int fall = (int)(G.anim_t*95);
+        for (int i2=0;i2<14;i2++){
+            int rx = x - 17 + (int)(((unsigned)(i2*2654435761u)>>13) % 35u);
+            int ry = y - 36 + (i2*29 + fall) % 48;
+            line_thick(rx, ry, rx+2, ry+7, 1, COL(150,200,255));
+        }
+    }
+    // hp pips over head when hurt
+    if (p->hp < p->maxhp){
+        rect_fill(x-11, y-26, 22, 3, COL(40,30,40));
+        rect_fill(x-11, y-26, 22*p->hp/p->maxhp, 3, COL(120,230,90));
+    }
+    // THE BACKFIRE BEAN, riding the shoulder through his own ride:
+    // goggles down, cheeks puffed, entirely pleased with himself.
+    if (p->bean_t>0 && p->alive){
+        float e = 1.6f - p->bean_t;
+        int jx = (e<0.45f && ((int)(G.anim_t*40))%2)? 1:0;   // the sputter shake
+        int bx2 = x+11+jx, by2 = y-8+jx;
+        ellipse_fill(bx2, by2+6, 6, 3, COL(240,248,230));        // his little cloud seat
+        ellipse_fill(bx2, by2, 6, 7, COL(126,196,86));            // bean body
+        ellipse_fill(bx2-2, by2-2, 2, 3, COL(168,226,120));      // the shine
+        rect_fill(bx2-6, by2-6, 12, 3, COL(90,70,50));           // goggle strap
+        disc_fill(bx2-3, by2-4, 2, COL(220,240,255));            // goggles
+        disc_fill(bx2+3, by2-4, 2, COL(220,240,255));
+        pset(bx2-3, by2-4, COL(30,26,44)); pset(bx2+3, by2-4, COL(30,26,44));
+        if (e>=0.45f && e<1.05f){   // mid-flight: the exhaust does the talking
+            disc_fill(bx2, by2+11, 4, COL(220,240,200));
+            disc_fill(bx2-3, by2+15, 3, COL(190,225,150));
+            disc_fill(bx2+3, by2+18, 2, COL(168,216,120));
+        }
+        if (e>=1.05f){   // touchdown: stars, his and yours alike
+            int s1 = (int)(fsin(G.anim_t*5.0f)*8), s2 = (int)(fsin(G.anim_t*5.0f+2.0f)*8);
+            rect_fill(x+s1-1, y-27, 3, 1, COL(255,220,90)); rect_fill(x+s1, y-28, 1, 3, COL(255,220,90));
+            rect_fill(x-s2-1, y-23, 3, 1, COL(255,220,90)); rect_fill(x-s2, y-24, 1, 3, COL(255,220,90));
+        }
+    }
+}
+static void draw_store_building(void){
+    int x0=SX(-84), y0=SY(-108), x1=SX(84), y1=SY(-38);
+    if (x1<-48||x0>VW+48||y1<-48||y0>VH+48) return;
+    int cx=(x0+x1)/2, w=x1-x0;
+    u32 wood = COL(122,80,44), wood_d = COL(94,60,32), plank = COL(238,220,180);
+    shadow_ellipse(cx, y1+3, w/2, 6);
+    // back wall: warm planks with seams
+    rect_fill(x0, y0+18, w, y1-y0-18, plank);
+    for (int py=y0+27; py<y1-4; py+=9) rect_fill(x0+2, py, w-4, 1, COL(216,194,150));
+    rect_fill(x0, y1-6, w, 6, COL(226,204,162));
+    // a little lit window high on the left wall, clear of the board
+    rect_fill(x0+9, y0+27, 20, 14, wood_d); rect_line(x0+9, y0+27, 20, 14, OUTLINE);
+    rect_fill(x0+12, y0+30, 14, 8, COL(255,214,120));
+    rect_fill(x0+18, y0+30, 2, 8, wood_d); rect_fill(x0+12, y0+33, 14, 2, wood_d);
+    // corner posts + top beam (the stall frame)
+    rect_fill(x0-2, y0+14, 7, y1-y0-6, wood);  rect_line(x0-2, y0+14, 7, y1-y0-6, OUTLINE);
+    rect_fill(x1-5, y0+14, 7, y1-y0-6, wood);  rect_line(x1-5, y0+14, 7, y1-y0-6, OUTLINE);
+    rect_fill(x0-3, y0+16, w+6, 8, wood);      rect_line(x0-3, y0+16, w+6, 8, OUTLINE);
+    // lanterns hanging off the posts
+    for (int s=0;s<2;s++){
+        int lx = s? x1-10 : x0+10;
+        disc_fill(lx, y0+33, 6, COL(255,196,96));
+        rect_fill(lx-3, y0+28, 7, 9, wood_d); rect_line(lx-3, y0+28, 7, 9, OUTLINE);
+        disc_fill(lx, y0+32, 2, COL(255,240,190));
+    }
+    // striped awning with a scalloped hem, over the beam
+    for (int i=0;i<8;i++){
+        int ax = x0 + i*w/8; u32 c = (i%2)? COL(220,70,70) : COL(245,245,245);
+        rect_fill(ax, y0+4, w/8, 13, c);
+        disc_fill(ax + w/16, y0+17, w/16, c);
+    }
+    rect_line(x0, y0+4, w, 13, OUTLINE);
+    rect_fill(x0, y0+2, w, 2, COL(198,164,84));
+    // bunting strung between the posts
+    { static const u32 flags[5] = { COL(220,70,70), COL(255,205,40), COL(110,190,255), COL(120,220,120), COL(180,120,255) };
+      int bx0=x0+6, by0=y0+26, bx1=x1-6, sag=9;
+      for (int i=0;i<14;i++){
+          float t0=i/14.0f, t1=(i+1)/14.0f;
+          int ax=bx0+(int)((bx1-bx0)*t0), ay=by0+(int)(sag*4*t0*(1-t0));
+          int ex=bx0+(int)((bx1-bx0)*t1), ey=by0+(int)(sag*4*t1*(1-t1));
+          line_thick(ax, ay, ex, ey, 1, OUTLINE);
+          if (i%2==0) tri_fill(ax, ay, ax+8, ay, ax+4, ay+8, flags[(i/2)%5]);
+      } }
+    // the hanging sign (sways a touch) on two stubs off the awning
+    { int sway = (int)(fsin(G.anim_t*0.8f)*1.5f);
+      int sx0=x0+18+sway, sw=x1-x0-36;
+      rect_fill(sx0+8, y0-14, 4, 18, wood_d); rect_fill(sx0+sw-12, y0-14, 4, 18, wood_d);
+      rect_fill(sx0, y0-16, sw, 22, wood_d); rect_line(sx0, y0-16, sw, 22, OUTLINE);
+      rect_line(sx0+2, y0-14, sw-4, 18, COL(198,164,84));
+      rect_fill(sx0+22, y0-11, sw-44, 1, COL(122,88,52));
+      draw_text_center(cx+sway, y0-9, "BUG MALL", 2, COL(255,220,90)); }
+    // "we buy" board on the wall — two lines, so the whole phrase fits
+    rect_fill(cx-52, y0+42, 104, 24, COL(250,242,218)); rect_line(cx-52, y0+42, 104, 24, wood_d);
+    draw_text_center(cx, y0+45, "WE BUY BUGS", 1, COL(90,60,30));
+    draw_text_center(cx, y0+55, "MALL: 5 SHOPS", 1, COL(90,60,30));
+    // counter, crates of stock, a sack, and the golden scale
+    int cy=SY(-26);
+    rect_fill(cx-62, cy-8, 17, 17, wood); rect_line(cx-62, cy-8, 17, 17, OUTLINE);
+    rect_fill(cx-60, cy-17, 14, 9, wood);  rect_line(cx-60, cy-17, 14, 9, OUTLINE);
+    ellipse_fill(cx-53, cy-19, 6, 3, COL(234,130,46));          // today's catch, on top
+    rect_fill(cx+48, cy-9, 13, 9, COL(206,182,138)); rect_line(cx+48, cy-9, 13, 9, OUTLINE);
+    rect_fill(cx+52, cy-12, 5, 3, wood_d);
+    rect_fill(cx-32, cy, 64, 10, COL(140,95,55)); rect_line(cx-32, cy, 64, 10, OUTLINE);
+    rect_fill(cx-32, cy, 64, 2, COL(172,124,78));
+    { int gx=cx+19;   // the scale: post, beam, two pans — a bug being weighed
+      rect_fill(gx, cy-13, 2, 13, COL(198,164,84));
+      rect_fill(gx-11, cy-14, 24, 2, COL(198,164,84));
+      line_thick(gx-9, cy-12, gx-13, cy-6, 1, COL(198,164,84)); line_thick(gx-9, cy-12, gx-5, cy-6, 1, COL(198,164,84));
+      line_thick(gx+11, cy-12, gx+7, cy-6, 1, COL(198,164,84)); line_thick(gx+11, cy-12, gx+15, cy-6, 1, COL(198,164,84));
+      ellipse_fill(gx-9, cy-5, 6, 2, COL(216,180,80)); ellipse_fill(gx+11, cy-5, 6, 2, COL(216,180,80));
+      disc_fill(gx-9, cy-8, 3, COL(98,192,92)); }
+    draw_text_center(cx-14, cy-6, pad_mode()? "B" : key_name(G.bind[ACT_INTERACT]), 1, COL(255,255,255));
+    // welcome rug in front of the counter
+    int ry=SY(-14);
+    rect_fill(cx-34, ry, 68, 9, COL(178,60,54)); rect_line(cx-34, ry, 68, 9, COL(120,40,38));
+    rect_line(cx-30, ry+2, 60, 5, COL(240,200,120));
+}
+static void draw_prop(int type, int x, int y, u32 seed){
+    u32 edge = COL(52,50,48);
+    int j1 = (int)(seed%5) - 2, j2 = (int)((seed>>3)%5) - 2;   // per-prop jitter
+    switch (type){
+    case 1: // shattered PCB + parts spill — flat debris, walkable
+        ellipse_fill(x, y+5, 18, 6, COL(96,80,60));                 // scuffed dirt patch
+        tri_fill(x-14, y+6, x+2, y+7, x-6, y-4, COL(38,118,60));    // main board shard
+        tri_fill(x-14, y+6, x-6, y-4, x-13, y-3, COL(48,140,72));
+        rect_fill(x-4, y+1, 12, 6, COL(42,128,64)); rect_line(x-4, y+1, 12, 6, COL(24,74,38));
+        rect_fill(x-3, y+5, 10, 1, COL(216,178,64));                 // gold edge pins
+        rect_fill(x-1, y-2, 5, 3, COL(28,28,34));                   // a loose chip
+        rect_fill(x+5, y+2, 4, 2, COL(28,28,34));
+        circle_fill(x-11+j1, y+2, 3, COL(178,52,44)); circle_out(x-11+j1, y+2, 3, edge);  // capacitor
+        circle_out(x+11, y+3, 6, COL(52,102,200));                   // coiled CAT6
+        circle_out(x+11, y+3, 4, COL(52,102,200));
+        rect_fill(x+15, y+1, 4, 3, COL(196,202,210));                // its RJ45 plug
+        break;
+    case 2: // a crate with a CRT monitor in it — solid
+        shadow_ellipse(x, y+13, 22, 5);
+        rect_fill(x-11, y-17, 22, 15, COL(206,198,178)); rect_line(x-11, y-17, 22, 15, edge);  // CRT body
+        rect_fill(x-8, y-14, 13, 9, COL(58,76,86));                  // screen
+        tri_fill(x-8, y-14, x+1, y-14, x-8, y-7, COL(112,140,150));  // screen glare
+        rect_fill(x+6, y-13, 2, 7, COL(160,152,134));                // side vents
+        line_thick(x+8, y-3, x+12, y+3, 1, COL(30,30,34));           // power cord into the crate
+        rect_fill(x-17, y-2, 34, 16, COL(146,104,58)); rect_line(x-17, y-2, 34, 16, COL(84,58,32));  // crate
+        line_thick(x-17, y-2, x+17, y+14, 2, COL(120,84,44));        // cross planks
+        line_thick(x+17, y-2, x-17, y+14, 2, COL(120,84,44));
+        rect_fill(x-17, y-2, 34, 3, COL(164,120,68));
+        break;
+    case 3: // DRAM sticks + a coax coil, lying flat — walkable
+        for (int k=0;k<2;k++){                                       // two RAM sticks
+            int sx = x-13+k*7, sy = y-3+k*7;
+            rect_fill(sx, sy, 20, 5, COL(34,110,58)); rect_line(sx, sy, 20, 5, COL(20,64,34));
+            rect_fill(sx, sy+4, 20, 1, COL(216,178,64));             // gold contacts
+            rect_fill(sx+2, sy+1, 4, 3, COL(26,26,32));
+            rect_fill(sx+8, sy+1, 4, 3, COL(26,26,32));
+            rect_fill(sx+14, sy+1, 4, 3, COL(26,26,32));
+        }
+        circle_out(x+11+j2, y-4, 7, COL(26,26,30));                  // coax coil
+        circle_out(x+11+j2, y-4, 4, COL(26,26,30));
+        rect_fill(x+16+j2, y-8, 4, 4, COL(178,182,188));             // F-connector
+        rect_fill(x+17+j2, y-7, 2, 2, COL(120,124,130));
+        circle_fill(x-9+j1, y+6, 2, COL(216,178,64));                // a stray gold pin
+        break;
+    case 4: // fax machine with a modem perched on top — solid
+        shadow_ellipse(x, y+12, 20, 5);
+        rect_fill(x-7, y-13, 12, 10, COL(238,236,228));              // paper sticking out the top
+        rect_fill(x-5, y-11, 8, 1, COL(168,166,158));
+        rect_fill(x-5, y-8, 8, 1, COL(168,166,158));
+        rect_fill(x-15, y-3, 30, 14, COL(202,194,176)); rect_line(x-15, y-3, 30, 14, edge);   // fax body
+        rect_fill(x-15, y-3, 30, 3, COL(178,170,152));               // feed slot shadow
+        rect_fill(x-13, y+3, 6, 6, COL(160,152,134));                // handset rest
+        for (int r2=0;r2<2;r2++) for (int c2=0;c2<3;c2++)            // keypad
+            rect_fill(x+4+c2*4, y+3+r2*4, 2, 2, COL(90,88,84));
+        rect_fill(x+3, y-8, 13, 6, COL(40,42,50)); rect_line(x+3, y-8, 13, 6, edge);          // modem
+        line_thick(x+13, y-8, x+16, y-15, 1, COL(30,30,34));         // its antenna
+        circle_fill(x+6, y-5, 1, COL(90,220,110));                   // modem LEDs
+        circle_fill(x+10, y-5, 1, COL(240,180,60));
+        break;
+    case 5: // a game console tipped into the dirt, cables spilled — walkable
+        ellipse_fill(x-2, y+8, 19, 5, COL(96,78,54));               // dirt mound it sank into
+        tri_fill(x-15, y+7, x+11, y+7, x+15, y-6, COL(58,54,74));   // console, leaning
+        tri_fill(x-15, y+7, x+15, y-6, x+5, y-9, COL(76,70,96));     // its top face
+        rect_fill(x-2, y-9, 7, 6, COL(150,148,158));                 // cartridge, half out
+        rect_fill(x-2, y-9, 7, 2, COL(196,84,60));                   // cartridge label stripe
+        line_thick(x-13, y+4, x+12, y+4, 1, COL(38,36,48));          // slot shadow line
+        circle_fill(x+9, y+1, 1, COL(232,64,54));                    // power LED, still on somehow
+        line_thick(x+13, y+3, x+20, y+7, 2, COL(52,102,200));        // spilled CAT6...
+        line_thick(x+20, y+7, x+26, y+4, 2, COL(52,102,200));
+        rect_fill(x+25, y+1, 5, 4, COL(196,202,210));                // ...and its plug
+        line_thick(x+11, y+6, x+19, y+11, 3, COL(24,24,28));         // spilled coax...
+        rect_fill(x+18, y+10, 5, 4, COL(178,182,188));               // ...and its F-connector
+        break;
+    case 6: // KERNEL BADLANDS: a burnt server husk — solid
+        shadow_ellipse(x, y+13, 20, 5);
+        rect_fill(x-12, y-26, 24, 38, COL(46,40,38)); rect_line(x-12, y-26, 24, 38, COL(22,19,18));
+        rect_fill(x-12, y-26, 24, 4, COL(64,54,48));                 // scorched crown
+        for (int r2=0;r2<4;r2++) rect_fill(x-8, y-18+r2*8, 16, 3, COL(28,24,23));  // dead drive bays
+        line_thick(x-12, y-26, x+3, y-12, 1, COL(16,14,13));         // the crack that killed it
+        line_thick(x+3, y-12, x+1, y-2, 1, COL(16,14,13));
+        circle_fill(x-6+j1, y+6, 1, COL(255,120,40));                // embers that never got the memo
+        circle_fill(x+5, y+2, 1, COL(255,160,60));
+        circle_fill(x+8+j2, y+8, 1, COL(230,80,30));
+        break;
+    case 7: // KERNEL BADLANDS: a cracked heat vent — walkable
+        ellipse_fill(x, y+4, 17, 6, COL(60,38,28));                 // scorch ring
+        ellipse_fill(x, y+4, 11, 4, COL(30,20,16));                  // the vent mouth
+        rect_fill(x-8, y-6, 4, 8, COL(52,46,44)); rect_fill(x-8, y-7, 4, 2, COL(255,120,40));
+        rect_fill(x+4, y-9, 4, 11, COL(52,46,44)); rect_fill(x+4, y-10, 4, 2, COL(255,150,50));
+        circle_fill(x+j1, y+3, 1, COL(255,170,70)); circle_fill(x-4+j2, y+6, 1, COL(255,120,40));
+        break;
+    case 8: // FROZEN CACHE FIELDS: a frost-locked drive bank — solid
+        shadow_ellipse(x, y+12, 21, 5);
+        rect_fill(x-15, y-14, 30, 26, COL(150,172,190)); rect_line(x-15, y-14, 30, 26, COL(96,118,140));
+        rect_fill(x-15, y-14, 30, 5, COL(232,242,250));              // snow cap
+        tri_fill(x-10, y-9, x-6, y-9, x-8, y-3, COL(214,232,244));   // icicles
+        tri_fill(x+2, y-9, x+6, y-9, x+4, y-4, COL(214,232,244));
+        for (int r2=0;r2<3;r2++){ rect_fill(x-11, y-5+r2*7, 22, 4, COL(120,142,164)); rect_line(x-11, y-5+r2*7, 22, 4, COL(88,108,130)); }
+        circle_fill(x+9, y+8, 1, COL(120,255,230));                  // one teal LED, frozen mid-blink
+        break;
+    case 9: // FROZEN CACHE FIELDS: RAM sticks in a snow drift — walkable
+        ellipse_fill(x, y+6, 18, 6, COL(226,238,248));
+        ellipse_fill(x-4, y+4, 10, 4, COL(240,248,252));
+        rect_fill(x-12, y-2, 17, 4, COL(120,160,150)); rect_fill(x-12, y+2, 17, 1, COL(216,178,64));  // a stick, half out
+        rect_fill(x-10, y-1, 3, 2, COL(60,90,86)); rect_fill(x-5, y-1, 3, 2, COL(60,90,86));
+        rect_fill(x+2, y+3, 15, 4, COL(108,148,140)); rect_fill(x+2, y+7, 15, 1, COL(216,178,64));
+        pset(x-6+j1, y-3, COL(255,255,255)); pset(x+9, y+1, COL(255,255,255)); pset(x+3+j2, y-2, COL(200,230,245));
+        break;
+    case 10: // NEON RAM FLATS: a memory tower, still lit — solid
+        shadow_ellipse(x, y+12, 17, 5);
+        rect_fill(x-8, y-30, 16, 42, COL(30,26,58)); rect_line(x-8, y-30, 16, 42, COL(70,64,140));
+        line_thick(x-4, y-26, x-4, y+8, 2, COL(64,240,255));         // glowing traces up the spine
+        line_thick(x+3, y-26, x+3, y+8, 2, COL(255,84,200));
+        for (int r2=0;r2<4;r2++){ rect_fill(x-6, y-22+r2*9, 3, 3, COL(64,240,255)); rect_fill(x+3, y-18+r2*9, 3, 3, COL(255,84,200)); }
+        circle_fill(x, y-33, 2, COL(190,250,255));                   // the beacon on top
+        break;
+    case 11: // NEON RAM FLATS: a circuit bloom on the ground — walkable
+        ellipse_fill(x, y+3, 16, 6, COL(36,32,74));
+        line_thick(x-12, y+3, x+12, y+3, 1, COL(64,240,255));
+        line_thick(x, y-4, x, y+9, 1, COL(64,240,255));
+        line_thick(x-8, y-2, x+7, y+8, 1, COL(255,84,200));
+        circle_fill(x-12, y+3, 2, COL(64,240,255)); circle_fill(x+12, y+3, 2, COL(255,84,200));
+        circle_fill(x, y-4, 2, COL(190,250,255)); circle_fill(x+j1, y+9, 1, COL(64,240,255));
+        break;
+    case 12: // CABLE JUNGLE: a cable tree — solid
+        shadow_ellipse(x, y+12, 19, 5);
+        rect_fill(x-4, y-16, 8, 28, COL(94,70,46)); rect_line(x-4, y-16, 8, 28, COL(60,44,28));
+        disc_fill(x, y-24, 15, COL(44,92,48)); disc_fill(x-11, y-18, 10, COL(52,104,54)); disc_fill(x+11, y-19, 10, COL(40,84,44));
+        disc_fill(x+j1, y-27, 7, COL(64,120,60));
+        line_thick(x-9, y-20, x-11, y-2, 2, COL(26,26,30));          // hanging cables...
+        rect_fill(x-13, y-1, 4, 4, COL(178,182,188));                // ...with the plugs still on
+        line_thick(x+8, y-22, x+12, y-6, 2, COL(52,102,200));
+        rect_fill(x+11, y-5, 4, 3, COL(196,202,210));
+        break;
+    case 13: // CABLE JUNGLE: a mossy keyboard slab — walkable
+        rect_fill(x-16, y-4, 32, 12, COL(120,118,110)); rect_line(x-16, y-4, 32, 12, COL(80,78,70));
+        for (int r2=0;r2<2;r2++) for (int c2=0;c2<6;c2++)
+            rect_fill(x-13+c2*5, y-1+r2*5, 3, 3, COL(168,164,152));
+        disc_fill(x-9, y-2, 4, COL(70,130,66)); disc_fill(x+11, y+6, 5, COL(62,120,60)); disc_fill(x+3+j1, y-4, 3, COL(80,140,72));
+        break;
+    case 14: // THE DEPTHS: a half-deleted file monolith — solid
+        shadow_ellipse(x, y+12, 18, 5);
+        rect_fill(x-11, y-28, 22, 40, COL(96,90,112)); rect_line(x-11, y-28, 22, 40, COL(58,54,74));
+        rect_fill(x-11, y-28, 22, 6, COL(120,112,138));              // the header that survived
+        rect_fill(x+2, y-14, 9, 10, COL(80,72,96));                  // a chunk that didn't (hole)
+        rect_fill(x-11, y+2, 8, 8, COL(80,72,96));
+        for (int r2=0;r2<3;r2++) rect_fill(x-7, y-18+r2*7, 10, 2, COL(140,132,158));   // faded file lines
+        rect_fill(x-13, y-6, 4, 12, COL(110,90,140));                // a glitch slice, offset from the body
+        pset(x+7+j1, y-24, COL(255,84,200)); pset(x-5, y+9, COL(64,240,255));
+        break;
+    case 15: // THE DEPTHS: glitch shards — walkable
+        rect_fill(x-10+j1, y-2, 8, 4, COL(255,84,200));
+        rect_fill(x-2, y+3, 10, 3, COL(64,240,255));
+        rect_fill(x+4+j2, y-6, 6, 4, COL(150,144,168));
+        rect_fill(x-13, y+5, 5, 3, COL(110,104,130));
+        pset(x+11, y, COL(255,84,200)); pset(x-6, y-6, COL(64,240,255)); pset(x+1, y+8, COL(190,250,255));
+        break;
+    }
+}
+static void draw_buddy(Buddy *b);   // Banzai Buddies, drawn further down
+// the Bug Mall interior: plank floors, a red carpet up the middle, four
+// counters with a keeper bug behind each, and NO hostile anything
+
+// the mall keepers (Daniel, Nov 2): five variations on a certain
+// bearded, bespectacled co-founder of a fruit company — round face,
+// full beard, glasses, big friendly smile — each in his station's
+// outfit, head and shoulders clear above the counter with a warm
+// lantern glow behind him so he actually reads at game scale.
+static void draw_keeper(int st, float wx, float wy){
+    float cz = G.zoom; if (cz<0.6f) cz=0.6f;
+    int x = SX(wx), y = SY(wy) + (int)(fsin(G.anim_t*1.3f + st*1.7f)*cz);
+    u32 skin = COL(240,200,164), beard = COL(128,106,88), hair = COL(160,148,134);
+    // (the lantern-glow discs behind the head are GONE — Nov 5,
+    // Daniel: "get rid of the halos behind the shopkeepers". The
+    // warmth moved to light pools on the floor instead.)
+    // shoulders and the station outfit (the counter covers the rest)
+    u32 shirt = st==0? COL(206,74,60) : st==1? COL(238,236,230)
+              : st==2? COL(238,236,230) : st==3? COL(186,164,110) : COL(230,230,234);
+    ellipse_fill(x, y + (int)(17*cz), (int)(17*cz), (int)(10*cz), shirt);
+    if (st==0){          // Hawaiian: little flowers on the chest band
+        disc_fill(x-(int)(9*cz), y+(int)(14*cz), (int)(1.6*cz), COL(255,240,200));
+        disc_fill(x+(int)(2*cz), y+(int)(15*cz), (int)(1.6*cz), COL(255,214,90));
+        disc_fill(x+(int)(11*cz), y+(int)(13*cz), (int)(1.6*cz), COL(255,240,200));
+        tri_fill(x-(int)(3*cz), y+(int)(10*cz), x+(int)(3*cz), y+(int)(10*cz), x, y+(int)(15*cz), skin);   // open collar
+    } else if (st==1){   // whales only: black tux panels, a red bow tie, a gold whale pin
+        rect_fill(x-(int)(16*cz), y+(int)(11*cz), (int)(7*cz), (int)(9*cz), COL(28,26,34));
+        rect_fill(x+(int)(9*cz), y+(int)(11*cz), (int)(7*cz), (int)(9*cz), COL(28,26,34));
+        tri_fill(x-(int)(4*cz), y+(int)(11*cz), x, y+(int)(13*cz), x-(int)(4*cz), y+(int)(15*cz), COL(160,30,40));
+        tri_fill(x+(int)(4*cz), y+(int)(11*cz), x, y+(int)(13*cz), x+(int)(4*cz), y+(int)(15*cz), COL(160,30,40));
+        disc_fill(x+(int)(6*cz), y+(int)(16*cz), (int)(2*cz), COL(255,214,90));
+    } else if (st==2){   // banker: green vest + a gold tie
+        rect_fill(x-(int)(16*cz), y+(int)(11*cz), (int)(7*cz), (int)(9*cz), COL(56,116,78));
+        rect_fill(x+(int)(9*cz), y+(int)(11*cz), (int)(7*cz), (int)(9*cz), COL(56,116,78));
+        rect_fill(x-(int)(1.5*cz), y+(int)(10*cz), (int)(3*cz), (int)(9*cz), COL(226,178,60));
+    } else if (st==3){   // buddies: khaki collar + a paw-print badge
+        rect_fill(x-(int)(8*cz), y+(int)(11*cz), (int)(16*cz), (int)(3*cz), COL(150,128,84));
+        disc_fill(x+(int)(7*cz), y+(int)(15*cz), (int)(2*cz), COL(120,84,50));
+        disc_fill(x+(int)(4*cz), y+(int)(12.5*cz), 1, COL(120,84,50));
+        disc_fill(x+(int)(10*cz), y+(int)(12.5*cz), 1, COL(120,84,50));
+    } else {             // bowling: blue shoulders + a red neckerchief
+        ellipse_fill(x-(int)(11*cz), y+(int)(14*cz), (int)(7*cz), (int)(5*cz), COL(70,130,220));
+        ellipse_fill(x+(int)(11*cz), y+(int)(14*cz), (int)(7*cz), (int)(5*cz), COL(70,130,220));
+        tri_fill(x-(int)(3*cz), y+(int)(10*cz), x+(int)(3*cz), y+(int)(10*cz), x, y+(int)(15*cz), COL(200,50,50));
+    }
+    // neck, beard mass, then the face over it so the beard wraps
+    // the chin and cheeks
+    rect_fill(x-(int)(3*cz), y+(int)(8*cz), (int)(6*cz), (int)(5*cz), col_shade(skin, 0.92f));
+    ellipse_fill(x, y+(int)(4*cz), (int)(10.5*cz), (int)(9.5*cz), beard);
+    circle_fill(x, y, (int)(11*cz), OUTLINE);
+    circle_shade(x, y-(int)(1*cz), (int)(10*cz), skin);
+    ellipse_fill(x, y-(int)(9*cz), (int)(8.5*cz), (int)(3.5*cz), hair);   // thin grey cap, forehead bare
+    ellipse_fill(x, y+(int)(5.5*cz), (int)(4.5*cz), (int)(3*cz), skin);   // mouth patch over the beard
+    line_thick(x-(int)(2.5*cz), y+(int)(5*cz), x, y+(int)(7*cz), 1, OUTLINE);   // the smile
+    line_thick(x, y+(int)(7*cz), x+(int)(2.5*cz), y+(int)(5*cz), 1, OUTLINE);
+    disc_fill(x, y+(int)(2*cz), (int)(1.6*cz)+1, col_shade(skin, 0.9f));        // nose
+    // the glasses: thin dark frames, eyes inside, brows over the top
+    { int gy2 = y-(int)(2*cz), lw2 = (int)(7.5*cz), lh2 = (int)(6*cz);
+      rect_line(x-lw2-(int)(1*cz), gy2, lw2, lh2, OUTLINE);
+      rect_line(x+(int)(1*cz), gy2, lw2, lh2, OUTLINE);
+      rect_fill(x-(int)(1*cz), gy2+(int)(2*cz), (int)(2*cz), 1, OUTLINE);
+      disc_fill(x-(int)(4.5*cz), gy2+(int)(3*cz), 1, OUTLINE);
+      disc_fill(x+(int)(4.5*cz), gy2+(int)(3*cz), 1, OUTLINE);
+      line_thick(x-(int)(7*cz), gy2-(int)(2*cz), x-(int)(2*cz), gy2-(int)(2.5*cz), 1, beard);
+      line_thick(x+(int)(2*cz), gy2-(int)(2.5*cz), x+(int)(7*cz), gy2-(int)(2*cz), 1, beard); }
+}
+static void draw_mall(void){
+    rect_fill(0, 0, VW, VH, COL(22,18,32));
+    float cz = G.zoom>0.01f? G.zoom : 1.0f;
+    int tlx = (int)(G.camx - (VW/2)/cz) - 64, tly = (int)(G.camy - (VH/2)/cz) - 64;
+    int gx0 = tlx/64 - (tlx<0?1:0), gy0 = tly/64 - (tly<0?1:0);
+    int gw = (int)(VW/cz/64) + 4, gh = (int)(VH/cz/64) + 4, ts = (int)(64*cz) + 1;
+    for (int gy=gy0; gy<gy0+gh; gy++) for (int gx=gx0; gx<gx0+gw; gx++){
+        float wx = gx*64+32, wy = gy*64+32;
+        if (wx<-330 || wx>330 || wy<MALL_CY-230 || wy>MALL_CY+230) continue;
+        u32 c = col_shade(((gx+gy)&1)? COL(124,94,62) : COL(116,88,58),
+                          0.96f + hash_f(gx, gy, 91)*0.07f);
+        { Player *vp = &G.p[G.view_pi>=0? G.view_pi : 0];
+          if (vp->whale_on & 512){   // WHALES ONLY: DISCO MALL — the floor cycles for the disco owner
+              static const u32 DISCO[4] = { COL(150,80,140), COL(70,130,170), COL(170,130,60), COL(80,150,110) };
+              c = col_shade(DISCO[(gx+gy+(int)(G.time*2.0f))&3], 0.96f + hash_f(gx, gy, 91)*0.07f);
+          } }
+        int tx = SX(gx*64), tyy = SY(gy*64);
+        rect_fill(tx, tyy, ts, ts, c);
+        rect_fill(tx, tyy+ts-2, ts, 1, col_shade(c, 0.88f));   // plank seam
+    }
+    // the red carpet: entrance to counters
+    { int cx0=SX(-37), cy0=SY(MALL_CY-118), cw=(int)(74*cz), ch=(int)(272*cz);
+      rect_fill(cx0, cy0, cw, ch, COL(148,46,50));
+      rect_line(cx0, cy0, cw, ch, COL(198,164,84));
+      rect_line(cx0+3, cy0+3, cw-6, ch-6, COL(120,36,40)); }
+    // the mall's name, painted on the floor inside the entrance. It
+    // used to hang on the north wall — where the HUD's zone pill slid
+    // in front of it every time you walked north. Down here, under
+    // your feet as you come in, nothing can cover it.
+    draw_text_center(SX(0), SY(MALL_CY+58), "THE BUG MALL", 2, COL(255,220,130));
+    // room walls: wood panelling with a gold chair rail, door gap south
+    { u32 wallc = COL(84,58,38);
+      rect_fill(SX(-308), SY(MALL_CY-192), (int)(616*cz), (int)(26*cz), wallc);
+      rect_fill(SX(-308), SY(MALL_CY-170), (int)(616*cz), 2, COL(198,164,84));
+      rect_fill(SX(-308), SY(MALL_CY+162), (int)(268*cz), (int)(26*cz), wallc);
+      rect_fill(SX(40), SY(MALL_CY+162), (int)(268*cz), (int)(26*cz), wallc);
+      rect_fill(SX(-308), SY(MALL_CY+162), (int)(616*cz), 2, COL(198,164,84));
+      rect_fill(SX(-308), SY(MALL_CY-192), (int)(24*cz), (int)(380*cz), wallc);
+      rect_fill(SX(284), SY(MALL_CY-192), (int)(24*cz), (int)(380*cz), wallc); }
+    // exit mat
+    { int mx0=SX(-38), my0=SY(MALL_CY+132), mw=(int)(76*cz), mh=(int)(34*cz);
+      rect_fill(mx0, my0, mw, mh, COL(52,96,60)); rect_line(mx0, my0, mw, mh, COL(198,164,84));
+      draw_text_center(SX(0), SY(MALL_CY+143), "EXIT", 2, COL(240,255,240)); }
+    // the Banzai World gate, south-east: a grass patch, a red torii,
+    // and a sign. Through it, you play as your buddy.
+    { int cx = SX(BW_SX);
+      int gx0=SX(BW_SX-56), gy0=SY(MALL_CY+110), gw=(int)(112*cz), gh=(int)(48*cz);
+      rect_fill(gx0, gy0, gw, gh, COL(86,150,66)); rect_line(gx0, gy0, gw, gh, COL(60,110,48));
+      for (int gt=0; gt<7; gt++){ int tx2 = SX(BW_SX-48 + (gt*37)%96), ty2 = SY(MALL_CY+118 + (gt*23)%34);
+          line_thick(tx2, ty2, tx2-1, ty2-4, 1, COL(60,120,45)); line_thick(tx2+3, ty2, tx2+4, ty2-3, 1, COL(60,120,45)); }
+      // torii: two posts and two lintels, vermilion
+      int px1=SX(BW_SX-26), px2=SX(BW_SX+26), py0=SY(MALL_CY+118), py1=SY(MALL_CY+152);
+      rect_fill(px1-3, py0, 6, py1-py0, COL(196,64,44)); rect_line(px1-3, py0, 6, py1-py0, OUTLINE);
+      rect_fill(px2-3, py0, 6, py1-py0, COL(196,64,44)); rect_line(px2-3, py0, 6, py1-py0, OUTLINE);
+      rect_fill(px1-10, py0-4, (px2-px1)+20, 6, COL(196,64,44)); rect_line(px1-10, py0-4, (px2-px1)+20, 6, OUTLINE);
+      rect_fill(px1-6, py0+8, (px2-px1)+12, 4, COL(170,52,38));
+      int sx0=SX(BW_SX-52), sy0=SY(MALL_CY+96), sw=(int)(104*cz), sh=(int)(13*cz);
+      rect_fill(sx0, sy0, sw, sh, COL(46,40,34)); rect_line(sx0, sy0, sw, sh, COL(198,164,84));
+      draw_text_center(cx, sy0+3, "BANZAI WORLD", 1, COL(255,240,210)); }
+    // the Arcade door, east wall: a dark opening in the panelling, a
+    // violet mat, and a buzzing cyan sign. The games live through here.
+    { int dx0=SX(266), dy0=SY(MALL_CY+2), dw=(int)(18*cz), dh=(int)(44*cz);
+      rect_fill(dx0, dy0, dw, dh, COL(16,12,26)); rect_line(dx0, dy0, dw, dh, COL(120,240,255));
+      int mx0=SX(214), my0=SY(MALL_CY+8), mw=(int)(50*cz), mh=(int)(34*cz);
+      rect_fill(mx0, my0, mw, mh, COL(74,40,110)); rect_line(mx0, my0, mw, mh, COL(120,240,255));
+      int sx0=SX(196), sy0=SY(MALL_CY-26), sw=(int)(76*cz), sh=(int)(13*cz);
+      rect_fill(sx0, sy0, sw, sh, COL(24,20,36)); rect_line(sx0, sy0, sw, sh, COL(120,240,255));
+      draw_text_center(SX(234), sy0+3, "ARCADE", 1, COL(160,255,255)); }
+    // (two potted shrubs stood here while the Gallery slot was empty;
+    // Whales Only took the counter over on Nov 2 and the shrubs went)
+    // hanging lanterns down the carpet
+    for (int i=0;i<3;i++){
+        int lx=SX(-150 + i*150), ly=SY(MALL_CY-30);
+        disc_fill(lx, ly, 13, COL(255,196,96));
+        disc_fill(lx, ly, 8, COL(255,226,150));
+        rect_fill(lx-3, ly-6, 6, 8, COL(94,60,32));
+    }
+    // the four counters, each with its keeper behind it
+    static const u32 SBAND[4] = { COL(190,60,50), COL(198,164,84), COL(70,170,90), COL(240,140,50) };
+    for (int s=0;s<4;s++){
+        int cx = SX(MALL_SX[s]);
+        // warm light pooled on the floorboards in front of the
+        // counter (the glow-up's answer to the old head halos)
+        { int py2 = SY(MALL_CY-112);
+          ellipse_fill(cx, py2, (int)(58*cz), (int)(17*cz), COL(140,110,70));
+          ellipse_fill(cx, py2, (int)(40*cz), (int)(11*cz), COL(152,122,78)); }
+        // keeper first, so the counter hides his lower half; his
+        // head rides well clear of the counter top
+        draw_keeper(s, MALL_SX[s], MALL_CY-176);
+        int x0=SX(MALL_SX[s]-60), y0=SY(MALL_CY-158), cw=(int)(120*cz), ch=(int)(34*cz);
+        shadow_ellipse(cx, y0+ch+2, cw/2, 4);
+        rect_fill(x0, y0, cw, ch, COL(122,80,44)); rect_line(x0, y0, cw, ch, OUTLINE);
+        rect_fill(x0, y0, cw, 6, COL(150,104,58));
+        rect_fill(x0, y0+8, cw, 4, SBAND[s]);               // the station's colour stripe
+        // the station's name, lettered on the counter front where the
+        // shopper actually stands. (There used to be hanging signs at
+        // double-size letters, but the boards were wider than the
+        // counters' spacing — the names ran into each other — and from
+        // anywhere but the counter itself they sat off-screen or
+        // behind the HUD. The plate is always readable.)
+        draw_text_center(cx, y0+20, MALL_STATION[s], 1, COL(255,240,210));
+    }
+    // the bowling counter, south-west: a keeper, three pins, and a
+    // little lane rug pointing at the real lanes (behind the counter)
+    { int cx = SX(BOWL_SX);
+      { int rx0=SX(BOWL_SX-24), ry0=SY(MALL_CY+26), rw=(int)(48*cz), rh=(int)(82*cz);
+        rect_fill(rx0, ry0, rw, rh, COL(216,186,130)); rect_line(rx0, ry0, rw, rh, COL(150,120,80));
+        for (int pn=0;pn<3;pn++){ int px2 = SX(BOWL_SX + (pn-1)*13), py2 = SY(MALL_CY+40);
+            ellipse_fill(px2, py2, 3, 5, COL(245,242,238)); rect_fill(px2-3, py2-2, 6, 2, COL(200,60,50)); } }
+      draw_keeper(4, BOWL_SX, MALL_CY+100);
+      int x0=SX(BOWL_SX-52), y0=SY(MALL_CY+118), cw=(int)(104*cz), ch=(int)(34*cz);
+      shadow_ellipse(cx, y0+ch+2, cw/2, 4);
+      rect_fill(x0, y0, cw, ch, COL(122,80,44)); rect_line(x0, y0, cw, ch, OUTLINE);
+      rect_fill(x0, y0+ch-6, cw, 6, COL(150,104,58));
+      rect_fill(x0, y0+ch-10, cw, 4, COL(80,130,220));         // bowling blue stripe
+      draw_carcass(cx-30, y0+16, 8, 1, 0.6f);                  // the house ball: a carcass, of course
+      { int sw2 = text_w(MALL_STATION[4], 2) + 16;
+        int sx0 = cx - sw2/2, sy0 = SY(MALL_CY+68);
+        rect_fill(sx0, sy0, sw2, 20, COL(94,60,32)); rect_line(sx0, sy0, sw2, 20, OUTLINE);
+        rect_line(sx0+2, sy0+2, sw2-4, 16, COL(198,164,84));
+        draw_text_center(cx, sy0+3, MALL_STATION[4], 2, COL(255,220,130)); } }
+    // (the Gallery's display pedestals — "yesterday's legends" —
+    // went out with the Gallery itself on Nov 2)
+    // the bank's vault door, gleaming behind the counter, beside
+    // the keeper (it used to sit dead centre — where he now stands)
+    { int vx=SX(MALL_SX[2]+44), vy=SY(MALL_CY-176);
+      circle_fill(vx, vy, 15, COL(120,124,134)); circle_out(vx, vy, 15, COL(198,164,84));
+      circle_out(vx, vy, 9, COL(90,94,104));
+      for (int k=0;k<4;k++){ float a=k*TAU/4 + G.anim_t*0.1f;
+          line_thick(vx, vy, vx+(int)(fcos(a)*7), vy+(int)(fsin(a)*7), 2, COL(198,164,84)); } }
+    // the buddy pen: a little fence in front of the Banzai counter
+    for (int fx2=MALL_SX[3]-56; fx2<=MALL_SX[3]+56; fx2+=14){
+        int px=SX(fx2), py=SY(MALL_CY-92);
+        rect_fill(px-2, py-10, 4, 12, COL(150,110,64)); rect_line(px-2, py-10, 4, 12, OUTLINE);
+    }
+    rect_fill(SX(MALL_SX[3]-58), SY(MALL_CY-100), (int)(116*cz), 3, COL(150,110,64));
+    ui_vignette(clip_x0, clip_y0, clip_x1-clip_x0, clip_y1-clip_y0);
+    // entities: buddies, then shoppers, then the usual sparkle
+    for (int i=0;i<MAXP;i++) if (G.bud[i].active){
+        float bx=G.bud[i].x, by=G.bud[i].y;
+        if (!G.bud[i].in_bw && by>MALL_CY-300 && by<MALL_CY+300) draw_buddy(&G.bud[i]);
+    }
+    for (int i=0;i<MAXP;i++) if (G.p[i].connected && G.p[i].in_mall) draw_player_sprite(&G.p[i]);
+    for (int i=0;i<MAXPART;i++) if (G.parts[i].alive){
+        Particle *q=&G.parts[i];
+        if (q->y>MALL_CY-300 && q->y<MALL_CY+300) rect_fill(SX(q->x), SY(q->y), q->size, q->size, q->col);
+    }
+    for (int i=0;i<MAXFLOAT;i++) if (G.floats[i].alive){
+        Floater *q=&G.floats[i];
+        if (q->y>MALL_CY-300 && q->y<MALL_CY+300) draw_text_center(SX(q->x), SY(q->y), q->text, 1, q->col);
+    }
+    // WALK OF FAME marquee: flashes through the confetti colours while
+    // the viewed player is mid-crawl under a heavy hat
+    { Player *vp=&G.p[G.view_pi>=0? G.view_pi : 0];
+      if (vp->wof>0)
+          draw_text_center((clip_x0+clip_x1)/2, clip_y0+150, "WALK OF FAME", 3,
+                           WOF_COL[(int)(G.anim_t*8)%6]); }
+}
+// THE ARCADE room (Nov 10): dark carpet, neon trim, and four cabinets
+// against the north wall — one per game. West wall leads back to the mall.
+static void draw_arcade(void){
+    rect_fill(0, 0, VW, VH, COL(10,8,20));
+    float cz = G.zoom>0.01f? G.zoom : 1.0f;
+    int tlx = (int)(G.camx - (VW/2)/cz) - 64, tly = (int)(G.camy - (VH/2)/cz) - 64;
+    int gx0 = tlx/64 - (tlx<0?1:0), gy0 = tly/64 - (tly<0?1:0);
+    int gw = (int)(VW/cz/64) + 4, gh = (int)(VH/cz/64) + 4, ts = (int)(64*cz) + 1;
+    for (int gy=gy0; gy<gy0+gh; gy++) for (int gx=gx0; gx<gx0+gw; gx++){
+        float wx = gx*64+32, wy = gy*64+32;
+        if (wx<-330 || wx>330 || wy<ARC_CY-230 || wy>ARC_CY+230) continue;
+        u32 c = col_shade(((gx+gy)&1)? COL(52,40,84) : COL(46,36,74), 0.96f + hash_f(gx, gy, 91)*0.07f);
+        int tx = SX(gx*64), tyy = SY(gy*64);
+        rect_fill(tx, tyy, ts, ts, c);
+        rect_fill(tx, tyy+ts-2, ts, 1, col_shade(c, 0.85f));
+    }
+    draw_text_center(SX(0), SY(ARC_CY+58), "THE ARCADE", 2, COL(140,255,255));
+    { u32 wallc = COL(30,24,48);
+      rect_fill(SX(-308), SY(ARC_CY-192), (int)(616*cz), (int)(26*cz), wallc);
+      rect_fill(SX(-308), SY(ARC_CY-170), (int)(616*cz), 2, COL(120,240,255));
+      rect_fill(SX(-308), SY(ARC_CY+162), (int)(616*cz), (int)(26*cz), wallc);
+      rect_fill(SX(-308), SY(ARC_CY+162), (int)(616*cz), 2, COL(240,120,220));
+      rect_fill(SX(-308), SY(ARC_CY-192), (int)(24*cz), (int)(160*cz), wallc);
+      rect_fill(SX(-308), SY(ARC_CY+52), (int)(24*cz), (int)(136*cz), wallc);
+      rect_fill(SX(284), SY(ARC_CY-192), (int)(24*cz), (int)(380*cz), wallc); }
+    { int mx0=SX(-282), my0=SY(ARC_CY+6), mw=(int)(40*cz), mh=(int)(38*cz);
+      rect_fill(mx0, my0, mw, mh, COL(52,96,60)); rect_line(mx0, my0, mw, mh, COL(120,240,255));
+      draw_text_center(SX(-262), SY(ARC_CY+20), "EXIT", 1, COL(240,255,240)); }
+    draw_text_center(SX(0), SY(ARC_CY-186), "ARCADE", 2, COL(255,140,230));
+    static const u32 CABCOL[4] = { COL(240,140,40), COL(84,190,84), COL(70,130,230), COL(200,70,60) };
+    for (int s=0;s<4;s++){
+        int cx = SX(ARC_SX[s]);
+        { int py2 = SY(ARC_CY-112);
+          ellipse_fill(cx, py2, (int)(68*cz), (int)(17*cz), COL(60,50,96));
+          ellipse_fill(cx, py2, (int)(48*cz), (int)(11*cz), COL(72,60,110)); }
+        int x0=SX(ARC_SX[s]-64), y0=SY(ARC_CY-166), cw=(int)(128*cz), ch=(int)(98*cz);
+        shadow_ellipse(cx, y0+ch+2, cw/2, 4);
+        rect_fill(x0, y0, cw, ch, COL(24,22,38)); rect_line(x0, y0, cw, ch, CABCOL[s]);
+        rect_fill(x0, y0, cw, (int)(16*cz), CABCOL[s]);
+        draw_text_center(cx, y0+4, ARC_NAME[s], 1, COL(16,14,24));
+        for (int li=0; li<6; li++){ int lx = x0 + (int)((8+li*17)*cz), ly = y0 + (int)(19*cz);
+            disc_fill(lx, ly, 2, ((li + (int)(G.anim_t*3)) & 1)? COL(255,230,140) : CABCOL[s]); }
+        int sx0 = x0+(int)(12*cz), sy0 = y0+(int)(26*cz), sw = (int)(104*cz), sh = (int)(44*cz);
+        rect_fill(sx0, sy0, sw, sh, COL(10,14,20)); rect_line(sx0, sy0, sw, sh, COL(90,100,120));
+        if (s==0){
+            rect_fill(sx0+sw/2-(int)(9*cz), sy0+(int)(6*cz), (int)(18*cz), (int)(32*cz), COL(120,84,44));
+            rect_fill(sx0+sw/2+(int)(2*cz), sy0+(int)(20*cz), (int)(3*cz), (int)(3*cz), COL(255,220,120));
+        } else if (s==1){
+            rect_fill(sx0, sy0+sh-(int)(8*cz), sw, (int)(8*cz), COL(70,150,70));
+            rect_fill(sx0+sw-(int)(14*cz), sy0+(int)(8*cz), (int)(2*cz), (int)(28*cz), COL(220,220,220));
+            tri_fill(sx0+sw-(int)(12*cz), sy0+(int)(8*cz), sx0+sw-(int)(12*cz), sy0+(int)(16*cz), sx0+sw-(int)(3*cz), sy0+(int)(12*cz), COL(240,90,80));
+            disc_fill(sx0+(int)(16*cz), sy0+sh-(int)(14*cz), (int)(5*cz), COL(255,220,120));
+        } else if (s==2){
+            rect_fill(sx0+(int)(12*cz), sy0+(int)(20*cz), (int)(6*cz), (int)(16*cz), COL(120,84,44));
+            disc_fill(sx0+(int)(15*cz), sy0+(int)(14*cz), (int)(10*cz), COL(70,160,80));
+            rect_fill(sx0+sw-(int)(24*cz), sy0+sh-(int)(14*cz), (int)(13*cz), (int)(13*cz), COL(150,104,58)); rect_line(sx0+sw-(int)(24*cz), sy0+sh-(int)(14*cz), (int)(13*cz), (int)(13*cz), OUTLINE);
+        } else {
+            rect_fill(sx0+sw/2-(int)(13*cz), sy0+(int)(16*cz), (int)(26*cz), (int)(16*cz), COL(96,110,60));
+            rect_fill(sx0+sw/2-(int)(2*cz), sy0+(int)(4*cz), (int)(4*cz), (int)(14*cz), COL(70,80,44));
+            disc_fill(sx0+sw/2, sy0+(int)(20*cz), (int)(6*cz), COL(70,80,44));
+            rect_fill(sx0+sw/2-(int)(17*cz), sy0+(int)(14*cz), (int)(4*cz), (int)(20*cz), COL(50,54,40));
+            rect_fill(sx0+sw/2+(int)(13*cz), sy0+(int)(14*cz), (int)(4*cz), (int)(20*cz), COL(50,54,40));
+        }
+        rect_fill(x0+(int)(8*cz), y0+(int)(76*cz), cw-(int)(16*cz), (int)(14*cz), COL(38,34,56)); rect_line(x0+(int)(8*cz), y0+(int)(76*cz), cw-(int)(16*cz), (int)(14*cz), OUTLINE);
+        disc_fill(x0+(int)(24*cz), y0+(int)(83*cz), 3, COL(240,90,80));
+        disc_fill(x0+(int)(38*cz), y0+(int)(83*cz), 3, COL(255,220,120));
+        rect_fill(x0+cw-(int)(22*cz), y0+(int)(79*cz), (int)(6*cz), (int)(8*cz), COL(200,200,210));
+    }
+    ui_vignette(clip_x0, clip_y0, clip_x1-clip_x0, clip_y1-clip_y0);
+    for (int i=0;i<MAXP;i++) if (G.bud[i].active){
+        float by=G.bud[i].y;
+        if (!G.bud[i].in_bw && by>ARC_CY-300 && by<ARC_CY+300) draw_buddy(&G.bud[i]);
+    }
+    for (int i=0;i<MAXP;i++) if (G.p[i].connected && G.p[i].in_arcade) draw_player_sprite(&G.p[i]);
+    for (int i=0;i<MAXPART;i++) if (G.parts[i].alive){
+        Particle *q=&G.parts[i];
+        if (q->y>ARC_CY-300 && q->y<ARC_CY+300) rect_fill(SX(q->x), SY(q->y), q->size, q->size, q->col);
+    }
+    for (int i=0;i<MAXFLOAT;i++) if (G.floats[i].alive){
+        Floater *q=&G.floats[i];
+        if (q->y>ARC_CY-300 && q->y<ARC_CY+300) draw_text_center(SX(q->x), SY(q->y), q->text, 1, q->col);
+    }
+}
+static void render_world(void){
+    // camera zoom: the bigger your hat, the wider your view of the world
+    // (in a split-screen pass the caller owns cam/zoom — cam_lock — and
+    // view_pi says whose hat would set the zoom)
+    if (!G.cam_lock)
+    { Player *me=&G.p[G.view_pi>=0? G.view_pi : 0];
+      float zt = zoom_target_of(me);
+      if (G.zoom<0.01f) G.zoom=1.0f;
+      G.zoom += (zt-G.zoom)*0.045f; }
+    { Player *viewp=&G.p[G.view_pi>=0? G.view_pi : 0];
+      if (viewp->in_arcade){ draw_arcade(); return; }
+      if (viewp->in_mall){ draw_mall(); return; } }
+    float cz = G.zoom>0.01f? G.zoom : 1.0f;
+    // ground: 64px checker tiles tinted by zone band
+    int tlx = (int)(G.camx - (VW/2)/cz) - 64, tly = (int)(G.camy - (VH/2)/cz) - 64;
+    int gx0 = tlx/64 - (tlx<0?1:0), gy0 = tly/64 - (tly<0?1:0);
+    int gw = (int)(VW/cz/64) + 4, gh = (int)(VH/cz/64) + 4, ts = (int)(64*cz) + 1;
+    for (int gy=gy0; gy<gy0+gh; gy++) for (int gx=gx0; gx<gx0+gw; gx++){
+        float wx = gx*64+32, wy = gy*64+32;
+        float d = fsqrt(wx*wx+wy*wy);
+        int chk = ((gx+gy)&1);
+        u32 c = col_shade(zone_ground(d, chk), 0.97f + hash_f(gx, gy, 77)*0.05f);
+        // region borders dither instead of seaming (Nov 9): within
+        // 70px of a boundary a hashed share of tiles already wears the
+        // country across the line — half and half right on the line,
+        // thinning to nothing at the band's edge
+        { int r = region_at(d);
+          float e = -1.0f; int other = r;
+          if (r < NREGIONS-1 && REGION_EDGE[r] - d < 70.0f){ e = REGION_EDGE[r]; other = r+1; }
+          else if (r > 0 && d - REGION_EDGE[r-1] < 70.0f){ e = REGION_EDGE[r-1]; other = r-1; }
+          if (e > 0.0f){ float f = 0.5f - (d>e? d-e : e-d)/140.0f;
+              if (hash_f(gx, gy, 314) < f)
+                  c = col_shade(chk? REGION_GA[other] : REGION_GB[other], 0.97f + hash_f(gx, gy, 77)*0.05f); } }
+        int tx = SX(gx*64), tyy = SY(gy*64);
+        rect_fill(tx, tyy, ts, ts, c);
+        // soft grout seams so the checker reads clean instead of harsh
+        rect_fill(tx+64, tyy, 1, 65, col_shade(c, 0.93f));
+        rect_fill(tx, tyy+64, 65, 1, col_shade(c, 0.93f));
+        // faint deterministic speckles for texture
+        float sp = hash_f(gx, gy, 43);
+        if (sp>0.45f){
+            u32 sc = col_shade(c, 0.90f);
+            pset(tx+(int)(sp*57)+3, tyy+(int)(sp*41)+5, sc);
+            pset(tx+(int)(sp*29)+11, tyy+(int)(sp*53)+7, sc);
+            // regional sparkle: lit traces in the RAM Flats, glitch
+            // flecks in the Depths
+            int rg = region_at(d);
+            if (rg==5 && sp>0.86f) pset(tx+(int)(sp*47)+7, tyy+(int)(sp*37)+9, COL(110,235,255));
+            if (rg==7 && sp>0.88f) pset(tx+(int)(sp*43)+9, tyy+(int)(sp*31)+13, COL(255,84,200));
+        }
+        // sprinkle: deterministic pebbles/tufts, tinted by the region
+        float r = hash_f(gx, gy, 42);
+        if (r>0.6f){ int px=SX(gx*64+(int)(r*50)), py=SY(gy*64+(int)(r*40));
+            u32 tc = REGION_TUFT[region_at(d)];
+            line_thick(px, py, px-2, py-4, 1, tc); line_thick(px+3, py, px+4, py-5, 1, tc);
+            // the Meadows bloom: two-petal flowers close to home
+            if (d<500 && r>0.86f){
+                u32 fc = ((gx*7+gy*13)&1)? COL(255,170,200) : COL(255,240,200);
+                disc_fill(px+8, py-3, 1, fc); disc_fill(px+10, py-2, 1, fc); pset(px+9, py-2, COL(255,205,40));
+            }
+        }
+    }
+    // the Epicenter plaza — the firewall is gone; it's just pavement now,
+    // and it shows the wear: scuffs, stains and cracks
+    int pcx=SX(0), pcy=SY(0);
+    circle_fill(pcx, pcy, 150, COL(196,190,178));
+    circle_fill(pcx, pcy, 138, COL(208,201,186));
+    circle_fill(pcx, pcy, 96, COL(219,211,193));   // sun-warmed heart of the plaza (glow-up)
+    circle_out(pcx, pcy, 121, COL(206,172,92));   // a gold inlay ring, mall money well spent
+    circle_out(pcx, pcy, 118, COL(196,190,178));
+    ellipse_fill(pcx-52, pcy+38, 30, 10, COL(188,182,168));
+    ellipse_fill(pcx+64, pcy-30, 22, 8, COL(190,184,170));
+    ellipse_fill(pcx+18, pcy+74, 16, 6, COL(186,180,166));
+    line_thick(pcx-96, pcy-58, pcx-70, pcy-38, 1, COL(170,164,152));
+    line_thick(pcx-70, pcy-38, pcx-78, pcy-18, 1, COL(170,164,152));
+    line_thick(pcx+84, pcy+52, pcx+104, pcy+66, 1, COL(170,164,152));
+    draw_text_center(pcx, pcy+118, "THE EPICENTER", 1, COL(120,110,95));
+    draw_store_building();
+    // the Epicenter shield: a shimmering ring, up while anyone is in the
+    // store. When the last shopper leaves it fades out over ~0.8s (visual
+    // only — the barrier itself drops the moment the store empties).
+    if (G.state==GS_PLAY || G.state==GS_STORE){
+        static float shield_seen = -10.0f;
+        int show_shield = (G.net_mode==NET_CLIENT)? (shield_remote || store_open_local)
+                                                  : shield_active();
+        if (show_shield) shield_seen = G.anim_t;
+        float fade = show_shield? 1.0f : 1.0f - (G.anim_t - shield_seen)/0.8f;
+        if (fade > 0.0f){
+            if (fade > 1.0f) fade = 1.0f;
+            float pulse = (0.72f + 0.28f*fsin(G.anim_t*3.0f)) * fade;
+            for (int ring=0; ring<2; ring++){
+                float rr = ring? 146.0f : 152.0f;
+                int alpha = (int)((ring? 90:170)*pulse);
+                for (float a=0; a<TAU; a+=TAU/110){
+                    if (((int)(a*9 - G.anim_t*1.5f))%2==0) continue;   // rotating dashes
+                    pset_blend(pcx+(int)(fcos(a)*rr), pcy+(int)(fsin(a)*rr), COL(150,215,255), alpha);
+                }
+            }
+            if (fade > 0.5f)
+                for (int k=0;k<4;k++){ // bright nodes drifting around the ring
+                    float a = G.anim_t*0.5f + k*(TAU/4);
+                    circle_fill(pcx+(int)(fcos(a)*152), pcy+(int)(fsin(a)*152), 2, COL(190,235,255));
+                }
+        }
+    }
+    // props
+    int cx0=(int)((G.camx-(VW/2)/cz)/CHUNK)-1, cy0=(int)((G.camy-(VH/2)/cz)/CHUNK)-1;
+    int cw = (int)(VW/cz/CHUNK) + 3, chh = (int)(VH/cz/CHUNK) + 3;
+    for (int cy=cy0; cy<cy0+chh; cy++) for (int cx=cx0; cx<cx0+cw; cx++)
+        for (int s=0;s<2;s++){
+            float px,py; int t,sol; chunk_prop(cx, cy, s, &px,&py,&t,&sol);
+            if (t) draw_prop(t, SX(px), SY(py), hash2(cx,cy,7+(u32)s));
+        }
+    // walls: a proper barricade of carcasses — shaded mound, five bugs
+    // deep, and it visibly falls apart as it gets chewed through
+    for (int i=0;i<MAXWALLS;i++) if (G.walls[i].alive){
+        Wall *w=&G.walls[i]; int x=SX(w->x), y=SY(w->y);
+        if (x<-40||x>VW+40||y<-40||y>VH+40) continue;
+        int hw = w->horiz? 26:9, hh = w->horiz? 9:26;
+        float frac = w->hp/w->maxhp;
+        u32 col = frac>0.5f? COL(168,118,72) : (frac>0.25f? COL(150,100,60) : COL(128,82,50));
+        shadow_ellipse(x, y+hh+1, hw+3, 3);
+        rect_fill(x-hw-2, y-hh-2, hw*2+4, hh*2+4, OUTLINE);
+        rect_fill(x-hw, y-hh, hw*2, hh*2, col_shade(col, 0.82f));            // base in shade
+        if (w->horiz) rect_fill(x-hw, y-hh, hw*2, hh, col);                   // lit top half
+        else          rect_fill(x-hw, y-hh, hw, hh*2, col);
+        rect_fill(x-hw, y-hh, w->horiz? hw*2:2, w->horiz? 2:hh*2, col_shade(col, 1.18f)); // top/left highlight
+        // the carcasses themselves: five across (or down), each different,
+        // slumping lower as the wall's HP drains away
+        int slump = frac>0.5f? 0 : (frac>0.25f? 1:2);
+        for (int k=0;k<5;k++){
+            float t = (k-2)/2.0f;                          // -1..1 along the wall
+            int cx2 = w->horiz? x + (int)(t*(hw-6)) : x + ((k%2)? 2:-2);
+            int cy2 = w->horiz? y + ((k%2)? 2:-2) : y + (int)(t*(hh-6));
+            int kind = (i*3 + k*7)%4;
+            float tilt = ((i*13 + k*29)%10 - 5)/8.0f + (k==4 && frac<0.25f? 0.9f:0.0f); // one slides off when nearly dead
+            draw_carcass(cx2, cy2 + slump + (k==4 && frac<0.25f? 3:0), 4 + (k%2), kind, tilt);
+        }
+        // exposed legs poking out of the mound
+        line_thick(x-hw+4, y-hh+1, x-hw+1, y-hh-4, 1, OUTLINE);
+        line_thick(x+3, y-hh+1, x+5, y-hh-4, 1, OUTLINE);
+        if (w->horiz) line_thick(x+hw-5, y+hh-1, x+hw-2, y+hh+3, 1, OUTLINE);
+        // reinforcement made visible (restored Nov 7): every stacked
+        // layer piles another course of carcasses on top — the heap
+        // grows taller with each reinforcement, capped for the eye
+        int pile_h = 0;
+        { int st = w->stack>0? w->stack : 1;
+          int layers = st-1; if (layers>4) layers=4;
+          pile_h = layers*5;
+          for (int L=1; L<=layers; L++){
+              int ly = y - hh - L*5 + slump;
+              int inset = L*2; if (inset>hw-8) inset=hw-8; if (inset<0) inset=0;
+              // shaded under-course so the layer reads as sitting ON the heap
+              if (w->horiz) rect_fill(x-hw+inset, ly+3, (hw-inset)*2, 3, col_shade(col, 0.55f));
+              else          rect_fill(x-4, ly+3, 8, 3, col_shade(col, 0.55f));
+              int nk = (L>=3)? 3 : 4;
+              for (int k=0;k<nk;k++){
+                  float t = (k-(nk-1)/2.0f)/((nk-1)/2.0f);   // -1..1 across the course
+                  int cx2 = w->horiz? x + (int)(t*(hw-6-inset)) : x + ((k%2)? 2:-2);
+                  int cy2 = w->horiz? ly + ((k%2)? 1:-1) : ly + (int)(t*3);
+                  int kind = (i*5 + L*3 + k*7)%4;
+                  float tilt = ((i*17 + L*11 + k*29)%10 - 5)/8.0f;
+                  draw_carcass(cx2, cy2, 4 + (k%2), kind, tilt);
+              }
+          }
+          if (st>5){ // a proper tower: say how deep the pile goes
+              char nb[8]; char *nq=nb; nq=sappend(nq, "x"); nq=sapp_int(nq, st); *nq=0;
+              draw_text_center(x, y-hh-pile_h-13, nb, 1, COL(255,230,150));
+          }
+        }
+        // cracks as it gets chewed
+        if (frac<0.75f){
+            line_thick(x-6, y-hh+2, x-2, y, 1, OUTLINE);
+            line_thick(x-2, y, x-5, y+hh-3, 1, OUTLINE);
+        }
+        if (frac<0.45f){
+            line_thick(x+8, y-hh+3, x+4, y+1, 1, OUTLINE);
+            line_thick(x+4, y+1, x+7, y+hh-2, 1, OUTLINE);
+            line_thick(x-1, y-2, x+3, y+3, 1, OUTLINE);
+        }
+        if (frac<0.25f) // scorch tint: it's barely holding together
+            blend_rect(x-hw, y-hh, hw*2, hh*2, COL(40,26,20), 60);
+        // interlock tiers: the bigger the run, the more engineered it
+        // looks — and at 5+ you can walk on top of it
+        { int tier = (w->grp>=0)? grp_tier(grp_n[w->grp]) : 0;
+          if (tier>=1){ // plank cap rail + bolts
+              u32 wood2 = COL(140,96,52);
+              if (w->horiz){ rect_fill(x-hw, y-hh-3, hw*2, 3, wood2); rect_fill(x-hw, y-hh-3, hw*2, 1, COL(172,128,76)); }
+              else { rect_fill(x-3, y-hh, 3, hh*2, wood2); rect_fill(x-3, y-hh, 1, hh*2, COL(172,128,76)); }
+              disc_fill(x-hw+4, y, 1, OUTLINE); disc_fill(x+hw-4, y, 1, OUTLINE);
+          }
+          if (tier>=2){ // iron straps with rivets
+              u32 iron = COL(74,74,88);
+              if (w->horiz){ for (int s2=-1;s2<=1;s2+=2){ int sx2=x+s2*hw/2; rect_fill(sx2-1, y-hh, 3, hh*2, iron); disc_fill(sx2, y-hh+3, 1, COL(150,150,165)); disc_fill(sx2, y+hh-3, 1, COL(150,150,165)); } }
+              else { for (int s2=-1;s2<=1;s2+=2){ int sy2=y+s2*hh/2; rect_fill(x-hw, sy2-1, hw*2, 3, iron); disc_fill(x-hw+3, sy2, 1, COL(150,150,165)); disc_fill(x+hw-3, sy2, 1, COL(150,150,165)); } }
+          }
+          if (tier>=3){ // CASTLE WALL (Daniel): at 20+ segments the run is
+              // faced in stone — block courses, joints, and battlements.
+              u32 stone = COL(148,146,142), stone_hi = COL(172,170,164), stone_lo = COL(118,116,112);
+              rect_fill(x-hw, y-hh, hw*2, hh*2, stone);
+              if (w->horiz) rect_fill(x-hw, y-hh, hw*2, hh, stone_hi);
+              else          rect_fill(x-hw, y-hh, hw, hh*2, stone_hi);
+              rect_line(x-hw, y-hh, hw*2, hh*2, OUTLINE);
+              // block courses: a mid seam plus staggered joints
+              if (w->horiz){
+                  rect_fill(x-hw, y-1, hw*2, 1, stone_lo);
+                  for (int jx=-hw+9; jx<hw-2; jx+=13) rect_fill(x+jx, y-hh, 1, hh, stone_lo);
+                  for (int jx=-hw+15; jx<hw-2; jx+=13) rect_fill(x+jx, y, 1, hh, stone_lo);
+              } else {
+                  rect_fill(x-1, y-hh, 1, hh*2, stone_lo);
+                  for (int jy=-hh+9; jy<hh-2; jy+=13) rect_fill(x-hw, y+jy, hw, 1, stone_lo);
+                  for (int jy=-hh+15; jy<hh-2; jy+=13) rect_fill(x, y+jy, hw, 1, stone_lo);
+              }
+              // battlements: stone teeth along the outer edge
+              if (w->horiz){ for (int tx2=x-hw+2; tx2<x+hw-5; tx2+=11){
+                  rect_fill(tx2, y-hh-5, 7, 5, stone); rect_fill(tx2, y-hh-5, 7, 1, stone_hi);
+                  rect_line(tx2, y-hh-5, 7, 5, OUTLINE); } }
+              else { for (int ty2=y-hh+2; ty2<y+hh-5; ty2+=11){
+                  rect_fill(x-hw-5, ty2, 5, 7, stone); rect_fill(x-hw-5, ty2, 1, 7, stone_hi);
+                  rect_line(x-hw-5, ty2, 5, 7, OUTLINE); } }
+              if (frac<0.6f){ // even castles crack
+                  line_thick(x-5, y-hh+2, x-1, y+1, 1, OUTLINE);
+                  line_thick(x+6, y, x+3, y+hh-2, 1, OUTLINE);
+              }
+          }
+          if (tier>=4){ // GRAND CASTLE: taller teeth, a cap course, gold trim
+              u32 stone = COL(148,146,142), stone_hi = COL(178,176,170);
+              if (w->horiz){ for (int tx2=x-hw+2; tx2<x+hw-5; tx2+=11) rect_fill(tx2, y-hh-7, 7, 2, stone_hi);
+                             rect_fill(x-hw-2, y+hh, hw*2+4, 2, stone); }
+              else { for (int ty2=y-hh+2; ty2<y+hh-5; ty2+=11) rect_fill(x-hw-7, ty2, 2, 7, stone_hi);
+                     rect_fill(x+hw, y-hh-2, 2, hh*2+4, stone); }
+              rect_line(x-hw-3, y-hh-3, hw*2+6, hh*2+6, COL(255,205,40));
+          }
+          if (tier>=1 && w->endpt){ // step stones at the end of a climbable run + a pennant
+              int ndx=0, ndy=0;
+              for (int j=0;j<MAXWALLS;j++) if (j!=i && G.walls[j].alive==1 && G.walls[j].grp==w->grp && wall_adjacent(w, &G.walls[j])){
+                  ndx = G.walls[j].x > w->x+2? 1 : (G.walls[j].x < w->x-2? -1:0);
+                  ndy = G.walls[j].y > w->y+2? 1 : (G.walls[j].y < w->y-2? -1:0);
+                  break;
+              }
+              int sxp = x - ndx*(hw+5), syp = y - ndy*(hh+5);
+              rect_fill(sxp-5, syp+1, 10, 5, COL(150,146,140)); rect_line(sxp-5, syp+1, 10, 5, OUTLINE);
+              rect_fill(sxp-3, syp-3, 6, 4, COL(168,164,158)); rect_line(sxp-3, syp-3, 6, 4, OUTLINE);
+              if (tier>=4){ // a round stone turret caps the run's end,
+                  // and the pennant flies from its top
+                  circle_fill(x, y, 11, OUTLINE);
+                  circle_fill(x, y, 10, COL(148,146,142));
+                  circle_fill(x-3, y-3, 3, COL(172,170,164));
+                  for (int ts=0; ts<6; ts++){ float ta=ts*1.0472f;
+                      disc_fill(x + (int)(fcos(ta)*9), y + (int)(fsin(ta)*9), 1, COL(118,116,112)); }
+                  line_thick(x, y-9, x, y-22, 1, OUTLINE);
+                  tri_fill(x, y-22, x+8, y-19, x, y-16, (i%2)? COL(220,70,70) : COL(255,205,40));
+              }
+          }
+        }
+        if (w->alive==2) draw_text_center(x, y-16, "BUILDING...", 1, COL(255,240,180));
+        if (frac<0.99f){ rect_fill(x-14, y-hh-pile_h-8, 28, 3, COL(40,30,40));
+            rect_fill(x-14, y-hh-pile_h-8, (int)(28*frac), 3, COL(255,170,80)); }
+    }
+    // bugs
+    for (int i=0;i<MAXBUGS;i++) if (G.bugs[i].alive) draw_bug_sprite(&G.bugs[i]);
+    // Banzai Buddies trot with their owners
+    for (int i=0;i<MAXP;i++) if (G.bud[i].active && !G.bud[i].in_bw) draw_buddy(&G.bud[i]);
+    // players
+    for (int i=0;i<MAXP;i++) if (G.p[i].connected) draw_player_sprite(&G.p[i]);
+    // projectiles
+    for (int i=0;i<MAXPROJ;i++) if (G.projs[i].alive){
+        Proj *q=&G.projs[i]; int x=SX(q->x), y=SY(q->y);
+        if (x<-20||x>VW+20||y<-20||y>VH+20) continue;
+        if (q->kind==0){ rect_fill(x-3, y-2, 6, 4, OUTLINE); rect_fill(x-2, y-1, 4, 2, COL(230,230,240)); }
+        else if (q->kind==1){ ellipse_out(x, y, 5, 4, COL(180,180,200)); }
+        else if (q->kind==2){ circle_out(x, y, 5, COL(255,215,60)); circle_fill(x+3, y-3, 2, COL(255,150,40)); }
+        else { // a tiny project manager, tumbling through the air, briefcase first
+            circle_out(x, y-3, 4, COL(245,205,160));
+            rect_fill(x-3, y+1, 7, 6, COL(50,50,90));
+            rect_fill(x+3, y+2, 4, 3, COL(120,80,40));
+        }
+    }
+    // carcass flights
+    for (int i=0;i<(int)(sizeof(G.fx)/sizeof(G.fx[0]));i++) if (G.fx[i].alive){
+        CarcassFx *f=&G.fx[i];
+        float t=f->t; if (t>1) t=1;
+        float mx=(f->x0+f->x1)/2, my=(f->y0+f->y1)/2 - 70;
+        float ix=(1-t)*(1-t)*f->x0 + 2*(1-t)*t*mx + t*t*f->x1;
+        float iy=(1-t)*(1-t)*f->y0 + 2*(1-t)*t*my + t*t*f->y1;
+        draw_carcass(SX(ix), SY(iy), 5, (int)f->w%4, t*5);
+    }
+    ui_vignette(clip_x0, clip_y0, clip_x1-clip_x0, clip_y1-clip_y0);
+    // particles + floaters
+    for (int i=0;i<MAXPART;i++) if (G.parts[i].alive){
+        Particle *q=&G.parts[i];
+        rect_fill(SX(q->x), SY(q->y), q->size, q->size, q->col);
+    }
+    for (int i=0;i<MAXFLOAT;i++) if (G.floats[i].alive){
+        Floater *q=&G.floats[i];
+        draw_text_center(SX(q->x), SY(q->y), q->text, 1, q->col);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// HUD, leaderboard, store UI
+// ---------------------------------------------------------------------------
+static void draw_bar(int x, int y, int w, int h, float frac, u32 col){
+    rect_fill(x-1, y-1, w+2, h+2, OUTLINE);
+    rect_fill(x, y, w, h, COL(46,40,58));
+    if (frac>0){ int fw = (int)(w*fclamp(frac,0,1));
+        rect_fill(x, y, fw, h, col);
+        if (h>=4) blend_rect(x, y, fw, h/2, COL(255,255,255), 42);   // gloss band (glow-up)
+    }
+}
+// pretty HUD panel: soft shadow, slate body, pale top light, gold corners
+static void ui_panel(int x, int y, int w, int h){
+    rect_fill(x+3, y+4, w, h, COL(10,9,18));
+    rect_fill(x, y, w, h, COL(24,22,38));
+    rect_line(x, y, w, h, COL(104,98,138));
+    rect_fill(x+1, y+1, w-2, 1, COL(92,86,122));
+    u32 g = COL(255,205,40);
+    rect_fill(x, y, 9, 2, g);         rect_fill(x, y, 2, 9, g);
+    rect_fill(x+w-9, y, 9, 2, g);     rect_fill(x+w-2, y, 2, 9, g);
+    rect_fill(x, y+h-2, 9, 2, g);     rect_fill(x, y+h-9, 2, 9, g);
+    rect_fill(x+w-9, y+h-2, 9, 2, g); rect_fill(x+w-2, y+h-9, 2, 9, g);
+}
+// soft vignette for world views (Nov 5 glow-up): the edges of the
+// view fall off into a gentle shade so the world feels lit instead of
+// flat. Drawn AFTER the world and its entities but BEFORE any HUD or
+// panel, so text and bars stay at full brightness — legibility first.
+static void ui_vignette(int x0, int y0, int w, int h){
+    const int D = 15;
+    for (int i=0;i<D;i++){
+        int a = (D-i)*3;
+        blend_rect(x0, y0+i, w, 1, COL(6,6,14), a);
+        blend_rect(x0, y0+h-1-i, w, 1, COL(6,6,14), a);
+        blend_rect(x0+i, y0, 1, h, COL(6,6,14), a);
+        blend_rect(x0+w-1-i, y0, 1, h, COL(6,6,14), a);
+    }
+}
+// chunky touch button base: drop shadow, cartoon outline, shaded face
+static void tbtn_base(int cx, int cy, int r, u32 face){
+    disc_fill(cx+2, cy+3, r+2, COL(10,9,18));
+    circle_out(cx, cy, r, face);
+    circle_shade(cx, cy, r-3, face);
+}
+// little item glyphs (store rows + weapon chips), drawn in a ~18px box
+static void draw_item_icon(int sel, int cx, int cy){
+    u32 ink = COL(40,36,50);
+    switch (sel){
+    case 0:  // mechanical keyboard
+        rect_fill(cx-9, cy-5, 18, 11, COL(240,238,228)); rect_line(cx-9, cy-5, 18, 11, ink);
+        for (int i=0;i<3;i++){ disc_fill(cx-4+i*4, cy-1, 1, ink); disc_fill(cx-4+i*4, cy+3, 1, ink); }
+        break;
+    case 1:  // mouse tosser
+        ellipse_fill(cx, cy+1, 7, 9, ink); ellipse_fill(cx, cy+1, 6, 8, COL(240,238,228));
+        rect_fill(cx, cy-6, 1, 6, ink);
+        break;
+    case 2:  // rubber duck cannon
+        ellipse_fill(cx+1, cy+3, 9, 5, COL(246,204,64));
+        disc_fill(cx-4, cy-3, 4, COL(246,204,64));
+        tri_fill(cx-10, cy-4, cx-5, cy-5, cx-5, cy-1, COL(232,128,44));
+        disc_fill(cx-5, cy-4, 1, ink);
+        break;
+    case 3:  // PM launcher: a little rocket
+        tri_fill(cx, cy-10, cx-3, cy-4, cx+3, cy-4, COL(198,60,50));
+        rect_fill(cx-3, cy-4, 7, 10, COL(226,230,238)); rect_line(cx-3, cy-4, 7, 10, ink);
+        tri_fill(cx-3, cy+6, cx-7, cy+10, cx-3, cy+10, COL(198,60,50));
+        tri_fill(cx+4, cy+6, cx+4, cy+10, cx+7, cy+10, COL(198,60,50));
+        disc_fill(cx, cy+9, 2, COL(255,170,60));
+        break;
+    case 4:  // the debugger: bug in crosshairs
+        for (int s=-1;s<=1;s+=2){ rect_fill(cx+s*9-1, cy-1, 3, 2, COL(216,70,60)); rect_fill(cx-1, cy+s*9-1, 2, 3, COL(216,70,60)); }
+        disc_fill(cx, cy, 6, ink); disc_fill(cx, cy, 5, COL(98,192,92));
+        disc_fill(cx-2, cy-1, 1, ink); disc_fill(cx+2, cy-1, 1, ink);
+        break;
+    case 5:  // overclock: lightning bolt
+        tri_fill(cx+3, cy-9, cx-4, cy+2, cx+0, cy+2, COL(255,205,40));
+        tri_fill(cx+0, cy+2, cx-3, cy+9, cx+5, cy-2, COL(255,205,40));
+        break;
+    case 6:  // caffeine drip: coffee cup
+        rect_fill(cx-6, cy-2, 11, 9, COL(240,238,228)); rect_line(cx-6, cy-2, 11, 9, ink);
+        rect_fill(cx-6, cy-2, 11, 3, COL(120,72,40));
+        rect_line(cx+5, cy+0, 4, 5, ink);
+        break;
+    case 7:  // firewall shield
+        rect_fill(cx-6, cy-8, 13, 10, COL(110,190,255));
+        tri_fill(cx-6, cy+2, cx+7, cy+2, cx, cy+10, COL(110,190,255));
+        rect_fill(cx-1, cy-5, 3, 9, COL(226,240,255));
+        break;
+    case 8:  // hoodie armor: a heart
+        disc_fill(cx-3, cy-3, 4, COL(226,80,90)); disc_fill(cx+4, cy-3, 4, COL(226,80,90));
+        tri_fill(cx-7, cy-2, cx+8, cy-2, cx, cy+9, COL(226,80,90));
+        break;
+    case 9:  // espresso legs: speed chevrons
+        tri_fill(cx-7, cy-5, cx-7, cy+5, cx-1, cy, COL(110,220,235));
+        tri_fill(cx+1, cy-5, cx+1, cy+5, cx+7, cy, COL(110,220,235));
+        break;
+    case 10: // rollback token: circular arrow
+        for (int a=0;a<10;a++){ float t = -0.6f + a*0.58f;
+            disc_fill(cx+(int)(fcos(t)*6.5f), cy+(int)(fsin(t)*6.5f), 2, COL(110,220,140)); }
+        tri_fill(cx+5, cy-9, cx+10, cy-4, cx+2, cy-3, COL(110,220,140));
+        break;
+    case 11: // hotfix: medical cross
+        disc_fill(cx, cy, 9, COL(240,238,228));
+        rect_fill(cx-2, cy-6, 5, 12, COL(216,70,60)); rect_fill(cx-6, cy-2, 12, 5, COL(216,70,60));
+        break;
+    default: // THE BACKFIRE BEAN: a green fellow, goggles on, ready
+        ellipse_fill(cx, cy+2, 7, 8, COL(126,196,86));
+        ellipse_fill(cx-2, cy-1, 2, 3, COL(168,226,120));
+        rect_fill(cx-7, cy-5, 14, 3, COL(90,70,50));
+        disc_fill(cx-3, cy-3, 2, COL(220,240,255)); disc_fill(cx+3, cy-3, 2, COL(220,240,255));
+        pset(cx-3, cy-3, ink); pset(cx+3, cy-3, ink);
+        disc_fill(cx-6, cy+9, 2, COL(190,225,150)); disc_fill(cx+6, cy+10, 2, COL(168,216,120));
+        break;
+    }
+}
+// weapon chips: a vertical strip under the status card, one chip per
+// owned weapon (only shown once you own 2+). Tappable on touch.
+static int owned_count(Player *me){ int n=0; for (int w=0;w<NWEAP;w++) if (me->owned[w]) n++; return n; }
+static int chip_rect(Player *me, int w, int *x, int *y){
+    int idx=0, found=0;
+    for (int i=0;i<NWEAP;i++) if (me->owned[i]){ if (i==w){ *x=8; *y=94+idx*32; found=1; } idx++; }
+    return (idx>=2 && found)? 1 : 0;
+}
+static int chip_at(Player *me, int tx, int ty){
+    for (int w=0;w<NWEAP;w++){ int x,y; if (chip_rect(me,w,&x,&y) && tx>=x && tx<x+52 && ty>=y && ty<y+26) return w; }
+    return -1;
+}
+static void render_leaderboard(int x, int y){
+    // CONSTANT LEADERBOARD: heaviest hat wins. Always on screen.
+    int idx[MAXP], n=0;
+    for (int i=0;i<MAXP;i++) if (G.p[i].connected) idx[n++]=i;
+    for (int i=0;i<n;i++) for (int j=i+1;j<n;j++)
+        if (G.p[idx[j]].carried > G.p[idx[i]].carried){ int t=idx[i]; idx[i]=idx[j]; idx[j]=t; }
+    int wpx=150, hpx=26+n*11+14;
+    ui_panel(x, y, wpx, hpx);
+    draw_text(x+8, y+5, "HEAVIEST HATS", 1, COL(255,205,40));
+    for (int i=0;i<n;i++){
+        Player *p=&G.p[idx[i]];
+        char b[32]; char *q=b;
+        q=sapp_int(q, i+1); q=sappend(q, ". ");
+        { int ni=0; while (p->name[ni] && ni<8){ *q++=p->name[ni++]; } *q=0; }  // truncated: the KG column must never be overrun
+        draw_text(x+8, y+16+i*11, b, 1, i==0? COL(255,240,180):COL(210,210,220));
+        fmt_int(b, "", (int)p->carried, "KG");
+        draw_text(x+wpx-8-text_w(b,1), y+16+i*11, b, 1, COL(255,240,180));
+        if (!p->alive) draw_text(x+wpx-30, y+16+i*11, "DOWN", 1, COL(255,110,110));
+    }
+    char b[40]; char *q=b;
+    q=sappend(q, "BEST: "); q=sappend(q, G.rec_name); q=sappend(q, " ");
+    q=sapp_int(q, (int)G.rec_hat); q=sappend(q, "KG");
+    draw_text_fit(x+8, y+16+n*11+2, wpx-16, b, 1, COL(150,200,255));
+}
+// the way-back arrow: orbits (cx, cy) — normally the player's screen
+// position — pointing home to the Epicenter, distance underneath.
+// Hidden once you're close. Drawn per view in split-screen co-op so
+// BOTH players get their own.
+static void draw_home_arrow(Player *p, int cx, int cy){
+    if (p->in_mall) return;              // inside the mall you can see the door
+    float dx = -p->x, dy = -p->y; float d = fsqrt(dx*dx + dy*dy);
+    if (d <= 190.0f) return;
+    float ca = dx/d, sa = dy/d;
+    int ax = cx + (int)(ca*46.0f), ay = cy + (int)(sa*46.0f);
+    int tx = ax + (int)(ca*13), ty = ay + (int)(sa*13);
+    int bx = ax - (int)(ca*7), by = ay - (int)(sa*7);
+    int px = (int)(-sa*9), py = (int)(ca*9);
+    tri_fill(tx, ty, bx+px, by+py, bx-px, by-py, COL(30,26,44));
+    int t2x = ax + (int)(ca*10), t2y = ay + (int)(sa*10);
+    int b2x = ax - (int)(ca*5), b2y = ay - (int)(sa*5);
+    int qx = (int)(-sa*6), qy = (int)(ca*6);
+    tri_fill(t2x, t2y, b2x+qx, b2y+qy, b2x-qx, b2y-qy, COL(255,214,64));
+    char b[24]; char *q=b; q=sapp_int(q, (int)(d/50)); q=sappend(q, "M");
+    draw_text_center(ax, ay+17, b, 1, COL(255,240,170));
+}
+static void render_hud(void){
+    Player *me=&G.p[G.my_id];
+    // top-left status card (wide enough for the longest hat tier name)
+    ui_panel(8, 8, 224, 78);
+    draw_bar(14, 14, 120, 8, (float)me->hp/me->maxhp, COL(120,230,90));
+    { char b[24]; fmt_int(b, "HP ", me->hp, ""); draw_text(140, 14, b, 1, COL(255,255,255)); }
+    if (me->shield_max>0) draw_bar(14, 26, 120, 6, me->shield_max? (float)me->shield/me->shield_max:0, COL(110,190,255));
+    { char b[40]; char *q=b; q=sappend(q, WEAPON_NAME[me->weapon]);
+      if (me->owned[me->weapon]>1){ q=sappend(q, " X"); q=sapp_int(q, me->owned[me->weapon]); }
+      draw_text_fit(14, 38, 204, b, 1, COL(255,220,120)); }
+    { char b[24]; char *q=b;
+      q=sappend(q, "HAT: "); q=sapp_int(q, (int)me->carried); q=sappend(q, "KG");
+      draw_text(14, 50, b, 1, COL(255,240,180)); }
+    draw_text_fit(14, 61, 134, hat_tier_name(me->stack_n, me->carried), 1, COL(190,180,150));
+    if (me->rollback>0){   // held revive tokens: know you've got one
+        char b[20]; char *q=b; q=sappend(q, "TOKEN X"); q=sapp_int(q, me->rollback); *q=0;
+        draw_text(226-text_w(b,1), 61, b, 1, COL(120,255,160));
+    }
+    if (me->beans>0){   // Backfire Beans held: the ride home (tap it, or key 6)
+        char b[20]; char *q=b; q=sappend(q, "BEAN X"); q=sapp_int(q, me->beans); *q=0;
+        draw_text(226-text_w(b,1), 70, b, 1, COL(150,230,120));
+    }
+    draw_bar(14, 72, 120, 4, me->carried/200.0f>1?1:me->carried/200.0f, COL(255,190,80));
+    // weapon chips under the card: tap one to switch (touch), or use the
+    // number keys. Gold frame = what you're holding; XN = stacked copies.
+    for (int w=0;w<NWEAP;w++){ int cx, cy;
+        if (!chip_rect(me, w, &cx, &cy)) continue;
+        int cur = (me->weapon==w);
+        rect_fill(cx+2, cy+3, 52, 26, COL(10,9,18));
+        rect_fill(cx, cy, 52, 26, cur? COL(66,56,28) : COL(24,22,38));
+        rect_line(cx, cy, 52, 26, cur? COL(255,205,40) : COL(104,98,138));
+        draw_item_icon(w, cx+13, cy+13);
+        if (me->owned[w]>1){ char b[8]; char *q=b; q=sappend(q, "X"); q=sapp_int(q, me->owned[w]);
+            draw_text(cx+25, cy+9, b, 1, COL(255,240,200)); }
+        else { char b[8]; char *q=b; q=sapp_int(q, w+1);
+            draw_text(cx+25, cy+9, b, 1, COL(165,160,185)); }
+    }
+    // top-center: zone + distance, centered in the free band between the
+    // status card (ends x=232) and the leaderboard (starts x=482) so long
+    // zone names can never run into either panel
+    float d = fsqrt(me->x*me->x + me->y*me->y);
+    rect_fill(254, 5, 214, 46, COL(16,14,28));          // readability pill
+    rect_line(254, 5, 214, 46, COL(84,78,112));
+    if (me->in_mall && me->in_arcade){
+        draw_text_center(361, 7, "THE ARCADE", 1, COL(255,255,255));
+        draw_text_center(361, 19, "FOUR FINE GAMES", 1, COL(200,210,230));
+        draw_text_center(361, 31, "SAFE ZONE - NO BUGS", 1, COL(150,230,150));
+    } else if (me->in_mall){
+        draw_text_center(361, 7, "THE BUG MALL", 1, COL(255,255,255));
+        draw_text_center(361, 19, "FIVE FINE SHOPS", 1, COL(200,210,230));
+        draw_text_center(361, 31, "SAFE ZONE - NO BUGS", 1, COL(150,230,150));
+    } else {
+    draw_text_center_fit(361, 7, 200, zone_name(d), 1, COL(255,255,255));
+    { char b[32]; char *q=b; q=sapp_int(q, (int)(d/50)); q=sappend(q, "M FROM EPICENTER");
+      draw_text_center(361, 19, b, 1, COL(200,210,230)); }
+    { compute_threat();
+      char b[40]; char *q=b; q=sappend(q, "THREAT X"); q=sapp_int(q, (int)G.threat);
+      *q++='.'; *q++=(char)('0'+((int)(G.threat*10)%10)); *q=0;
+      if (G.zen_run) q=sappend(q, " - ZEN MODE");
+      else if (G.diff_run) { q=sappend(q, " - "); q=sappend(q, DIFF_NAME[G.diff_run&3]); }
+      draw_text_center_fit(361, 31, 200, b, 1, COL(255,150,90)); }
+    }
+    render_leaderboard(VW-158, 8);
+    // bottom prompts (key names follow the player's bindings)
+    { char pb[64]; const char *pr = interact_prompt(me, pb, 0);
+      if (pr) draw_text_center(VW/2, VH-34, pr, 1, COL(255,240,150));
+      else if (me->stack_n>=3 && !me->in_mall)
+        { char b[64]; char *q=b; if (pad_mode()) q=sappend(q, "X"); else if (mobile_ui()) q=sappend(q, "WALL"); else q=sappend(q, key_name(G.bind[ACT_WALL])); q=sappend(q, " - THROW DOWN 3 CARCASSES AS A WALL");
+          draw_text_center(VW/2, VH-34, b, 1, COL(220,220,200)); } }
+    // (no bottom control line any more — controls live in the pause
+    // menu's CONTROLS panel now; Daniel, Nov 6: the line overlapped)
+    // run stats live under the player panel now, not at the bottom
+    // of the screen (Daniel, Nov 6: the bottom stays for prompts)
+    { char b[40]; char *q=b; int t=(int)G.time;
+      q=sappend(q, "TIME "); q=sapp_int(q, t/60); q=sappend(q, ":");
+      if (t%60<10) q=sappend(q, "0"); q=sapp_int(q, t%60);
+      q=sappend(q, " - SQUASHED: "); q=sapp_int(q, me->kills);
+      draw_text(14, 92, b, 1, COL(190,195,210)); }
+    // way back: a gold arrow orbiting the player, pointing at the
+    // Epicenter, with the distance under it (hidden once you're close)
+    draw_home_arrow(me, VW/2, VH/2);
+    // a partner is down: a red arrow points at the body, however far
+    // it is — getting to them is the whole game now. The viewer is
+    // whoever is still standing (in co-op both players watch the
+    // same merged screen, centered on the rescuer).
+    { Player *viewer = me->alive? me : 0;
+      if (!viewer) for (int j=0;j<MAXP;j++) if (G.p[j].connected && G.p[j].alive){ viewer=&G.p[j]; break; }
+      if (viewer) for (int j=0;j<MAXP;j++){ Player *dp=&G.p[j];
+        if (dp==viewer || !dp->connected || dp->alive) continue;
+        float dx = dp->x-viewer->x, dy = dp->y-viewer->y; float d = fsqrt(dx*dx+dy*dy);
+        if (d > 60.0f){
+            float ca = dx/d, sa = dy/d;
+            int cx2 = VW/2, cy2 = VH/2;
+            // a wider orbit than the gold home arrow (46), so the two
+            // never sit on top of each other when a partner went down
+            // near the Epicenter — exactly where rescues point home
+            int ax = cx2 + (int)(ca*66.0f), ay = cy2 + (int)(sa*66.0f);
+            int tx = ax + (int)(ca*13), ty = ay + (int)(sa*13);
+            int bx = ax - (int)(ca*7), by = ay - (int)(sa*7);
+            int px = (int)(-sa*9), py = (int)(ca*9);
+            tri_fill(tx, ty, bx+px, by+py, bx-px, by-py, COL(30,26,44));
+            int t2x = ax + (int)(ca*10), t2y = ay + (int)(sa*10);
+            int b2x = ax - (int)(ca*5), b2y = ay - (int)(sa*5);
+            int qx = (int)(-sa*6), qy = (int)(ca*6);
+            tri_fill(t2x, t2y, b2x+qx, b2y+qy, b2x-qx, b2y-qy, COL(255,70,60));
+            char b[40]; char *s=b; s=sappend(s, dp->name); s=sappend(s, " DOWN - ");
+            s=sapp_int(s, (int)(d/50)); s=sappend(s, "M"); *s=0;
+            draw_text_center(ax, ay+17, b, 1, COL(255,150,140));
+        }
+        break;
+      } }
+    // WALL button (both touch schemes): throws down 3 carcasses as a wall.
+    // It pulses once you're carrying enough to build one.
+    if (mobile_ui() && !pad_mode()){
+        int pulse = (me->stack_n>=3) && (fsin(G.anim_t*4.0f)>0.0f);
+        tbtn_base(TP_WALL_CX, TP_WALL_CY, 24, pulse? COL(158,128,54) : COL(62,56,86));
+        u32 br = COL(232,186,108);   // little brick wall glyph
+        rect_fill(TP_WALL_CX-10, TP_WALL_CY-11, 9, 4, br); rect_fill(TP_WALL_CX+1, TP_WALL_CY-11, 9, 4, br);
+        rect_fill(TP_WALL_CX-10, TP_WALL_CY-6, 6, 4, br);  rect_fill(TP_WALL_CX-3, TP_WALL_CY-6, 6, 4, br);
+        rect_fill(TP_WALL_CX+4, TP_WALL_CY-6, 6, 4, br);
+        draw_text(TP_WALL_CX-text_w("WALL",1)/2, TP_WALL_CY+4, "WALL", 1, COL(255,244,200));
+    }
+    // drag scheme still needs a weapon cycler (stick mode draws its own below)
+    if (G.touch_ctl==0 && mobile_ui()){
+        tbtn_base(TP_WPN_CX, TP_WPN_CY, 18, COL(66,60,96));
+        draw_text(TP_WPN_CX-text_w("WPN",1)/2, TP_WPN_CY-4, "WPN", 1, COL(225,230,245));
+    }
+    // stick controls (touch scheme 1): floating joystick + fixed buttons
+    if (G.touch_ctl==1 && mobile_ui()){
+        tbtn_base(TP_FIRE_CX, TP_FIRE_CY, 34, (IN.tp_held&32)? COL(224,88,62):COL(158,54,46));
+        { u32 lc = COL(255,240,230); int gy = TP_FIRE_CY-6;   // crosshair glyph
+          rect_fill(TP_FIRE_CX-1, gy-10, 3, 6, lc); rect_fill(TP_FIRE_CX-1, gy+5, 3, 6, lc);
+          rect_fill(TP_FIRE_CX-10, gy-1, 6, 3, lc); rect_fill(TP_FIRE_CX+5, gy-1, 6, 3, lc);
+          disc_fill(TP_FIRE_CX, gy, 2, lc); }
+        draw_text(TP_FIRE_CX-text_w("FIRE",1)/2, TP_FIRE_CY+14, "FIRE", 1, COL(255,240,230));
+        tbtn_base(TP_ACT_CX, TP_ACT_CY, 22, COL(56,92,62));
+        { u32 lc = COL(230,255,235); int gy = TP_ACT_CY-3;    // up-arrow glyph
+          tri_fill(TP_ACT_CX, gy-8, TP_ACT_CX-6, gy+1, TP_ACT_CX+6, gy+1, lc);
+          rect_fill(TP_ACT_CX-2, gy+1, 5, 5, lc); }
+        draw_text(TP_ACT_CX-text_w("USE",1)/2, TP_ACT_CY+9, "USE", 1, COL(230,255,235));
+        tbtn_base(TP_WPN_CX, TP_WPN_CY, 18, COL(66,60,96));
+        draw_text(TP_WPN_CX-text_w("WPN",1)/2, TP_WPN_CY-4, "WPN", 1, COL(225,230,245));
+        if (IN.joy_on){
+            circle_out(IN.joy_ax, IN.joy_ay, 42, COL(34,31,52));
+            circle_shade(IN.joy_ax, IN.joy_ay, 39, COL(40,36,58));
+            disc_fill(IN.joy_ax, IN.joy_ay, 25, COL(30,27,46));
+            circle_out(IN.joy_kx, IN.joy_ky, 17, COL(198,204,220));
+            circle_shade(IN.joy_kx, IN.joy_ky, 14, COL(198,204,220));
+            disc_fill(IN.joy_kx-5, IN.joy_ky-5, 4, COL(244,246,250));
+        } else {
+            // faint home base so players know where the stick lives
+            disc_fill(TP_DPAD_CX, TP_DPAD_CY, 42, COL(24,22,38));
+            circle_out(TP_DPAD_CX, TP_DPAD_CY, 15, COL(52,48,72));
+        }
+    }
+    // damage vignette
+    if (me->hurt_t>0){
+        rect_fill(0,0,VW,3,COL(230,60,60)); rect_fill(0,VH-3,VW,3,COL(230,60,60));
+        rect_fill(0,0,3,VH,COL(230,60,60)); rect_fill(VW-3,0,3,VH,COL(230,60,60));
+    }
+}
+// store layout shared by render + input — rows are tall and the text is
+// double-size so phone fingers can hit them
+#define STORE_X 70
+#define STORE_Y 4
+#define STORE_W 500
+#define STORE_H 352
+#define STORE_ROW0 54
+#define STORE_ROWH 18
+#define STORE_UPGOFF 18
+#define STORE_ROWS 13
+static int store_item_price(int sel, Player *p, int *owned_out){
+    // sel: 0..4 weapons, 5..12 upgrades; returns price or -1 (owned/maxed)
+    *owned_out=0;
+    if (sel<5){
+        if (p->owned[sel]>=MAXCOPIES){ *owned_out=1; return -1; }
+        // stacking escalates: every copy costs more than the one before
+        // (copy N costs N x the base price; the free starter keyboard
+        // escalates from a 10 KG unit so its stack isn't free either)
+        int unit = WEAPON_PRICE[sel]? WEAPON_PRICE[sel] : 10;
+        return unit * (p->owned[sel]+1);
+    }
+    int u=sel-5;
+    if (u==5){ return UPG_PRICE[5][0]; }                  // rollback: always buyable
+    if (u==7){ return UPG_PRICE[7][0]; }                  // THE BACKFIRE BEAN: always buyable, never cheap
+    if (u==6){                                            // hotfix: heal, unless full
+        if (p->hp>=p->maxhp){ *owned_out=1; return -1; }
+        return UPG_PRICE[6][0];
+    }
+    if (p->upg[u]>=UPG_MAXLV[u]){ *owned_out=1; return -1; }
+    return upg_price(u, p->upg[u]);
+}
+static const char *store_item_name(int sel){
+    return sel<5? WEAPON_NAME[sel] : UPG_NAME[sel-5];
+}
+static const char *store_item_blurb(int sel, Player *p){
+    if (sel<5){
+        static char bb[96];
+        if (p->owned[sel]>=MAXCOPIES){ char *q=bb; q=sappend(q, "FULLY STACKED - MAXIMUM FAN!"); *q=0; return bb; }
+        if (p->owned[sel]>0){
+            int ow2; int nx = store_item_price(sel, p, &ow2);
+            char *q=bb; q=sappend(q, "STACKED X"); q=sapp_int(q, p->owned[sel]);
+            q=sappend(q, sel==4? " - BEAMS RING OUT - NEXT COPY " : " - SHOTS FAN OUT - NEXT COPY ");
+            q=sapp_int(q, nx); q=sappend(q, " KG");
+            *q=0; return bb;
+        }
+        return WEAPON_BLURB[sel];
+    }
+    switch (sel-5){
+        case 0: return "All weapons hit 25% harder per level.";
+        case 1: return "All weapons fire 18% faster per level.";
+        case 2: return "A firewall bubble eats damage. Regenerates.";
+        case 3: return "+25 max HP per level. Comfy AND protective.";
+        case 4: return "Heavy hats slow you less per level. A bit quicker bare, too.";
+        case 5: return "Death? Rolled back. Revive at half HP.";
+        case 7: return "Squeeze him: PBBBT - straight home to the Epicenter. (KEY 6 / TAP)";
+        default: return "A hotfix, applied directly to you. +50 HP.";
+    }
+}
+// the Bug Bounty panel for whoever is shopping (G.store_pi). Solo it
+// covers the screen over a dim; in split-screen co-op it squeezes into
+// the shopper's half (ui_compact) with the living world — shield and
+// all — still visible around it.
+static void draw_store_panel(void){
+    Player *me=&G.p[G.store_pi];
+    int sel = (G.p2_slot>=0 && G.store_pi==G.p2_slot)? G.store_sel2 : G.store_sel;
+    int y=STORE_Y, h=STORE_H;
+    int w = G.ui_compact? 308 : STORE_W;
+    int x = G.ui_compact? G.view_x0 + (G.view_w - w)/2 : STORE_X;
+    if (!G.ui_compact) rect_fill(0, 0, VW, VH, COL(16,14,28));   // dim (solid, drawn as overlay panels)
+    else rect_fill(G.view_x0, G.view_y0, G.view_w, G.view_h>0? G.view_h : VH, COL(16,14,28));   // split: dim the shopper's whole half, so no world (or bug) peeks around the panel
+    rect_fill(x, y+1, w+8, h+8, COL(8,6,14));            // drop shadow
+    rect_fill(x-4, y-4, w+8, h+8, OUTLINE);
+    rect_fill(x, y, w, h, COL(250,244,225));
+    rect_line(x+3, y+3, w-6, h-6, COL(198,164,84));      // gold inner trim
+    rect_fill(x, y, w, 32, COL(74,36,34));               // title band
+    rect_fill(x, y+31, w, 2, COL(198,164,84));
+    draw_text_center(x+w/2, y+3, "THE BUG BOUNTY", 2, COL(255,226,150));
+    { char b[56]; char *q=b;
+      q=sappend(q, "ON YOUR HEAD: "); q=sapp_int(q, (int)me->carried); q=sappend(q, " KG");
+      if (!G.ui_compact){ q=sappend(q, "  ("); q=sappend(q, hat_tier_name(me->stack_n, me->carried)); q=sappend(q, ")"); }
+      draw_text_center(x+w/2, y+20, b, 1, COL(255,240,205)); }
+    rect_fill(x+14, STORE_ROW0-11, 6, 6, COL(190,60,40));
+    if (G.ui_compact){
+        draw_text(x+24, STORE_ROW0-13, "WEAPONS - STACK FOREVER", 1, COL(160,60,40));
+    } else {
+        draw_text(x+24, STORE_ROW0-16, "WEAPONS - STACK FOREVER", 2, COL(160,60,40));
+        rect_fill(x+308, STORE_ROW0-9, w-322, 2, COL(216,200,160));
+    }
+    if (!G.ui_compact)
+    { const char *sh = "SHIELD: UP";   // you're in here, so it's up — sits on the title band
+      draw_text(x+w-14-text_w(sh,1), y+8, sh, 1, COL(150,220,255)); }
+    rect_fill(x+14, STORE_ROW0+5*STORE_ROWH+5, 6, 6, COL(190,60,40));
+    if (G.ui_compact){
+        draw_text(x+24, STORE_ROW0+5*STORE_ROWH+3, "UPGRADES - STACK FOREVER", 1, COL(160,60,40));
+    } else {
+        draw_text(x+24, STORE_ROW0+5*STORE_ROWH, "UPGRADES - STACK FOREVER", 2, COL(160,60,40));
+        rect_fill(x+320, STORE_ROW0+5*STORE_ROWH+7, w-334, 2, COL(216,200,160));
+    }
+    for (int i=0;i<STORE_ROWS;i++){
+        int ry = STORE_ROW0 + (i<5? i*STORE_ROWH : i*STORE_ROWH+STORE_UPGOFF);
+        int owned; int price = store_item_price(i, me, &owned);
+        if (i%2==0) rect_fill(x+8, ry-2, w-16, STORE_ROWH, COL(243,236,210));   // zebra
+        rect_line(x+8, ry-2, w-16, STORE_ROWH, COL(228,219,192));               // row card edge
+        if (i==sel){
+            rect_fill(x+8, ry-2, w-16, STORE_ROWH, COL(255,224,138));
+            rect_fill(x+8, ry-2, 3, STORE_ROWH, COL(190,60,40));                // selection tab
+            rect_line(x+8, ry-2, w-16, STORE_ROWH, COL(198,164,84));
+        }
+        rect_fill(x+30, ry+1, 16, 16, i==sel? COL(255,240,196) : COL(255,252,240));
+        rect_line(x+30, ry+1, 16, 16, COL(198,164,84));
+        draw_item_icon(i, x+38, ry+9);
+        if (G.ui_compact) draw_text(x+56, ry+5, store_item_name(i), 1, COL(40,36,50));
+        else draw_text(x+56, ry+2, store_item_name(i), 2, COL(40,36,50));
+        // stack count as plain text — X1, X2, X3... — not pips.
+        // Rollback shows tokens held.
+        { int cnt = -1;
+          if (i<5) cnt = me->owned[i];
+          else if (i-5==5) cnt = me->rollback;
+          else if (i==12) cnt = me->beans;
+          else if (i-5!=6) cnt = me->upg[i-5];
+          if (cnt>0){ char b[16]; char *q=b; *q++='X'; q=sapp_int(q, cnt); *q=0;
+              // the count lives in its own column LEFT of the icon
+              // (Daniel, Nov 5): one fixed place the eye learns,
+              // instead of at the end of names of random length
+              draw_text(x+28-text_w(b,1), ry+5, b, 1, COL(150,95,30)); } }
+        char b[16];
+        if (owned) scpy(b, i==11? "FULL HP" : "MAXED", 16);
+        else fmt_int(b, "", price, " KG");
+        u32 pc = owned? COL(120,150,110) : ((int)me->carried>=price? COL(150,95,30) : COL(186,128,116));
+        if (G.ui_compact) draw_text(x+w-14-text_w(b,1), ry+5, b, 1, pc);
+        else draw_text(x+w-14-text_w(b,2), ry+2, b, 2, pc);
+    }
+    // selected blurb + status
+    int by = y+h-40;
+    int bh = G.ui_compact? 24 : 20;
+    rect_fill(x+8, by-4, w-16, bh, COL(240,232,205));
+    rect_line(x+8, by-4, w-16, bh, COL(198,164,84));
+    rect_fill(x+8, by-4, 3, bh, COL(190,60,40));
+    if (G.ui_compact){
+        // narrow panel: wrap the blurb onto two lines at a word break
+        char bb[96]; scpy(bb, store_item_blurb(sel, me), 96);
+        int cut=-1; for (int i=0; bb[i] && i<34; i++) if (bb[i]==' ') cut=i;
+        if (cut>0 && bb[cut+1]){ bb[cut]=0;
+            draw_text(x+14, by+1, bb, 1, COL(80,66,44));
+            draw_text(x+14, by+12, bb+cut+1, 1, COL(80,66,44));
+        } else draw_text(x+14, by+2, bb, 1, COL(80,66,44));
+    }
+    else draw_text(x+14, by+2, store_item_blurb(sel, me), 1, COL(80,66,44));
+    if (pay_active) draw_text_center(x+w/2, y+h-13, "COUNTING CARCASSES...", 1, COL(190,60,40));
+    else if (G.store_msg_t>0) draw_text_center(x+w/2, y+h-13, G.store_msg, 1, COL(60,140,60));
+    else if (G.ui_compact) draw_text_center(x+w/2, y+h-13, "SHIELD UP - FIRE BUYS - BACK LEAVES", 1, COL(88,76,54));
+    else if (mobile_ui()) draw_text_center(x+w/2, y+h-13, "TAP A ROW - TAP AGAIN TO BUY - TAP OUTSIDE TO LEAVE", 1, COL(88,76,54));
+    else if (pad_mode()) draw_text_center(x+w/2, y+h-13, "STICK/DPAD CHOOSE - A BUYS - B LEAVES", 1, COL(88,76,54));
+    else { char b[80]; char *q=b; q=sappend(q, "ARROWS CHOOSE - "); q=sappend(q, key_name(G.bind[ACT_FIRE]));
+           q=sappend(q, " BUYS - "); q=sappend(q, key_name(G.bind[ACT_INTERACT])); q=sappend(q, " LEAVES");
+           draw_text_center(x+w/2, y+h-13, b, 1, COL(88,76,54)); }
+}
+static void render_store(void){
+    G.store_pi = G.my_id; G.ui_compact = 0;
+    render_world();
+    draw_active_panel();
+}
+
+// ---------------------------------------------------------------------------
+// Audio — a boppy chiptune sequencer + an sfx pattern player.
+// Everything funnels into plat_note(channel, midi, velocity, instrument).
+// Channels: 0 lead, 1 bass, 2 arp, 3 sfx. Instruments: 0 square, 1 triangle,
+// 2 soft square, 3 noise.
+// ---------------------------------------------------------------------------
+typedef struct { float delay; int ch, note, vel, instr; } NoteEv;
+static NoteEv evq[48]; static int evq_n=0;
+static void qnote(float delay, int ch, int note, int vel, int instr){
+    if (evq_n<48){ evq[evq_n].delay=delay; evq[evq_n].ch=ch; evq[evq_n].note=note;
+                   evq[evq_n].vel=vel; evq[evq_n].instr=instr; evq_n++; }
+}
+static void sfx(int id){
+    switch (id){
+    case 1: qnote(0,3,90,34,0); break;                       // keycap click
+    case 2: qnote(0,3,82,44,2); break;                       // mouse throw
+    case 3: qnote(0,3,57,64,2); qnote(0.07f,3,52,50,2); break; // quack!
+    case 4: qnote(0,3,48,58,1); break;                       // PM lob
+    case 5: qnote(0,3,40,72,3); break;                       // splat
+    case 6: qnote(0,3,66,22,2); break;                       // carcass lands on hat
+    case 7: qnote(0,3,34,92,3); qnote(0,3,46,64,1); break;  // PM explosion
+    case 8: qnote(0,3,97,30,0); break;                       // firewall ping
+    case 9: qnote(0,3,44,66,2); break;                       // hurt
+    case 10: qnote(0,3,88,36,0); break;                      // till: carcass counted
+    case 11: qnote(0,3,72,60,0); qnote(0.07f,3,76,60,0);     // purchase jingle
+             qnote(0.14f,3,79,60,0); qnote(0.21f,3,84,70,0); break;
+    case 12: qnote(0,3,60,60,0); qnote(0.06f,3,64,60,0);     // rollback arp
+             qnote(0.12f,3,67,60,0); qnote(0.18f,3,72,70,0); break;
+    case 13: qnote(0,3,64,70,2); qnote(0.12f,3,60,70,2);     // death slide
+             qnote(0.24f,3,55,70,2); qnote(0.36f,3,47,80,2); break;
+    case 14: qnote(0,3,99,13,0); break;                      // debugger tick
+    case 15: qnote(0,3,55,48,1); break;                      // wall throw
+    case 16: qnote(0,3,37,52,2); qnote(0.08f,3,37,52,2); break; // denied buzz
+    case 17: qnote(0,3,43,84,3); break;                      // wall crunch
+    case 18: qnote(0,3,67,60,2); qnote(0.16f,3,64,60,2);     // game over
+             qnote(0.32f,3,60,60,2); qnote(0.48f,3,55,60,2);
+             qnote(0.64f,3,48,70,2); break;
+    case 19: qnote(0,3,79,50,0); qnote(0.06f,3,84,50,0); break; // store bell
+    case 20: qnote(0,3,28,92,3); qnote(0,3,64,76,0);           // THE ZIP WAIL — loud ON PURPOSE (a warning you can
+             qnote(0.09f,3,69,80,0); qnote(0.10f,3,34,84,3);   //  feel), levelled Nov 6 to sit with the mix
+             qnote(0.18f,3,73,84,0); qnote(0.20f,3,38,88,3);
+             qnote(0.27f,3,76,88,0); qnote(0.30f,3,42,88,3); break;
+    case 21: qnote(0,3,24,84,3); qnote(0.05f,3,96,64,0);        // glitch burst: static + a note that should not exist
+             qnote(0.11f,3,30,78,3); qnote(0.16f,3,88,58,0); break;
+    case 22: // THE BACKFIRE — a dignified raspberry: chopped low notes
+             // tumbling down in pitch, with equally dignified puffs
+             qnote(0.00f,3,45,74,2); qnote(0.05f,3,43,74,2); qnote(0.10f,3,44,72,2);
+             qnote(0.15f,3,41,78,2); qnote(0.20f,3,39,78,3); qnote(0.20f,3,38,78,2);
+             qnote(0.26f,3,36,82,2); qnote(0.32f,3,33,82,3); qnote(0.32f,3,32,82,2);
+             qnote(0.39f,3,30,86,2); qnote(0.47f,3,28,88,3); qnote(0.47f,3,27,88,1); break;
+    case 23: qnote(0,3,50,60,2); qnote(0.09f,3,48,55,3);        // the bean, sputtering up: putt... putt...
+             qnote(0.18f,3,52,66,2); break;
+    }
+}
+// --- Beethoven ladder (public domain compositions, transcribed in) ---
+// GENERATED by /tmp/genmusic.py — edit there, not here.
+static const signed char M0_BASS[96] = {
+      37,  -1,  -1,  -1,  -1,  -1,  -1,  -1,  -1,  -1,  -1,  -1,  37,  -1,  -1,  -1,
+      -1,  -1,  -1,  -1,  -1,  -1,  -1,  -1,  33,  -1,  -1,  -1,  -1,  -1,  -1,  -1,
+      -1,  -1,  -1,  -1,  30,  -1,  -1,  -1,  -1,  -1,  -1,  -1,  -1,  -1,  -1,  -1,
+      37,  -1,  -1,  -1,  -1,  -1,  -1,  -1,  -1,  -1,  -1,  -1,  32,  -1,  -1,  -1,
+      -1,  -1,  -1,  -1,  -1,  -1,  -1,  -1,  37,  -1,  -1,  -1,  -1,  -1,  -1,  -1,
+      -1,  -1,  -1,  -1,  32,  -1,  -1,  -1,  -1,  -1,  -1,  -1,  -1,  -1,  -1,  -1,
+};
+static const signed char M0_MID[96] = {
+      44,  49,  52,  44,  49,  52,  44,  49,  52,  44,  49,  52,  44,  49,  52,  44,
+      49,  52,  44,  49,  52,  44,  49,  52,  45,  49,  52,  45,  49,  52,  45,  49,
+      52,  45,  49,  52,  45,  49,  54,  45,  49,  54,  45,  49,  54,  45,  49,  54,
+      44,  49,  52,  44,  49,  52,  44,  49,  52,  44,  49,  52,  44,  48,  51,  44,
+      48,  51,  44,  48,  51,  44,  48,  51,  44,  49,  52,  44,  49,  52,  44,  49,
+      52,  44,  49,  52,  44,  48,  51,  44,  48,  51,  44,  48,  51,  44,  48,  51,
+};
+static const signed char M0_LEAD[96] = {
+      -1,  -1,  -1,  -1,  -1,  -1,  -1,  -1,  -1,  -1,  -1,  -1,  -1,  -1,  -1,  -1,
+      -1,  -1,  -1,  -1,  -1,  -1,  -1,  -1,  64,  -1,  -1,  -1,  -1,  -1,  -1,  -1,
+      -1,  -1,  -1,  -1,  66,  -1,  -1,  -1,  -1,  -1,  -1,  -1,  -1,  -1,  -1,  -1,
+      -1,  -1,  -1,  -1,  -1,  -1,  64,  -1,  -1,  -1,  -1,  -1,  63,  -1,  -1,  -1,
+      -1,  -1,  -1,  -1,  -1,  -1,  -1,  -1,  68,  -1,  -1,  -1,  -1,  -1,  -1,  -1,
+      -1,  -1,  -1,  -1,  -1,  -1,  -1,  -1,  -1,  -1,  66,  -1,  -1,  -1,  -1,  -1,
+};
+static const signed char M1_BASS[64] = {
+      45,  -1,  -1,  -1,  -1,  -1,  -1,  -1,  45,  -1,  -1,  -1,  -1,  -1,  -1,  -1,
+      40,  -1,  -1,  -1,  -1,  -1,  -1,  -1,  45,  -1,  -1,  -1,  -1,  -1,  -1,  -1,
+      45,  -1,  -1,  -1,  -1,  -1,  -1,  -1,  45,  -1,  -1,  -1,  -1,  -1,  -1,  -1,
+      40,  -1,  -1,  -1,  -1,  -1,  -1,  -1,  45,  -1,  -1,  -1,  -1,  -1,  -1,  -1,
+};
+static const signed char M1_MID[64] = {
+      57,  -1,  60,  -1,  64,  -1,  57,  -1,  57,  -1,  60,  -1,  64,  -1,  57,  -1,
+      52,  -1,  56,  -1,  59,  -1,  52,  -1,  57,  -1,  60,  -1,  64,  -1,  57,  -1,
+      57,  -1,  60,  -1,  64,  -1,  57,  -1,  57,  -1,  60,  -1,  64,  -1,  57,  -1,
+      52,  -1,  56,  -1,  59,  -1,  52,  -1,  57,  -1,  60,  -1,  64,  -1,  57,  -1,
+};
+static const signed char M1_LEAD[64] = {
+      76,  75,  76,  75,  76,  71,  74,  72,  69,  -1,  60,  64,  69,  -1,  -1,  -1,
+      71,  -1,  64,  68,  71,  -1,  -1,  -1,  72,  -1,  64,  76,  75,  -1,  -1,  -1,
+      76,  75,  76,  71,  74,  72,  -1,  -1,  69,  -1,  60,  64,  69,  -1,  -1,  -1,
+      71,  -1,  64,  72,  71,  -1,  -1,  -1,  69,  -1,  -1,  -1,  -1,  -1,  -1,  -1,
+};
+static const signed char M2_BASS[64] = {
+      48,  48,  48,  -1,  -1,  -1,  -1,  -1,  41,  41,  41,  -1,  -1,  -1,  -1,  -1,
+      48,  48,  48,  -1,  -1,  -1,  -1,  -1,  44,  44,  44,  -1,  -1,  -1,  -1,  -1,
+      48,  48,  48,  -1,  -1,  -1,  -1,  -1,  41,  41,  41,  -1,  -1,  -1,  -1,  -1,
+      39,  39,  39,  -1,  -1,  -1,  -1,  -1,  48,  48,  48,  -1,  -1,  -1,  -1,  -1,
+};
+static const signed char M2_MID[64] = {
+      55,  60,  63,  -1,  -1,  -1,  -1,  -1,  53,  57,  60,  -1,  -1,  -1,  -1,  -1,
+      55,  60,  63,  -1,  -1,  -1,  -1,  -1,  56,  60,  63,  -1,  -1,  -1,  -1,  -1,
+      55,  60,  63,  -1,  -1,  -1,  -1,  -1,  53,  57,  60,  -1,  -1,  -1,  -1,  -1,
+      51,  55,  58,  -1,  -1,  -1,  -1,  -1,  55,  60,  63,  -1,  -1,  -1,  -1,  -1,
+};
+static const signed char M2_LEAD[64] = {
+      67,  67,  67,  63,  -1,  -1,  -1,  -1,  65,  65,  65,  62,  -1,  -1,  -1,  -1,
+      67,  67,  67,  63,  -1,  -1,  68,  -1,  68,  68,  68,  65,  -1,  -1,  -1,  -1,
+      67,  67,  67,  63,  -1,  -1,  -1,  -1,  65,  65,  65,  62,  -1,  -1,  62,  -1,
+      63,  -1,  62,  -1,  60,  -1,  62,  -1,  63,  -1,  65,  -1,  67,  -1,  -1,  -1,
+};
+static const signed char M3_BASS[128] = {
+      37,  -1,  -1,  -1,  -1,  -1,  -1,  -1,  49,  -1,  -1,  -1,  -1,  -1,  -1,  -1,
+      37,  -1,  -1,  -1,  -1,  -1,  -1,  -1,  49,  -1,  -1,  -1,  -1,  -1,  -1,  -1,
+      30,  -1,  -1,  -1,  -1,  -1,  -1,  -1,  42,  -1,  -1,  -1,  -1,  -1,  -1,  -1,
+      37,  -1,  -1,  -1,  -1,  -1,  -1,  -1,  49,  -1,  -1,  -1,  -1,  -1,  -1,  -1,
+      33,  -1,  -1,  -1,  -1,  -1,  -1,  -1,  45,  -1,  -1,  -1,  -1,  -1,  -1,  -1,
+      32,  -1,  -1,  -1,  -1,  -1,  -1,  -1,  44,  -1,  -1,  -1,  -1,  -1,  -1,  -1,
+      37,  -1,  -1,  -1,  -1,  -1,  -1,  -1,  49,  -1,  -1,  -1,  -1,  -1,  -1,  -1,
+      32,  -1,  -1,  -1,  -1,  -1,  -1,  -1,  44,  -1,  -1,  -1,  -1,  -1,  -1,  -1,
+};
+static const signed char M3_MID[128] = {
+      49,  52,  56,  61,  56,  52,  49,  52,  56,  61,  56,  52,  49,  52,  56,  61,
+      49,  52,  56,  61,  56,  52,  49,  52,  56,  61,  56,  52,  49,  52,  56,  61,
+      42,  49,  54,  57,  54,  49,  42,  49,  54,  57,  54,  49,  42,  49,  54,  57,
+      49,  52,  56,  61,  56,  52,  49,  52,  56,  61,  56,  52,  49,  52,  56,  61,
+      45,  49,  52,  57,  52,  49,  45,  49,  52,  57,  52,  49,  45,  49,  52,  57,
+      44,  48,  51,  56,  51,  48,  44,  48,  51,  56,  51,  48,  44,  48,  51,  56,
+      49,  52,  56,  61,  56,  52,  49,  52,  56,  61,  56,  52,  49,  52,  56,  61,
+      44,  48,  51,  56,  51,  48,  44,  48,  51,  56,  51,  48,  44,  48,  51,  56,
+};
+static const signed char M3_LEAD[128] = {
+      -1,  -1,  -1,  73,  -1,  -1,  -1,  -1,  -1,  -1,  -1,  -1,  -1,  -1,  -1,  -1,
+      -1,  -1,  -1,  76,  -1,  -1,  -1,  -1,  -1,  -1,  -1,  -1,  -1,  -1,  -1,  -1,
+      -1,  -1,  -1,  73,  -1,  -1,  -1,  -1,  -1,  -1,  -1,  -1,  -1,  -1,  -1,  -1,
+      -1,  -1,  -1,  76,  -1,  -1,  -1,  -1,  -1,  -1,  -1,  -1,  -1,  -1,  -1,  -1,
+      -1,  -1,  -1,  76,  -1,  -1,  -1,  -1,  -1,  -1,  -1,  -1,  -1,  -1,  -1,  -1,
+      -1,  -1,  -1,  75,  -1,  -1,  -1,  -1,  -1,  -1,  -1,  -1,  -1,  -1,  -1,  -1,
+      -1,  -1,  -1,  73,  -1,  -1,  -1,  -1,  -1,  -1,  -1,  -1,  -1,  -1,  -1,  -1,
+      -1,  -1,  -1,  68,  -1,  -1,  -1,  -1,  -1,  -1,  -1,  -1,  -1,  -1,  -1,  -1,
+};
+
+// Sheep May Safely Graze — BWV 208 (Bach, public domain);
+// transcribed from the Mutopia/Breitkopf & Haertel 1881 score
+// by tools/genmusic_bach.py. 336 steps = 21 bars of 16ths.
+static const signed char M4_BASS[336] = {
+       46,   -1,   46,   -1,   46,   -1,   46,   -1,   46,   -1,   46,   -1,   46,   -1,   46,   -1,
+       46,   -1,   46,   -1,   46,   -1,   46,   -1,   46,   -1,   46,   -1,   46,   -1,   46,   -1,
+       58,   -1,   58,   -1,   57,   -1,   57,   -1,   55,   -1,   55,   -1,   53,   -1,   53,   -1,
+       51,   -1,   51,   -1,   53,   -1,   53,   -1,   55,   -1,   53,   51,   53,   -1,   41,   -1,
+       46,   -1,   46,   -1,   58,   -1,   58,   -1,   58,   -1,   58,   -1,   58,   -1,   58,   -1,
+       57,   -1,   57,   -1,   57,   -1,   57,   -1,   58,   -1,   58,   -1,   58,   -1,   58,   -1,
+       46,   -1,   46,   -1,   46,   -1,   46,   -1,   46,   -1,   46,   -1,   45,   -1,   46,   -1,
+       48,   -1,   48,   -1,   48,   -1,   48,   -1,   53,   -1,   53,   -1,   51,   -1,   51,   -1,
+       50,   -1,   50,   -1,   46,   -1,   46,   -1,   51,   -1,   51,   -1,   50,   -1,   50,   -1,
+       48,   -1,   48,   -1,   48,   -1,   48,   -1,   53,   -1,   53,   -1,   51,   -1,   51,   -1,
+       50,   -1,   50,   -1,   51,   -1,   51,   -1,   46,   -1,   46,   -1,   48,   -1,   48,   -1,
+       50,   -1,   50,   -1,   51,   -1,   51,   -1,   46,   -1,   46,   -1,   50,   -1,   50,   -1,
+       48,   -1,   48,   -1,   53,   -1,   53,   -1,   46,   -1,   48,   -1,   50,   -1,   51,   -1,
+       53,   -1,   53,   -1,   41,   -1,   41,   -1,   46,   -1,   46,   -1,   46,   -1,   46,   -1,
+       46,   -1,   46,   -1,   46,   -1,   46,   -1,   46,   -1,   46,   -1,   45,   -1,   45,   -1,
+       46,   -1,   46,   -1,   51,   -1,   51,   -1,   53,   -1,   53,   -1,   41,   -1,   41,   -1,
+       46,   -1,   46,   -1,   46,   -1,   46,   -1,   46,   -1,   46,   -1,   46,   -1,   46,   -1,
+       46,   -1,   46,   -1,   46,   -1,   46,   -1,   46,   -1,   46,   -1,   46,   -1,   46,   -1,
+       58,   -1,   58,   -1,   57,   -1,   57,   -1,   55,   -1,   55,   -1,   53,   -1,   53,   -1,
+       51,   -1,   51,   -1,   53,   -1,   53,   -1,   55,   -1,   53,   51,   53,   -1,   41,   -1,
+       46,   -1,   46,   -1,   58,   -1,   58,   -1,   57,   -1,   57,   -1,   58,   -1,   58,   -1,
+};
+static const signed char M4_MID[336] = {
+       74,   -1,   74,   70,   74,   -1,   74,   70,   74,   -1,   75,   -1,   75,   -1,   79,   -1,
+       72,   -1,   72,   69,   72,   -1,   72,   69,   72,   -1,   75,   -1,   72,   -1,   75,   -1,
+       74,   -1,   -1,   77,   74,   77,   75,   72,   74,   -1,   -1,   77,   74,   77,   75,   72,
+       74,   -1,   82,   86,   82,   74,   75,   77,   74,   -1,   82,   86,   82,   74,   75,   72,
+       74,   -1,   -1,   -1,   -1,   -1,   -1,   -1,   -1,   -1,   -1,   -1,   -1,   -1,   -1,   -1,
+       -1,   -1,   -1,   -1,   -1,   -1,   -1,   -1,   -1,   -1,   -1,   -1,   -1,   -1,   -1,   -1,
+       -1,   -1,   -1,   -1,   -1,   -1,   -1,   -1,   -1,   -1,   -1,   -1,   -1,   -1,   -1,   -1,
+       -1,   -1,   -1,   -1,   -1,   -1,   -1,   -1,   -1,   -1,   -1,   -1,   -1,   -1,   -1,   -1,
+       74,   -1,   74,   70,   74,   -1,   74,   70,   74,   -1,   75,   -1,   75,   -1,   79,   -1,
+       75,   -1,   75,   72,   75,   -1,   75,   72,   75,   -1,   77,   -1,   77,   -1,   81,   -1,
+       -1,   -1,   74,   77,   74,   77,   75,   72,   74,   -1,   -1,   -1,   -1,   -1,   -1,   -1,
+       -1,   -1,   74,   77,   74,   77,   75,   72,   74,   -1,   -1,   -1,   -1,   -1,   -1,   -1,
+       -1,   -1,   -1,   -1,   -1,   -1,   -1,   -1,   -1,   -1,   -1,   -1,   -1,   -1,   -1,   -1,
+       -1,   -1,   -1,   -1,   -1,   -1,   -1,   -1,   74,   -1,   74,   70,   74,   -1,   74,   70,
+       74,   -1,   75,   -1,   75,   -1,   79,   -1,   72,   -1,   72,   69,   72,   -1,   72,   69,
+       72,   -1,   74,   -1,   74,   -1,   75,   -1,   -1,   -1,   82,   86,   82,   74,   75,   72,
+       74,   -1,   74,   70,   74,   -1,   74,   70,   74,   -1,   75,   -1,   75,   -1,   79,   -1,
+       72,   -1,   72,   69,   72,   -1,   72,   69,   72,   -1,   75,   -1,   72,   -1,   75,   -1,
+       74,   -1,   -1,   77,   74,   77,   75,   72,   74,   -1,   -1,   77,   74,   77,   75,   72,
+       74,   -1,   82,   86,   82,   74,   75,   77,   74,   -1,   82,   86,   82,   74,   75,   72,
+       74,   -1,   -1,   -1,   -1,   -1,   -1,   -1,   -1,   -1,   -1,   -1,   -1,   -1,   -1,   -1,
+};
+static const signed char M4_LEAD[336] = {
+       77,   -1,   77,   74,   77,   -1,   77,   74,   77,   -1,   79,   -1,   79,   -1,   82,   -1,
+       75,   -1,   75,   72,   75,   -1,   75,   72,   75,   -1,   81,   -1,   81,   -1,   84,   -1,
+       82,   -1,   -1,   86,   82,   86,   84,   77,   82,   -1,   -1,   86,   82,   86,   84,   77,
+       82,   -1,   86,   89,   86,   82,   84,   81,   82,   -1,   86,   89,   86,   82,   84,   81,
+       70,   -1,   -1,   -1,   74,   -1,   72,   -1,   72,   -1,   -1,   -1,   -1,   -1,   74,   -1,
+       75,   -1,   -1,   -1,   79,   -1,   77,   -1,   74,   -1,   -1,   -1,   72,   -1,   70,   -1,
+       74,   -1,   70,   -1,   69,   -1,   67,   -1,   72,   -1,   -1,   -1,   -1,   -1,   74,   -1,
+       69,   -1,   -1,   -1,   67,   -1,   65,   -1,   65,   -1,   -1,   -1,   -1,   -1,   -1,   -1,
+       65,   -1,   77,   74,   68,   -1,   67,   74,   67,   -1,   79,   -1,   79,   -1,   69,   -1,
+       70,   -1,   79,   75,   74,   -1,   72,   75,   69,   -1,   81,   -1,   67,   -1,   65,   -1,
+       77,   -1,   82,   86,   79,   86,   77,   77,   77,   -1,   74,   -1,   72,   -1,   70,   -1,
+       77,   -1,   82,   86,   79,   86,   77,   77,   77,   -1,   74,   -1,   72,   -1,   70,   -1,
+       75,   -1,   -1,   -1,   -1,   -1,   77,   -1,   74,   -1,   72,   -1,   70,   -1,   72,   -1,
+       69,   -1,   -1,   -1,   -1,   -1,   70,   -1,   70,   -1,   77,   74,   77,   -1,   77,   74,
+       77,   -1,   79,   -1,   79,   -1,   82,   -1,   79,   -1,   75,   72,   74,   -1,   72,   72,
+       77,   -1,   82,   -1,   82,   -1,   79,   -1,   74,   -1,   86,   89,   86,   82,   72,   70,
+       70,   -1,   77,   74,   77,   -1,   77,   74,   77,   -1,   79,   -1,   79,   -1,   82,   -1,
+       75,   -1,   75,   72,   75,   -1,   75,   72,   75,   -1,   81,   -1,   81,   -1,   84,   -1,
+       82,   -1,   -1,   86,   82,   86,   84,   77,   82,   -1,   -1,   86,   82,   86,   84,   77,
+       82,   -1,   86,   89,   86,   82,   84,   81,   82,   -1,   86,   89,   86,   82,   84,   81,
+       74,   -1,   -1,   -1,   79,   -1,   -1,   -1,   78,   -1,   -1,   -1,   -1,   -1,   79,   -1,
+};
+
+typedef struct { const signed char *bass, *mid, *lead; int len; float step; int lv; } Piece;
+static const Piece PIECES[5] = {
+    { M0_BASS, M0_MID, M0_LEAD,  96, 0.205f, 55 },   // Moonlight Sonata I — serene
+    { M1_BASS, M1_MID, M1_LEAD,  64, 0.170f, 62 },   // Fur Elise — a story starts
+    { M2_BASS, M2_MID, M2_LEAD,  64, 0.145f, 80 },   // Symphony No. 5, I — fate knocks
+    { M3_BASS, M3_MID, M3_LEAD, 128, 0.078f, 68 },   // Moonlight Sonata III — the storm itself
+    { M4_BASS, M4_MID, M4_LEAD, 336, 0.135f, 60 },   // Sheep May Safely Graze — Banzai World (Nov 5)
+};
+// (threat_override is declared up by compute_threat, which honors it too)
+// Daniel's music rule: Beethoven, calm first, fiercer as THREAT climbs.
+// The menu always gets the Moonlight; a zen run never leaves it.
+static int mus_piece(void){
+    if (G.state==GS_MENU || G.state==GS_HELP || G.state==GS_SETTINGS || G.state==GS_SLOTS || G.state==GS_PAUSE) return 0;
+    // Banzai World has its own music (Daniel, Nov 5): Bach's Sheep May
+    // Safely Graze, pastoral for a pastoral place — it wins over the
+    // threat ladder and even over a zen run, but menus still open with
+    // the Moonlight.
+    if (G.state==GS_PLAY && G.bud[G.my_id].in_bw) return G.bud[G.my_id].bw_mode==2? 0 : G.bud[G.my_id].bw_mode==3? 1 : 4;
+    if (G.state==GS_PLAY && G.p2_slot>=0 && G.bud[G.p2_slot].in_bw) return G.bud[G.p2_slot].bw_mode==2? 0 : G.bud[G.p2_slot].bw_mode==3? 1 : 4;
+    if (G.zen_run) return 0;
+    float t = threat_override>=0? threat_override : G.threat;
+    if (t<2.0f) return 0;
+    if (t<3.5f) return 1;
+    if (t<6.0f) return 2;
+    return 3;
+}
+static float mus_step_t=0; static int mus_step=0;
+static void update_audio(float dt){
+    // sfx queue
+    for (int i=0;i<evq_n;i++){
+        evq[i].delay -= dt;
+        if (evq[i].delay<=0 && evq[i].note>=0){
+            plat_note(evq[i].ch, evq[i].note, evq[i].vel, evq[i].instr);
+            evq[i].note=-1;
+        }
+    }
+    int w=0; for (int i=0;i<evq_n;i++) if (evq[i].note>=0) evq[w++]=evq[i];
+    evq_n=w;
+    // music sequencer — the Beethoven ladder (see mus_piece): serene
+    // while the run is calm, fiercer as the threat climbs
+    mus_step_t -= dt;
+    if (mus_step_t<=0){
+        int pc = mus_piece();
+        const Piece *P = &PIECES[pc];
+        mus_step_t += P->step;
+        if (mus_step_t < -P->step) mus_step_t = 0;      // long stall: resync, don't machine-gun
+        int s = mus_step % P->len;
+        int menu = (pc==0 && G.state!=GS_PLAY && G.state!=GS_STORE);
+        int kz = (G.whale_on & 16384)? 4 : -1;   // WHALES ONLY: KAZOO MODE
+        int b = P->bass[s]; if (b>=0) plat_note(1, b, menu? 60 : 78, kz>=0? 4 : 1);
+        int m = P->mid[s];  if (m>=0) plat_note(2, m, menu? 40 : (pc==0? 56 : 32), kz>=0? 4 : 2);
+        int l = P->lead[s]; if (l>=0) plat_note(0, l, menu? (P->lv*3)/4 : P->lv, kz>=0? 4 : 0);
+        if ((pc==2 || pc==3) && s%4==0 && !menu) plat_note(2, 42, 8, 3);   // a heartbeat under the storm
+        mus_step++;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Ed25519 verification (Whales Only unlock codes) — SHA-512 + radix-51
+// field arithmetic + extended-coordinate point math, no libc. Proven
+// against Node's crypto on 481 vectors (valid, tampered, wrong-key,
+// RFC 8032) before it was pasted in here. Verification only: the game
+// holds the PUBLIC key; the signing key lives with the code issuer.
+// ---------------------------------------------------------------------------
+typedef unsigned __int128 u128;
+#define M51 0x7FFFFFFFFFFFFULL
+
+// ---------------- SHA-512 ----------------
+typedef struct { u64 h[8]; u64 len; u8 buf[128]; int n; } sha512_ctx;
+static const u64 K512[80] = {
+0x428a2f98d728ae22ULL,0x7137449123ef65cdULL,0xb5c0fbcfec4d3b2fULL,0xe9b5dba58189dbbcULL,0x3956c25bf348b538ULL,0x59f111f1b605d019ULL,0x923f82a4af194f9bULL,0xab1c5ed5da6d8118ULL,
+0xd807aa98a3030242ULL,0x12835b0145706fbeULL,0x243185be4ee4b28cULL,0x550c7dc3d5ffb4e2ULL,0x72be5d74f27b896fULL,0x80deb1fe3b1696b1ULL,0x9bdc06a725c71235ULL,0xc19bf174cf692694ULL,
+0xe49b69c19ef14ad2ULL,0xefbe4786384f25e3ULL,0x0fc19dc68b8cd5b5ULL,0x240ca1cc77ac9c65ULL,0x2de92c6f592b0275ULL,0x4a7484aa6ea6e483ULL,0x5cb0a9dcbd41fbd4ULL,0x76f988da831153b5ULL,
+0x983e5152ee66dfabULL,0xa831c66d2db43210ULL,0xb00327c898fb213fULL,0xbf597fc7beef0ee4ULL,0xc6e00bf33da88fc2ULL,0xd5a79147930aa725ULL,0x06ca6351e003826fULL,0x142929670a0e6e70ULL,
+0x27b70a8546d22ffcULL,0x2e1b21385c26c926ULL,0x4d2c6dfc5ac42aedULL,0x53380d139d95b3dfULL,0x650a73548baf63deULL,0x766a0abb3c77b2a8ULL,0x81c2c92e47edaee6ULL,0x92722c851482353bULL,
+0xa2bfe8a14cf10364ULL,0xa81a664bbc423001ULL,0xc24b8b70d0f89791ULL,0xc76c51a30654be30ULL,0xd192e819d6ef5218ULL,0xd69906245565a910ULL,0xf40e35855771202aULL,0x106aa07032bbd1b8ULL,
+0x19a4c116b8d2d0c8ULL,0x1e376c085141ab53ULL,0x2748774cdf8eeb99ULL,0x34b0bcb5e19b48a8ULL,0x391c0cb3c5c95a63ULL,0x4ed8aa4ae3418acbULL,0x5b9cca4f7763e373ULL,0x682e6ff3d6b2b8a3ULL,
+0x748f82ee5defb2fcULL,0x78a5636f43172f60ULL,0x84c87814a1f0ab72ULL,0x8cc702081a6439ecULL,0x90befffa23631e28ULL,0xa4506cebde82bde9ULL,0xbef9a3f7b2c67915ULL,0xc67178f2e372532bULL,
+0xca273eceea26619cULL,0xd186b8c721c0c207ULL,0xeada7dd6cde0eb1eULL,0xf57d4f7fee6ed178ULL,0x06f067aa72176fbaULL,0x0a637dc5a2c898a6ULL,0x113f9804bef90daeULL,0x1b710b35131c471bULL,
+0x28db77f523047d84ULL,0x32caab7b40c72493ULL,0x3c9ebe0a15c9bebcULL,0x431d67c49c100d4cULL,0x4cc5d4becb3e42b6ULL,0x597f299cfc657e2aULL,0x5fcb6fab3ad6faecULL,0x6c44198c4a475817ULL
+};
+#define R64(x,n) (((x)>>(n)) | ((x)<<(64-(n))))
+static void sha512_block(sha512_ctx *c, const u8 *p){
+    u64 w[80];
+    for (int i=0;i<16;i++){ w[i]=0; for (int j=0;j<8;j++) w[i]=(w[i]<<8)|p[i*8+j]; }
+    for (int i=16;i<80;i++){ u64 s0=R64(w[i-15],1)^R64(w[i-15],8)^(w[i-15]>>7); u64 s1=R64(w[i-2],19)^R64(w[i-2],61)^(w[i-2]>>6); w[i]=w[i-16]+s0+w[i-7]+s1; }
+    u64 a=c->h[0],b=c->h[1],d=c->h[3],e=c->h[4],f=c->h[5],g=c->h[6],h=c->h[7],cc=c->h[2];
+    for (int i=0;i<80;i++){
+        u64 S1=R64(e,14)^R64(e,18)^R64(e,41); u64 ch=(e&f)^(~e&g); u64 t1=h+S1+ch+K512[i]+w[i];
+        u64 S0=R64(a,28)^R64(a,34)^R64(a,39); u64 mj=(a&b)^(a&cc)^(b&cc); u64 t2=S0+mj;
+        h=g; g=f; f=e; e=d+t1; d=cc; cc=b; b=a; a=t1+t2;
+    }
+    c->h[0]+=a; c->h[1]+=b; c->h[2]+=cc; c->h[3]+=d; c->h[4]+=e; c->h[5]+=f; c->h[6]+=g; c->h[7]+=h;
+}
+static void sha512_init(sha512_ctx *c){
+    static const u64 H0[8]={0x6a09e667f3bcc908ULL,0xbb67ae8584caa73bULL,0x3c6ef372fe94f82bULL,0xa54ff53a5f1d36f1ULL,0x510e527fade682d1ULL,0x9b05688c2b3e6c1fULL,0x1f83d9abfb41bd6bULL,0x5be0cd19137e2179ULL};
+    for (int i=0;i<8;i++) c->h[i]=H0[i]; c->len=0; c->n=0;
+}
+static void sha512_update(sha512_ctx *c, const u8 *p, int n){
+    c->len += (u64)n;
+    while (n>0){ int take = 128 - c->n; if (take>n) take=n;
+        for (int i=0;i<take;i++) c->buf[c->n+i]=p[i];
+        c->n += take; p += take; n -= take;
+        if (c->n==128){ sha512_block(c, c->buf); c->n=0; } }
+}
+static void sha512_final(sha512_ctx *c, u8 *out){
+    u64 bits = c->len * 8;
+    u8 pad = 0x80; sha512_update(c, &pad, 1);   // note: len grows, bits saved
+    u8 z = 0; while (c->n != 112) sha512_update(c, &z, 1);
+    u8 lb[16]; for (int i=0;i<16;i++) lb[i]=0;
+    for (int i=0;i<8;i++) lb[15-i] = (u8)(bits >> (8*i));
+    // write length block manually (bypassing update's len accounting)
+    for (int i=0;i<16;i++) c->buf[c->n+i]=lb[i];
+    sha512_block(c, c->buf);
+    for (int i=0;i<8;i++) for (int j=0;j<8;j++) out[i*8+j] = (u8)(c->h[i] >> (56-8*j));
+}
+static void sha512(const u8 *p, int n, u8 *out){ sha512_ctx c; sha512_init(&c); sha512_update(&c, p, n); sha512_final(&c, out); }
+
+// ---------------- field arithmetic mod 2^255-19, radix 51 ----------------
+typedef u64 fe[5];
+static void fe_carry(u64 *h){
+    u64 c;
+    c=h[0]>>51; h[0]&=M51; h[1]+=c; c=h[1]>>51; h[1]&=M51; h[2]+=c;
+    c=h[2]>>51; h[2]&=M51; h[3]+=c; c=h[3]>>51; h[3]&=M51; h[4]+=c;
+    c=h[4]>>51; h[4]&=M51; h[0]+=c*19; c=h[0]>>51; h[0]&=M51; h[1]+=c;
+}
+static void fe_copy(fe o, const fe a){ for(int i=0;i<5;i++) o[i]=a[i]; }
+static void fe_0(fe o){ for(int i=0;i<5;i++) o[i]=0; }
+static void fe_1(fe o){ o[0]=1; o[1]=o[2]=o[3]=o[4]=0; }
+static void fe_add(fe o, const fe a, const fe b){ for(int i=0;i<5;i++) o[i]=a[i]+b[i]; }
+static void fe_sub(fe o, const fe a, const fe b){
+    // a + 2p - b, with 2p limbs below; keeps everything positive
+    static const u64 TP[5] = { 0xFFFFFFFFFFFDAULL, 0xFFFFFFFFFFFFEULL, 0xFFFFFFFFFFFFEULL, 0xFFFFFFFFFFFFEULL, 0xFFFFFFFFFFFFEULL };
+    for(int i=0;i<5;i++) o[i]=a[i]+TP[i]-b[i];
+}
+static void fe_neg(fe o, const fe a){
+    static const u64 TP[5] = { 0xFFFFFFFFFFFDAULL, 0xFFFFFFFFFFFFEULL, 0xFFFFFFFFFFFFEULL, 0xFFFFFFFFFFFFEULL, 0xFFFFFFFFFFFFEULL };
+    for(int i=0;i<5;i++) o[i]=TP[i]-a[i];
+}
+static void fe_mul(fe o, const fe a, const fe b){
+    u128 s0 = (u128)a[0]*b[0] + 19*((u128)a[1]*b[4] + (u128)a[2]*b[3] + (u128)a[3]*b[2] + (u128)a[4]*b[1]);
+    u128 s1 = (u128)a[0]*b[1] + (u128)a[1]*b[0] + 19*((u128)a[2]*b[4] + (u128)a[3]*b[3] + (u128)a[4]*b[2]);
+    u128 s2 = (u128)a[0]*b[2] + (u128)a[1]*b[1] + (u128)a[2]*b[0] + 19*((u128)a[3]*b[4] + (u128)a[4]*b[3]);
+    u128 s3 = (u128)a[0]*b[3] + (u128)a[1]*b[2] + (u128)a[2]*b[1] + (u128)a[3]*b[0] + 19*(u128)a[4]*b[4];
+    u128 s4 = (u128)a[0]*b[4] + (u128)a[1]*b[3] + (u128)a[2]*b[2] + (u128)a[3]*b[1] + (u128)a[4]*b[0];
+    u64 r[5];
+    r[0]=(u64)s0 & M51; s1 += (u64)(s0>>51);
+    r[1]=(u64)s1 & M51; s2 += (u64)(s1>>51);
+    r[2]=(u64)s2 & M51; s3 += (u64)(s2>>51);
+    r[3]=(u64)s3 & M51; s4 += (u64)(s3>>51);
+    r[4]=(u64)s4 & M51; u64 c = (u64)(s4>>51);
+    r[0] += c*19;
+    fe_carry(r);
+    for(int i=0;i<5;i++) o[i]=r[i];
+}
+static void fe_sq(fe o, const fe a){ fe_mul(o, a, a); }
+// fully reduce and pack to 32 bytes little-endian
+static void fe_tobytes(u8 *s, const fe a){
+    u64 h[5]; fe_copy(h, a);
+    // h = h mod p: carry, then subtract p if h >= p
+    fe_carry(h); fe_carry(h);
+    // compute h - p
+    u64 q0 = h[0] - (M51 - 18);          // p0 = 2^51-19 = M51-18
+    u64 q1 = h[1] - M51, q2 = h[2] - M51, q3 = h[3] - M51, q4 = h[4] - M51;
+    // borrow chain: if any subtraction underflowed, keep original
+    // (do it with signed checks via carry propagation on a copy)
+    u64 t[5]; fe_copy(t, h);
+    { u64 borrow = 0;
+      u64 p[5] = { M51-18, M51, M51, M51, M51 };
+      for (int i=0;i<5;i++){ u128 d = (u128)t[i] - p[i] - borrow; t[i] = (u64)d; borrow = (d >> 127) & 1; }
+      if (!borrow){ fe_copy(h, t); }
+    }
+    (void)q0;(void)q1;(void)q2;(void)q3;(void)q4;
+    // pack 51-bit limbs into bytes
+    u128 v0=h[0], v1=h[1], v2=h[2], v3=h[3], v4=h[4];
+    u64 w0 = (u64)v0 | ((u64)v1<<51);
+    // do it byte by byte from a 5-limb -> bit stream
+    { u64 limbs[5]; for(int i=0;i<5;i++) limbs[i]=h[i];
+      for (int i=0;i<32;i++){ int bit=i*8; int limb=bit/51; int off=bit%51;
+        u64 lo = limbs[limb] >> off; u64 hi = 0;
+        if (off>43 && limb<4) hi = limbs[limb+1] << (51-off);
+        s[i] = (u8)(lo | hi); } }
+    (void)w0; (void)v2; (void)v3; (void)v4;
+}
+static void fe_frombytes(fe o, const u8 *s){
+    // load 32 bytes as 5 radix-51 limbs (ref10-style shifts)
+    u64 t0=0,t1=0,t2=0,t3=0,t4=0;
+    for (int i=0;i<32;i++){
+        int bit=i*8, limb=bit/51, off=bit%51;
+        u64 v = s[i];
+        if (limb==0) t0 |= v<<off; else if (limb==1) t1 |= v<<off; else if (limb==2) t2 |= v<<off; else if (limb==3) t3 |= v<<off; else t4 |= v<<off;
+        if (off>43 && limb<4){ u64 hi = v >> (51-off); if (limb==0) t1|=hi; else if (limb==1) t2|=hi; else if (limb==2) t3|=hi; else t4|=hi; }
+    }
+    o[0]=t0&M51; o[1]=t1&M51; o[2]=t2&M51; o[3]=t3&M51; o[4]=t4&M51;
+}
+static int fe_iszero(const fe a){ u8 s[32]; fe_tobytes(s, a); u8 r=0; for(int i=0;i<32;i++) r|=s[i]; return r==0; }
+static int fe_eq(const fe a, const fe b){ fe d; fe_sub(d, a, b); fe_carry(d); return fe_iszero(d); }
+static int fe_lowbit(const fe a){ u8 s[32]; fe_tobytes(s, a); return s[0]&1; }
+// exponentiation by a 32-byte little-endian exponent (square & multiply)
+static void fe_pow(fe o, const fe a, const u8 *e){
+    fe r; fe_1(r); fe base; fe_copy(base, a);
+    for (int i=0;i<255;i++){
+        fe_sq(r, r);
+        int bit = (e[(254-i)/8] >> ((254-i)%8)) & 1;
+        if (bit){ fe t; fe_mul(t, r, base); fe_copy(r, t); }
+    }
+    fe_copy(o, r);
+}
+static void fe_inv(fe o, const fe a){
+    // a^(p-2), p-2 = 2^255 - 21
+    static const u8 E[32] = { 0xeb,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0x7f };
+    fe_pow(o, a, E);
+}
+// d = -121665/121666 mod p, computed once
+static fe ED_D, ED_D2, ED_I; static int ed_ready=0;
+static void fe_from_u32(fe o, u32 v){ fe_0(o); o[0]=v; }
+static void ed_init(void){
+    if (ed_ready) return; ed_ready=1;
+    fe a, b, ai;
+    fe_from_u32(a, 121665); fe_from_u32(b, 121666);
+    fe_inv(ai, b); fe_mul(a, a, ai); fe_neg(ED_D, a); fe_carry(ED_D);
+    fe_add(ED_D2, ED_D, ED_D); fe_carry(ED_D2);
+    // I = sqrt(-1) = 2^((p-1)/4)
+    static const u8 EI[32] = { 0xfb,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0x1f };
+    fe t; fe_from_u32(t, 2); fe_pow(ED_I, t, EI);
+}
+
+// ---------------- points: extended coordinates ----------------
+typedef struct { fe X, Y, Z, T; } point;
+static void pt_identity(point *o){ fe_0(o->X); fe_1(o->Y); fe_1(o->Z); fe_0(o->T); }
+static void pt_add(point *o, const point *p, const point *q){
+    fe A,B,C,D,E,F,G,H, t1,t2;
+    fe_sub(t1, p->Y, p->X); fe_sub(t2, q->Y, q->X); fe_mul(A, t1, t2);
+    fe_add(t1, p->Y, p->X); fe_add(t2, q->Y, q->X); fe_mul(B, t1, t2);
+    fe_mul(t1, p->T, q->T); fe_mul(C, t1, ED_D2);
+    fe_mul(t1, p->Z, q->Z); fe_add(D, t1, t1); fe_carry(D);
+    fe_sub(E, B, A); fe_sub(F, D, C); fe_add(G, D, C); fe_add(H, B, A);
+    fe_mul(o->X, E, F); fe_mul(o->Y, G, H); fe_mul(o->T, E, H); fe_mul(o->Z, F, G);
+}
+static void pt_dbl(point *o, const point *p){
+    fe A,B,C,D,E,F,G,H, t1;
+    fe_sq(A, p->X); fe_sq(B, p->Y); fe_sq(t1, p->Z); fe_add(C, t1, t1); fe_carry(C);
+    fe_neg(D, A); fe_carry(D);
+    fe_add(t1, p->X, p->Y); fe_sq(E, t1); fe_sub(E, E, A); fe_sub(E, E, B);
+    fe_add(G, D, B); fe_sub(F, G, C); fe_sub(H, D, B);
+    fe_mul(o->X, E, F); fe_mul(o->Y, G, H); fe_mul(o->T, E, H); fe_mul(o->Z, F, G);
+}
+static void pt_neg(point *o, const point *p){ fe_neg(o->X, p->X); fe_copy(o->Y, p->Y); fe_copy(o->Z, p->Z); fe_neg(o->T, p->T); }
+// decompress: returns 0 on failure
+static int pt_decode(point *o, const u8 *s){
+    fe y, y2, u, v, x, vx2, one, xx, vi;
+    fe_frombytes(y, s);
+    int sign = (s[31] >> 7) & 1;
+    fe_1(one);
+    fe_sq(y2, y);
+    fe_mul(v, y2, ED_D); fe_add(v, v, one); fe_carry(v);   // v = d*y^2 + 1
+    fe_sub(u, y2, one);                                    // u = y^2 - 1
+    fe_inv(vi, v); fe_mul(xx, u, vi);                      // xx = u/v
+    static const u8 EP[32] = { 0xfe,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0xff,0x0f };
+    fe_pow(x, xx, EP);                                     // x = xx^((p+3)/8)
+    fe_sq(vx2, x);
+    if (!fe_eq(vx2, xx)){
+        fe_mul(x, x, ED_I); fe_sq(vx2, x);
+        if (!fe_eq(vx2, xx)) return 0;
+    }
+    if (fe_lowbit(x) != sign){ fe_neg(x, x); fe_carry(x); }
+    fe_copy(o->X, x); fe_copy(o->Y, y); fe_1(o->Z); fe_mul(o->T, x, y);
+    return 1;
+}
+static void pt_encode(u8 *s, const point *p){
+    fe zi, x, y;
+    fe_inv(zi, p->Z); fe_mul(x, p->X, zi); fe_mul(y, p->Y, zi);
+    fe_tobytes(s, y); s[31] |= (u8)(fe_lowbit(x) << 7);
+}
+static void pt_scalarmult(point *o, const point *p, const u8 *k, int nbits){
+    point r, a; pt_identity(&r); a = *p;
+    for (int i=0;i<nbits;i++){
+        int bit = (k[i/8] >> (i%8)) & 1;
+        if (bit){ point t; pt_add(&t, &r, &a); r = t; }
+        if (i+1<nbits){ point t; pt_dbl(&t, &a); a = t; }
+    }
+    *o = r;
+}
+// verify: sig = R||S, pub = A. Returns 1 valid.
+static int tsg_ed25519_verify(const u8 *sig, const u8 *pub, const u8 *msg, int msglen){
+    ed_init();
+    // S < L check: L = 2^252 + 27742317777372353535851937790883648493
+    static const u8 L[32] = { 0xed,0xd3,0xf5,0x5c,0x1a,0x63,0x12,0x58,0xd6,0x9c,0xf7,0xa2,0xde,0xf9,0xde,0x14,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x10 };
+    const u8 *S = sig + 32;
+    int ge = 1; // is S >= L?
+    { int cmp = 0;
+      for (int i=31;i>=0;i--){ if (S[i]!=L[i]){ cmp = S[i]>L[i]? 1 : -1; break; } }
+      ge = (cmp>=0); }
+    if (ge) return 0;
+    point A, R, pB, pH;
+    if (!pt_decode(&A, pub)) return 0;
+    if (!pt_decode(&R, sig)) return 0;
+    // h = SHA512(R || A || M) as a 512-bit scalar
+    u8 h[64]; { sha512_ctx c; sha512_init(&c); sha512_update(&c, sig, 32); sha512_update(&c, pub, 32); sha512_update(&c, msg, msglen); sha512_final(&c, h); }
+    static const u8 BP[32] = { 0x58,0x66,0x66,0x66,0x66,0x66,0x66,0x66,0x66,0x66,0x66,0x66,0x66,0x66,0x66,0x66,0x66,0x66,0x66,0x66,0x66,0x66,0x66,0x66,0x66,0x66,0x66,0x66,0x66,0x66,0x66,0x66 };
+    point B; if (!pt_decode(&B, BP)) return 0;
+    pt_scalarmult(&pB, &B, S, 253);
+    pt_scalarmult(&pH, &A, h, 512);
+    point sum; pt_add(&sum, &R, &pH);
+    u8 e1[32], e2[32]; pt_encode(e1, &pB); pt_encode(e2, &sum);
+    u8 diff = 0; for (int i=0;i<32;i++) diff |= e1[i]^e2[i];
+    return diff==0;
+}
+
+// ---------------------------------------------------------------------------
+// Save / load — a small line-based text format in one block.
+// ---------------------------------------------------------------------------
+#define SAVE_CAP 65536
+static char savebuf[SAVE_CAP];
+static int parse_int(const char *s){ int v=0, neg=0; if (*s=='-'){ neg=1; s++; }
+    while (*s>='0'&&*s<='9'){ v=v*10+(*s-'0'); s++; } return neg?-v:v; }
+static float parse_flt(const char *s){ float v=0, f=0.1f; int neg=0;
+    if (*s=='-'){ neg=1; s++; }
+    while (*s>='0'&&*s<='9'){ v=v*10+(*s-'0'); s++; }
+    if (*s=='.'){ s++; while (*s>='0'&&*s<='9'){ v+=(*s-'0')*f; f*=0.1f; s++; } }
+    return neg?-v:v; }
+static char *put_int(char *p, int v){ return sapp_int(p, v); }
+static char *put_flt(char *p, float v){ // two decimals is plenty
+    int iv = (int)(v*100 + (v>=0? 0.5f : -0.5f));
+    p = sapp_int(p, iv/100); *p++='.'; int f = iv%100; if (f<0) f=-f;
+    *p++ = (char)('0'+f/10); *p++ = (char)('0'+f%10); *p=0; return p;
+}
+static char *put_key(char *p, const char *k){ p=sappend(p,k); *p++='='; *p=0; return p; }
+// weapon copy counts pack base-6 into one int (counts run 0..MAXCOPIES)
+static int pack_copies(Player *p){ int v=0,m=1; for (int w=0;w<NWEAP;w++){ v += p->owned[w]*m; m*=6; } return v; }
+static void unpack_copies(Player *p, int v){ for (int w=0;w<NWEAP;w++){ p->owned[w]=v%6; v/=6; } }
+static void unpack_owned_mask(Player *p, int v){ for (int w=0;w<NWEAP;w++) p->owned[w]=(v>>w)&1; }
+static char slotbuf[SAVE_CAP];
+static void refresh_has_save(void){ G.has_save = (G.slot_has[1]||G.slot_has[2]||G.slot_has[3])? 1:0; }
+static void do_save(void){
+    char *p = savebuf;
+    p = sappend(p, "TSG3\n");   // v3: weapon counts written raw (stacks are uncapped now); v2 was base-6 packed, v1 a bitmask — both still load
+    p = put_key(p, "rec_name"); p = sappend(p, G.rec_name); *p++='\n'; *p=0;
+    p = put_key(p, "rec_hat");  p = put_flt(p, G.rec_hat); *p++='\n'; *p=0;
+    p = put_key(p, "rec_kills"); p = put_int(p, G.rec_kills); *p++='\n'; *p=0;
+    p = put_key(p, "rec_bowl"); p = put_int(p, G.rec_bowl); *p++='\n'; *p=0;
+    p = put_key(p, "rec_time"); p = put_flt(p, G.rec_time); *p++='\n'; *p=0;
+    p = put_key(p, "my_name");  p = sappend(p, G.my_name); *p++='\n'; *p=0;
+    p = put_key(p, "bind");
+    for (int i=0;i<14;i++){ if (i){ *p++=','; *p=0; } p = put_int(p, G.bind[i]); }
+    *p++='\n'; *p=0;
+    p = put_key(p, "touchctl"); p = put_int(p, G.touch_ctl); *p++='\n'; *p=0;
+    p = put_key(p, "zen"); p = put_int(p, G.zen); *p++='\n'; *p=0;
+    p = put_key(p, "eddie"); p = put_int(p, G.eddie); *p++='\n'; *p=0;
+    p = put_key(p, "whale"); p = put_int(p, G.whale_own); *p++='\n'; *p=0;
+    p = put_key(p, "whaleon"); p = put_int(p, G.whale_on); *p++='\n'; *p=0;
+    p = put_key(p, "coop"); p = put_int(p, G.coop_pref); *p++='\n'; *p=0;
+    p = put_key(p, "diff"); p = put_int(p, G.difficulty); *p++='\n'; *p=0;
+    p = put_key(p, "slot"); p = put_int(p, G.slot); *p++='\n'; *p=0;
+    char *runstart = 0;
+    int run_live = G.state==GS_PLAY || G.state==GS_STORE || G.state==GS_PAUSE
+                || G.bud[G.my_id].in_bw || (G.p2_slot>=0 && G.bud[G.p2_slot].in_bw);
+    if (run_live){
+        runstart = p;
+        p = put_key(p, "run"); p = put_int(p, 1); *p++='\n'; *p=0;
+        p = put_key(p, "zrun"); p = put_int(p, G.zen_run); *p++='\n'; *p=0;
+        p = put_key(p, "drun"); p = put_int(p, G.diff_run); *p++='\n'; *p=0;
+        p = put_key(p, "time"); p = put_flt(p, G.time); *p++='\n'; *p=0;
+        p = put_key(p, "tkills"); p = put_int(p, G.total_kills); *p++='\n'; *p=0;
+        p = put_key(p, "tearned"); p = put_flt(p, G.total_earned); *p++='\n'; *p=0;
+        for (int i=0;i<MAXP;i++) if (G.p[i].connected){
+            Player *pl=&G.p[i];
+            p = put_key(p, "pl"); *p++=' '; *p=0;
+            p = put_int(p, i); *p++=' '; *p=0;
+            p = sappend(p, pl->name); *p++=' '; *p=0;
+            p = put_flt(p, pl->x); *p++=' '; *p=0;
+            p = put_flt(p, pl->y); *p++=' '; *p=0;
+            p = put_int(p, pl->hp); *p++=' '; *p=0;
+            p = put_int(p, pl->alive); *p++=' '; *p=0;
+            p = put_int(p, pl->weapon); *p++=' '; *p=0;
+            for (int w=0;w<NWEAP;w++){ p = put_int(p, pl->owned[w]); *p++=' '; *p=0; }
+            for (int u=0;u<5;u++){ p = put_int(p, pl->upg[u]); *p++=' '; *p=0; }
+            p = put_int(p, pl->rollback); *p++=' '; *p=0;
+            p = put_int(p, pl->kills); *p++=' '; *p=0;
+            p = put_flt(p, pl->heaviest); *p++=' '; *p=0;
+            p = put_int(p, pl->color); *p++=' '; *p=0;
+            // the WHOLE hat saves: this cap used to be 200, so any
+            // hat taller than 200 carcasses silently lost the rest
+            // on save/Continue (Daniel's vanishing hat, Nov 10).
+            // SAVE_CAP grew to fit a full 420-stack per player.
+            int sn = pl->stack_n>MAXSTACK? MAXSTACK : pl->stack_n;
+            p = put_int(p, sn); *p++=':'; *p=0;
+            for (int s2=0;s2<sn;s2++){ p = put_int(p, (int)(pl->stack[s2]*2)); if (s2<sn-1){ *p++=','; *p=0; } }
+            // mall-era extras, key= tokens after the stack (old saves
+            // simply don't have them; the loader treats them as optional)
+            if (pl->banked>0 || pl->hatstand || pl->in_mall || G.bud[i].active || pl->whale_own || pl->beans>0){
+                Buddy *bd=&G.bud[i];
+                *p++=' '; *p=0; p = put_key(p, "bk"); p = put_int(p, (int)(pl->banked*2));
+                *p++=' '; *p=0; p = put_key(p, "hs"); p = put_int(p, pl->hatstand);
+                *p++=' '; *p=0; p = put_key(p, "ml"); p = put_int(p, pl->in_mall);
+                *p++=' '; *p=0; p = put_key(p, "ar"); p = put_int(p, pl->in_arcade);
+                *p++=' '; *p=0; p = put_key(p, "wo"); p = put_int(p, pl->whale_own);
+                *p++=' '; *p=0; p = put_key(p, "wn"); p = put_int(p, pl->whale_on);
+                *p++=' '; *p=0; p = put_key(p, "bb"); p = put_int(p, pl->beans);
+                if (bd->active){
+                    *p++=' '; *p=0; p = put_key(p, "bd"); p = put_int(p, bd->species+1);
+                    *p++=' '; *p=0; p = put_key(p, "bx"); p = put_int(p, bd->xp);
+                    *p++=' '; *p=0; p = put_key(p, "b1"); p = put_int(p, bd->up_hp);
+                    *p++=' '; *p=0; p = put_key(p, "b2"); p = put_int(p, bd->up_atk);
+                    *p++=' '; *p=0; p = put_key(p, "b3"); p = put_int(p, bd->up_def);
+                    *p++=' '; *p=0; p = put_key(p, "bs"); p = put_int(p, bd->skills);
+                    *p++=' '; *p=0; p = put_key(p, "be"); p = put_int(p, (int)bd->energy);
+                    *p++=' '; *p=0; p = put_key(p, "gx"); p = put_int(p, (int)bd->bw_x);
+                    *p++=' '; *p=0; p = put_key(p, "gy"); p = put_int(p, (int)bd->bw_y);
+                    *p++=' '; *p=0; p = put_key(p, "gz"); p = put_int(p, bd->bw_seed);
+                    *p++=' '; *p=0; p = put_key(p, "gf"); p = put_int(p, bd->bw_started);
+                    *p++=' '; *p=0; p = put_key(p, "bf"); p = put_int(p, bd->fainted);
+                    *p++=' '; *p=0; p = put_key(p, "bn"); p = put_int(p, bd->name_idx);
+                    *p++=' '; *p=0; p = put_key(p, "bc"); p = put_int(p, bd->color);
+                    *p++=' '; *p=0; p = put_key(p, "bnv"); p = put_int(p, 2);
+                    *p++=' '; *p=0; p = put_key(p, "sm"); p = put_int(p, bd->story_started);
+                    *p++=' '; *p=0; p = put_key(p, "sq"); p = put_int(p, bd->story_bits);
+                    *p++=' '; *p=0; p = put_key(p, "sq2"); p = put_int(p, bd->story_bits2);
+                    *p++=' '; *p=0; p = put_key(p, "er"); p = put_int(p, bd->ent_best + bd->ent_done*10000);
+                    *p++=' '; *p=0; p = put_key(p, "sb"); p = put_int(p, bd->ent_sub_best);
+                    *p++=' '; *p=0; p = put_key(p, "pd"); p = put_int(p, bd->plat_done);
+                    *p++=' '; *p=0; p = put_key(p, "td"); p = put_int(p, bd->tank_done);
+                    *p++=' '; *p=0; p = put_key(p, "cx"); p = put_int(p, (int)bd->craft_x);
+                    *p++=' '; *p=0; p = put_key(p, "cy"); p = put_int(p, (int)bd->craft_y);
+                    *p++=' '; *p=0; p = put_key(p, "cm"); p = put_int(p, bd->craft_wood + bd->craft_stone*1000 + bd->craft_fiber*1000000);
+                    *p++=' '; *p=0; p = put_key(p, "cn"); p = put_int(p, bd->craft_car + bd->craft_pies*1000 + bd->craft_stews*1000000);
+                    *p++=' '; *p=0; p = put_key(p, "cg"); p = put_int(p, bd->craft_gear);
+                    *p++=' '; *p=0; p = put_key(p, "si"); p = put_int(p, bd->items[0] + bd->items[1]*10 + bd->items[2]*100 + bd->items[3]*1000);
+                    *p++=' '; *p=0; p = put_key(p, "ct"); p = put_int(p, (int)(bd->craft_tod*10));
+                    *p++=' '; *p=0; p = put_key(p, "cf"); p = put_int(p, bd->craft_fish);
+                    if (bd->craft_bn>0){   // placed builds ride as one compound token: tx,ty,kind,hp;tx,ty,...
+                        *p++=' '; *p=0; p = put_key(p, "cw");
+                        for (int bi=0;bi<bd->craft_bn;bi++){
+                            if (bi) { *p++=';'; *p=0; }
+                            p = put_int(p, bd->craft_btx[bi]); *p++=','; *p=0;
+                            p = put_int(p, bd->craft_bty[bi]); *p++=','; *p=0;
+                            p = put_int(p, bd->craft_bk[bi]); *p++=','; *p=0;
+                            p = put_int(p, bd->craft_bhp[bi]);
+                        }
+                    }
+                    if (bd->craft_gn>0){   // mined-out node keys, ';'-joined
+                        *p++=' '; *p=0; p = put_key(p, "cd");
+                        for (int gi=0;gi<bd->craft_gn;gi++){
+                            if (gi) { *p++=';'; *p=0; }
+                            p = put_int(p, bd->craft_gone[gi]);
+                        }
+                    }
+                }
+            }
+            *p++='\n'; *p=0;
+        }
+        int wn=0; for (int i=0;i<MAXWALLS;i++) if (G.walls[i].alive==1) wn++;
+        p = put_key(p, "walls"); p = put_int(p, wn); *p++='\n'; *p=0;
+        for (int i=0;i<MAXWALLS && wn>0;i++) if (G.walls[i].alive==1){
+            Wall *w=&G.walls[i];
+            p = put_key(p, "wl"); *p++=' '; *p=0;
+            p = put_flt(p, w->x); *p++=' '; *p=0;
+            p = put_flt(p, w->y); *p++=' '; *p=0;
+            p = put_flt(p, w->hp); *p++=' '; *p=0;
+            p = put_flt(p, w->maxhp); *p++=' '; *p=0;
+            p = put_int(p, w->horiz); *p++=' '; *p=0;
+            p = put_int(p, w->stack>0? w->stack : 1); *p++='\n'; *p=0;
+        }
+    }
+    if (runstart){
+        // the run goes to its slot (with a one-line summary the slot
+        // picker can show); the global blob keeps records + settings.
+        char *q = slotbuf;
+        q = sappend(q, "TSG3\n");
+        q = put_key(q, "sum"); *q++=' '; *q=0;
+        q = sappend(q, G.p[0].name); *q++=' '; *q=0;
+        q = put_int(q, (int)G.p[0].heaviest); *q++=' '; *q=0;
+        q = put_int(q, G.total_kills); *q++=' '; *q=0;
+        q = put_int(q, (int)G.time); *q++=' '; *q=0;
+        q = put_int(q, G.zen_run); *q++=' '; *q=0;
+        // whose run is this, at a glance (Daniel): the buddy rides the
+        // summary too, so slots can be told apart in the picker.
+        if (G.bud[0].active){ q = put_int(q, G.bud[0].name_idx); *q++=' '; *q=0; q = put_int(q, G.bud[0].species); }
+        else { q = put_int(q, -1); *q++=' '; *q=0; q = put_int(q, -1); }
+        *q++='\n'; *q=0;
+        int rn = (int)(p - runstart);
+        for (int i=0;i<rn;i++) *q++ = runstart[i];
+        *q = 0;
+        if (G.slot<1 || G.slot>3) G.slot = 1;
+        plat_save_slot(G.slot, slotbuf, (int)(q - slotbuf));
+        G.slot_has[G.slot] = 1; refresh_has_save();
+        plat_save(savebuf, (int)(runstart - savebuf));
+    } else {
+        plat_save(savebuf, (int)(p - savebuf));
+    }
+}
+static const char *line_val(const char *buf, const char *key){
+    // returns pointer just past "key=" at a line start, or 0
+    int kl = slen(key);
+    const char *s = buf;
+    while (*s){
+        if (s[0]==key[0]){
+            int ok=1; for (int i=0;i<kl;i++) if (s[i]!=key[i]){ ok=0; break; }
+            if (ok && s[kl]=='=') return s+kl+1;
+        }
+        while (*s && *s!='\n') s++;
+        if (*s=='\n') s++;
+    }
+    return 0;
+}
+static void save_records(void){
+    // update all-time records from the current run, then persist
+    // everything. Zen runs don't set records: the hats are enormous.
+    if (!G.zen_run){
+        for (int i=0;i<MAXP;i++) if (G.p[i].connected){
+            if (G.p[i].heaviest > G.rec_hat){
+                G.rec_hat = G.p[i].heaviest;
+                scpy(G.rec_name, G.p[i].name, 13);
+            }
+        }
+        if (G.total_kills > G.rec_kills) G.rec_kills = G.total_kills;
+        if (G.time > G.rec_time) G.rec_time = G.time;
+    }
+    do_save();
+}
+
+// ---------------------------------------------------------------------------
+// Run setup + continue-from-save
+// ---------------------------------------------------------------------------
+static void player_fresh(Player *p, const char *name, int color, float x, float y){
+    int was_conn = p->connected;
+    smemset(p, 0, sizeof(*p));
+    p->connected = was_conn; p->alive = 1;
+    scpy(p->name, name[0]? name : "DEV", 13);
+    p->x=x; p->y=y; p->aim=-PI/2; p->cur_aim=-PI/2;
+    p->maxhp=100; p->hp=100; p->weapon=0; p->owned[0]=1;
+    p->dmg_mul=1; p->rate_mul=1; p->color=color;
+    p->on_wall=-1; p->station=-1;
+}
+static void reset_world(void){
+    smemset(G.bugs, 0, sizeof(G.bugs));
+    smemset(G.projs, 0, sizeof(G.projs));
+    smemset(G.walls, 0, sizeof(G.walls));
+    for (int i=0;i<MAXWALLS;i++){ G.walls[i].grp=-1; G.walls[i].grp_old=-1; grp_n[i]=0; grp_pool[i]=0; grp_cap[i]=0; grp_dsb[i]=0; }
+    smemset(G.parts, 0, sizeof(G.parts));
+    smemset(G.floats, 0, sizeof(G.floats));
+    smemset(G.fx, 0, sizeof(G.fx));
+    smemset(G.bud, 0, sizeof(G.bud));
+    smemset(G.bowl, 0, sizeof(G.bowl));
+    smemset(wall_build_n, 0, sizeof(wall_build_n));
+    G.time=0; G.total_kills=0; G.total_earned=0;
+    G.spawn_t=1; G.autosave_t=5; pay_active=0;
+    rng_seed(0xC0FFEEu ^ (u32)(plat_now()*1000));
+}
+// local co-op store sessions (0 = P1 browsing, 1 = P2 browsing)
+static int lstore[2];
+static int help_page=0;   // HOW TO PLAY flips to a second page for the mall & friends
+static int lstation[2];   // which mall station each shopper is browsing
+static void coop_reset_views(void){ lstore[0]=lstore[1]=0; lstation[0]=lstation[1]=0; }
+// local co-op: bring in player 2 (second controller, same machine).
+// The run still lives in ONE save slot — P2 is saved and restored as a
+// player line in the same blob, exactly like a LAN guest would be, and
+// claimed back by name on load. P2 drops in beside P1.
+static void coop_spawn_p2(float x, float y){
+    if (G.p2_slot>=0) return;
+    for (int i=1;i<MAXP;i++) if (!G.p[i].connected){
+        player_fresh(&G.p[i], "P2", 1, x, y);
+        G.p[i].connected=1;
+        G.p[i].whale_own=G.whale_own; G.p[i].whale_on=G.whale_on;
+        G.p2_slot=i;
+        return;
+    }
+}
+static void start_run(int net_mode){
+    G.edit_field = 0;   // a run never owns a menu text field (Nov 9)
+    reset_world();
+    for (int i=0;i<MAXP;i++){ G.p[i].connected=0; G.p[i].is_local=0; }
+    G.net_mode = net_mode; G.my_id = 0;
+    G.zen_run = G.zen;
+    G.diff_run = G.difficulty;
+    G.p2_slot=-1; coop_reset_views();
+    player_fresh(&G.p[0], G.my_name, 0, 0, 70);
+    G.p[0].connected=1; G.p[0].is_local=1;
+    G.p[0].whale_own=G.whale_own; G.p[0].whale_on=G.whale_on;
+    if (net_mode!=NET_CLIENT && G.coop_pref && IN.pad_count>=2) coop_spawn_p2(-30, 70);
+    G.camx=0; G.camy=40;
+    G.state=GS_PLAY;
+    if (net_mode!=NET_OFF){
+        if (plat_net_start(net_mode, G.join_ip)!=0 && net_mode==NET_CLIENT){
+            G.state=GS_MENU; scpy(G.store_msg, "COULD NOT CONNECT", 64);
+        }
+        if (net_mode==NET_CLIENT){ G.p[0].connected=0; G.p[0].is_local=0; G.my_id=-1; client_joined=0; }
+    }
+}
+static int load_records_and_check_save(void){
+    int n = plat_load(savebuf, SAVE_CAP-1);
+    if (n<=0) return 0;
+    savebuf[n]=0;
+    if (slen(savebuf)<4 || savebuf[0]!='T') return 0;
+    const char *v;
+    if ((v=line_val(savebuf,"rec_name"))) { int i=0; while (v[i] && v[i]!='\n' && i<12){ G.rec_name[i]=v[i]; i++; } G.rec_name[i]=0; }
+    if ((v=line_val(savebuf,"rec_hat"))) G.rec_hat=parse_flt(v);
+    if ((v=line_val(savebuf,"rec_kills"))) G.rec_kills=parse_int(v);
+    if ((v=line_val(savebuf,"rec_bowl"))) G.rec_bowl=parse_int(v);
+    if ((v=line_val(savebuf,"rec_time"))) G.rec_time=parse_flt(v);
+    if ((v=line_val(savebuf,"my_name"))) { int i=0; while (v[i] && v[i]!='\n' && i<12){ G.my_name[i]=v[i]; i++; } G.my_name[i]=0; }
+    if ((v=line_val(savebuf,"bind"))) { const char *q=v;
+        for (int i=0;i<14;i++){ int pk=parse_int(q); if (pk>=0 && pk<PK_COUNT) G.bind[i]=pk;
+            while (*q && *q!=',' && *q!='\n') q++; if (*q==',') q++; else break; } }
+    if ((v=line_val(savebuf,"touchctl"))) G.touch_ctl = parse_int(v)? 1:0;
+    if ((v=line_val(savebuf,"zen"))) G.zen = parse_int(v)? 1:0;
+    if ((v=line_val(savebuf,"eddie"))) G.eddie = parse_int(v)? 1:0;
+    if ((v=line_val(savebuf,"whale"))) G.whale_own = parse_int(v) & 32767;
+    if ((v=line_val(savebuf,"whaleon"))) G.whale_on = parse_int(v) & 32767;
+    if ((v=line_val(savebuf,"coop"))) G.coop_pref = parse_int(v)? 1:0;
+    if ((v=line_val(savebuf,"diff"))){ G.difficulty = parse_int(v); if (G.difficulty<0 || G.difficulty>3) G.difficulty=0; }
+    if ((v=line_val(savebuf,"slot"))){ G.slot = parse_int(v); if (G.slot<1 || G.slot>3) G.slot = 1; }
+    if ((v=line_val(savebuf,"run")) && parse_int(v)==1) return 1;
+    return 0;
+}
+static void continue_run(int slot){
+    int n = plat_load_slot(slot, savebuf, SAVE_CAP-1);
+    if (n<=0) return;
+    savebuf[n]=0;
+    G.slot = slot;
+    reset_world();
+    for (int i=0;i<MAXP;i++){ G.p[i].connected=0; G.p[i].is_local=0; }
+    G.net_mode=NET_OFF; G.my_id=0;
+    const char *v;
+    G.zen_run = G.zen;
+    if ((v=line_val(savebuf,"zrun"))) G.zen_run = parse_int(v)? 1:0;
+    G.diff_run = 0;   // saves from before difficulty existed were all EASY
+    if ((v=line_val(savebuf,"drun"))){ G.diff_run = parse_int(v); if (G.diff_run<0 || G.diff_run>3) G.diff_run=0; }
+    if ((v=line_val(savebuf,"time"))) G.time=parse_flt(v);
+    if ((v=line_val(savebuf,"tkills"))) G.total_kills=parse_int(v);
+    if ((v=line_val(savebuf,"tearned"))) G.total_earned=parse_flt(v);
+    // players: lines begin "pl= " ... find each occurrence
+    const char *s = savebuf;
+    while (*s){
+        if (s[0]=='p' && s[1]=='l' && s[2]=='=' && s[3]==' '){
+            const char *q = s+4;
+            int idx = parse_int(q); while (*q && *q!=' ') q++; q++;
+            char nm[13]; int ni=0; while (*q && *q!=' ' && ni<12){ nm[ni++]=*q++; } nm[ni]=0; q++;
+            if (idx>=0 && idx<MAXP){
+                Player *pl=&G.p[idx];
+                player_fresh(pl, nm, 0, 0, 70);
+                pl->connected=1; pl->is_local = (idx==0);
+                pl->x=parse_flt(q); while (*q && *q!=' ') q++; q++;
+                pl->y=parse_flt(q); while (*q && *q!=' ') q++; q++;
+                pl->hp=parse_int(q); while (*q && *q!=' ') q++; q++;
+                pl->alive=parse_int(q); while (*q && *q!=' ') q++; q++;
+                pl->weapon=parse_int(q); while (*q && *q!=' ') q++; q++;
+                if (savebuf[3]=='3'){                            // TSG3: raw copy counts
+                    for (int w=0;w<NWEAP;w++){ pl->owned[w]=parse_int(q); while (*q && *q!=' ') q++; q++; }
+                } else {
+                    int ow=parse_int(q); while (*q && *q!=' ') q++; q++;
+                    if (savebuf[3]=='1') unpack_owned_mask(pl, ow);   // TSG1 saves: bitmask
+                    else unpack_copies(pl, ow);                      // TSG2: copy counts
+                }
+                for (int u=0;u<5;u++){ pl->upg[u]=parse_int(q); while (*q && *q!=' ') q++; q++; }
+                pl->rollback=parse_int(q); while (*q && *q!=' ') q++; q++;
+                pl->kills=parse_int(q); while (*q && *q!=' ') q++; q++;
+                pl->heaviest=parse_flt(q); while (*q && *q!=' ') q++; q++;
+                pl->color=parse_int(q); while (*q && *q!=' ') q++; q++;
+                int sn=parse_int(q); while (*q && *q!=':') q++; q++;
+                pl->stack_n=0; pl->carried=0;
+                for (int s2=0;s2<sn;s2++){
+                    int w2=parse_int(q); hat_push(pl, w2*0.5f);
+                    // the last stack item is followed by a SPACE and the
+                    // key= token tail (bk/hs/ml/bd/...): the skip must
+                    // stop there too. It didn't — with any carcass on
+                    // your hat (sn>=1) this ran to the end of the line
+                    // (or the first comma inside cw=), devouring the
+                    // whole tail: buddy, banked kg, story, craft — all
+                    // lost on Continue while the slot list, which scans
+                    // the text, still showed them (Daniel, Nov 5).
+                    while (*q && *q!=',' && *q!=' ' && *q!='\n') q++; if (*q==',') q++;
+                }
+                // optional key= tokens (bank / hat stand / mall / buddy)
+                { int bsp=0, bxp=0, b1=0, b2=0, b3=0, bsk=0, bfn=0, bnm=-1, bcl=0, bnv=0, bwo=0, bwn=0, ben=100, bgx=0, bgy=56, bgz=0, ber=0, bgf=0;
+                  int bsm=0, bsq=0, bsi=0, bsq2=0, bsb=0, bpd=0, btd=0, bcx=0, bcy=0, bcm=0, bcn=0, bcg=0, bct=0, bcf=0;
+                  int tcw_bn=0, tcw_x[48], tcw_y[48], tcw_k[48], tcw_h[48];
+                  int tcd_gn=0, tcd_g[96];
+                  while (*q==' '){
+                      q++;
+                      char kk[4]; int ki=0;
+                      while (*q && *q!='=' && *q!=' ' && *q!='\n' && ki<3) kk[ki++]=*q++;
+                      kk[ki]=0;
+                      if (*q=='=') q++;
+                      if (kk[0]=='c' && kk[1]=='w' && kk[2]==0){   // compound build list: tx,ty,kind,hp;…
+                          while (*q && *q!=' ' && *q!='\n' && tcw_bn<48){
+                              tcw_x[tcw_bn]=parse_int(q); while (*q && *q!=',' && *q!=';' && *q!=' ' && *q!='\n') q++; if (*q==',') q++;
+                              tcw_y[tcw_bn]=parse_int(q); while (*q && *q!=',' && *q!=';' && *q!=' ' && *q!='\n') q++; if (*q==',') q++;
+                              tcw_k[tcw_bn]=parse_int(q); while (*q && *q!=',' && *q!=';' && *q!=' ' && *q!='\n') q++; if (*q==',') q++;
+                              tcw_h[tcw_bn]=parse_int(q); while (*q && *q!=';' && *q!=' ' && *q!='\n') q++; if (*q==';') q++;
+                              tcw_bn++;
+                          }
+                      } else if (kk[0]=='c' && kk[1]=='d' && kk[2]==0){   // compound mined-node list: key;key;…
+                          while (*q && *q!=' ' && *q!='\n' && tcd_gn<96){
+                              tcd_g[tcd_gn++]=parse_int(q); while (*q && *q!=';' && *q!=' ' && *q!='\n') q++; if (*q==';') q++;
+                          }
+                      }
+                      int vv=parse_int(q);
+                      if (kk[0]=='b' && kk[1]=='k' && kk[2]==0) pl->banked=vv*0.5f;
+                      else if (kk[0]=='b' && kk[1]=='b' && kk[2]==0) pl->beans=vv;
+                      else if (kk[0]=='h' && kk[1]=='s') pl->hatstand=vv?1:0;
+                      else if (kk[0]=='m' && kk[1]=='l') pl->in_mall=vv?1:0;
+                      else if (kk[0]=='a' && kk[1]=='r') pl->in_arcade=vv?1:0;
+                      else if (kk[0]=='w' && kk[1]=='o') bwo=vv&32767;
+                      else if (kk[0]=='w' && kk[1]=='n') bwn=vv&32767;
+                      else if (kk[0]=='b' && kk[1]=='d') bsp=vv;
+                      else if (kk[0]=='b' && kk[1]=='x') bxp=vv;
+                      else if (kk[0]=='b' && kk[1]=='1') b1=vv;
+                      else if (kk[0]=='b' && kk[1]=='2') b2=vv;
+                      else if (kk[0]=='b' && kk[1]=='3') b3=vv;
+                      else if (kk[0]=='b' && kk[1]=='s') bsk=vv;
+                      else if (kk[0]=='b' && kk[1]=='e') ben=vv;
+                      else if (kk[0]=='g' && kk[1]=='x') bgx=vv;
+                      else if (kk[0]=='g' && kk[1]=='y') bgy=vv;
+                      else if (kk[0]=='g' && kk[1]=='z') bgz=vv;
+                      else if (kk[0]=='g' && kk[1]=='f') bgf=vv;
+                      else if (kk[0]=='b' && kk[1]=='f') bfn=vv;
+                      else if (kk[0]=='b' && kk[1]=='n' && kk[2]=='v') bnv=vv;
+                      else if (kk[0]=='b' && kk[1]=='n') bnm=vv;
+                      else if (kk[0]=='b' && kk[1]=='c') bcl=vv;
+                      else if (kk[0]=='s' && kk[1]=='m') bsm=vv;
+                      else if (kk[0]=='s' && kk[1]=='q' && kk[2]=='2') bsq2=vv;
+                      else if (kk[0]=='e' && kk[1]=='r') ber=vv;
+                      else if (kk[0]=='s' && kk[1]=='b') bsb=vv;
+                      else if (kk[0]=='p' && kk[1]=='d') bpd=vv;
+                      else if (kk[0]=='t' && kk[1]=='d') btd=vv;
+                      else if (kk[0]=='c' && kk[1]=='x') bcx=vv;
+                      else if (kk[0]=='c' && kk[1]=='y') bcy=vv;
+                      else if (kk[0]=='c' && kk[1]=='m') bcm=vv;
+                      else if (kk[0]=='c' && kk[1]=='n') bcn=vv;
+                      else if (kk[0]=='c' && kk[1]=='g') bcg=vv;
+                      else if (kk[0]=='c' && kk[1]=='t') bct=vv;
+                      else if (kk[0]=='c' && kk[1]=='f') bcf=vv;
+                      else if (kk[0]=='s' && kk[1]=='q') bsq=vv;
+                      else if (kk[0]=='s' && kk[1]=='i') bsi=vv;
+                      while (*q && *q!=' ' && *q!='\n') q++;
+                  }
+                  pl->whale_own=bwo; pl->whale_on=bwn;
+                  if (bsp>0){
+                      Buddy *bd=&G.bud[idx];
+                      smemset(bd, 0, sizeof(*bd));
+                      bd->active=1; bd->species=(bsp-1)%BUDN; bd->xp=bxp; bd->on_wall=-1;
+                      bd->up_hp=b1; bd->up_atk=b2; bd->up_def=b3; bd->skills=bsk;
+                      bd->energy = ben<0? 0 : ben>100? 100 : ben;
+                      bd->bw_x = bgx; bd->bw_y = bgy; bd->bw_seed = bgz; bd->bw_started = bgf? 1:0;
+                      bd->fainted=bfn? 1:0;
+                      if (bnm<0) bd->name_idx = BUD_DEF_NAME[bd->species];
+                      else if (bnv>=2) bd->name_idx = bnm%BUD_NAMES_N;
+                      else {   // legacy save: the index names a slot in the OLD list — carry the name across
+                          bd->name_idx = BUD_DEF_NAME[bd->species];
+                          const char *want = BUD_ELF_LEGACY[bnm%20];
+                          for (int n2=0;n2<BUD_NAMES_N;n2++)
+                              if (scmp(BUD_ELF[n2], want)==0){ bd->name_idx=n2; break; }
+                      }
+                      bd->color = bcl%BUD_COLORS_N;
+                      bd->story_started = bsm? 1:0; bd->story_bits = bsq; bd->story_bits2 = bsq2;
+                      bd->ent_best = ber % 10000; bd->ent_done = ber / 10000;
+                      bd->ent_sub_best = bsb;
+                      bd->plat_done = bpd<0? 0 : bpd;
+                      bd->tank_done = btd<0? 0 : btd;
+                      bd->craft_x = bcx; bd->craft_y = bcy;
+                      bd->craft_wood = bcm % 1000; bd->craft_stone = (bcm/1000) % 1000; bd->craft_fiber = bcm / 1000000;
+                      bd->craft_car = bcn % 1000; bd->craft_pies = (bcn/1000) % 1000; bd->craft_stews = bcn / 1000000;
+                      bd->craft_gear = bcg;
+                      bd->craft_tod = bct * 0.1f; if (bd->craft_tod<0 || bd->craft_tod>240) bd->craft_tod = 40;
+                      bd->craft_fish = bcf;
+                      bd->craft_bn = tcw_bn;
+                      for (int bi=0;bi<tcw_bn;bi++){ bd->craft_btx[bi]=tcw_x[bi]; bd->craft_bty[bi]=tcw_y[bi]; bd->craft_bk[bi]=tcw_k[bi]; bd->craft_bhp[bi]=tcw_h[bi]; }
+                      bd->craft_gn = tcd_gn;
+                      for (int gi=0;gi<tcd_gn;gi++) bd->craft_gone[gi]=tcd_g[gi];
+                      { int pk=bsi; for (int i2=0;i2<4;i2++){ bd->items[i2]=pk%10; pk/=10; } }
+                      buddy_refresh(idx);
+                      bd->hp = bd->fainted? 0 : bd->maxhp;   // a fainted buddy loads still fainted
+                      bd->x=pl->x+26; bd->y=pl->y+12;
+                  }
+                }
+                pl->dmg_mul = 1.0f + 0.25f*pl->upg[0];
+                pl->rate_mul = 1.0f + 0.18f*pl->upg[1];
+                pl->shield_max = shield_for(pl->upg[2]);
+                pl->shield = pl->shield_max;
+                pl->maxhp = 100 + 25*pl->upg[3];
+            }
+        }
+        while (*s && *s!='\n') s++;
+        if (*s=='\n') s++;
+    }
+    s = savebuf;
+    while (*s){
+        if (s[0]=='w' && s[1]=='l' && s[2]=='=' && s[3]==' '){
+            const char *q=s+4;
+            for (int i=0;i<MAXWALLS;i++) if (!G.walls[i].alive){
+                Wall *w=&G.walls[i];
+                w->x=parse_flt(q); while (*q && *q!=' ') q++; q++;
+                w->y=parse_flt(q); while (*q && *q!=' ') q++; q++;
+                w->hp=parse_flt(q); while (*q && *q!=' ') q++; q++;
+                w->maxhp=parse_flt(q); while (*q && *q!=' ') q++; q++;
+                w->horiz=parse_int(q); while (*q && *q!=' ' && *q!='\n') q++; if (*q==' ') q++;
+                // stack count rides at the end of the line (Nov 7);
+                // older saves have nothing there — one wall, as saved
+                w->stack = (*q && *q!='\n')? parse_int(q) : 1;
+                if (w->stack<1) w->stack=1; if (w->stack>999) w->stack=999;
+                w->alive=1;
+                break;
+            }
+        }
+        while (*s && *s!='\n') s++;
+        if (*s=='\n') s++;
+    }
+    // absorb any legacy stacks (saves from before the absorb rule can
+    // hold several entries on one spot): same place, same direction
+    // becomes one wall with the summed strength before pools rebuild —
+    // and (Nov 7) the merged pile keeps COUNT of its layers, so the
+    // stack renders, tiers and sheds like the walls it was made of
+    for (int i=0;i<MAXWALLS;i++) if (G.walls[i].alive==1)
+        for (int j=i+1;j<MAXWALLS;j++) if (G.walls[j].alive==1 && G.walls[j].horiz==G.walls[i].horiz){
+            float dx=G.walls[j].x-G.walls[i].x, dy=G.walls[j].y-G.walls[i].y;
+            if (dx*dx+dy*dy < 36){ G.walls[i].hp += G.walls[j].hp; G.walls[i].maxhp += G.walls[j].maxhp;
+                G.walls[i].stack += G.walls[j].stack>0? G.walls[j].stack : 1;
+                if (G.walls[i].stack>999) G.walls[i].stack=999;
+                G.walls[j].alive=0; }
+        }
+    walls_recompute_ex(1);   // pooled health rebuilds from the saved fractions
+    if (!G.p[0].connected) player_fresh(&G.p[0], G.my_name, 0, 0, 70), G.p[0].connected=1, G.p[0].is_local=1;
+    // Daniel's rule (Nov 2): a loaded run always resumes at the
+    // centre of the Bug Mall, wherever the save was made. Restoring
+    // in place put mall saves about 120px north of where the player
+    // stood (the interior lives at MALL_CY, far from the world
+    // spot the raw numbers suggest) and scattered everyone else.
+    for (int i=0;i<MAXP;i++) if (G.p[i].connected){
+        G.p[i].x = i==0? 0.0f : 34.0f*i; G.p[i].y = MALL_CY + (i==0? 0.0f : 10.0f);
+        G.p[i].in_mall=1; G.p[i].in_store=0; G.p[i].station=-1;
+        // a fainted buddy can't follow its owner home, so the load used
+        // to leave it lying wherever the save was made — invisible, and
+        // indistinguishable from never having bought it (Nov 3). Carry
+        // it home: it wakes up on the mall floor beside its owner.
+        if (G.bud[i].active && G.bud[i].fainted){
+            G.bud[i].x = G.p[i].x + 26; G.bud[i].y = G.p[i].y + 12;
+        }
+    }
+    if (G.bud[0].active && G.bud[0].fainted)
+        spawn_floater(G.p[0].x, G.p[0].y - 30, "YOUR BUDDY IS FAINTED - REVIVE IT AT BANZAI BUDDIES", COL(255,180,150));
+    // local co-op: claim back the saved P2 (same slot, same run). If the
+    // save predates co-op there is no P2 line — with two controllers
+    // plugged in, P2 drops in fresh beside P1 instead.
+    G.p2_slot=-1; coop_reset_views();
+    if (G.coop_pref){
+        for (int i=1;i<MAXP;i++)
+            if (G.p[i].connected && scmp(G.p[i].name, "P2")==0){ G.p2_slot=i; break; }
+        if (G.p2_slot<0 && IN.pad_count>=2) coop_spawn_p2(G.p[0].x-30, G.p[0].y);
+    }
+    // the local user's Whales unlocks come from the profile, not the run
+    G.p[0].whale_own=G.whale_own; G.p[0].whale_on=G.whale_on;
+    if (G.p2_slot>=0){ G.p[G.p2_slot].whale_own=G.whale_own; G.p[G.p2_slot].whale_on=G.whale_on; }
+    G.camx=G.p[0].x; G.camy=G.p[0].y;
+    G.state=GS_PLAY;
+}
+
+// ---------------------------------------------------------------------------
+// Save slots: probe at boot, summarize for the picker, run the picker.
+// Legacy saves (one global blob with the run inside) become slot 1.
+// ---------------------------------------------------------------------------
+static void probe_slots(void){
+    for (int s=1;s<=3;s++){
+        int n = plat_load_slot(s, slotbuf, SAVE_CAP-1);
+        G.slot_has[s] = 0;
+        if (n>0){ slotbuf[n]=0; const char *v = line_val(slotbuf,"run");
+            if (v && parse_int(v)==1) G.slot_has[s]=1; }
+    }
+    if (!G.slot_has[1]){
+        // legacy: the global blob (still in savebuf from the records
+        // load) carries the run — lift its run section into slot 1,
+        // keeping the original format version character.
+        const char *v = line_val(savebuf,"run");
+        if (v && parse_int(v)==1){
+            const char *rs = v - 4;                    // start of "run="
+            char *q = slotbuf;
+            q = sappend(q, "TSG"); *q++ = savebuf[3]; *q++='\n'; *q=0;
+            while (*rs) *q++ = *rs++;
+            *q = 0;
+            plat_save_slot(1, slotbuf, (int)(q - slotbuf));
+            G.slot_has[1] = 1;
+        }
+    }
+    refresh_has_save();
+}
+// picker summaries, peeked from the slot blobs (never loads the run)
+static char pk_name[4][13];
+static int pk_hat[4], pk_kills[4], pk_time[4], pk_zen[4];
+static char pk_bname[4][16];   // the slot's buddy, "" when none
+static int pk_bspecies[4];
+static void peek_slots(void){
+    for (int s=1;s<=3;s++){
+        pk_name[s][0]=0; pk_hat[s]=0; pk_kills[s]=0; pk_time[s]=0; pk_zen[s]=0;
+        pk_bname[s][0]=0; pk_bspecies[s]=-1;
+        if (!G.slot_has[s]) continue;
+        int n = plat_load_slot(s, slotbuf, SAVE_CAP-1);
+        if (n<=0){ G.slot_has[s]=0; continue; }
+        slotbuf[n]=0;
+        const char *v;
+        if ((v=line_val(slotbuf,"time"))) pk_time[s]=parse_int(v);
+        if ((v=line_val(slotbuf,"tkills"))) pk_kills[s]=parse_int(v);
+        if ((v=line_val(slotbuf,"zrun"))) pk_zen[s]=parse_int(v)? 1:0;
+        if ((v=line_val(slotbuf,"sum"))){
+            const char *q=v;
+            while (*q==' ') q++;   // the writer's separator space after
+            // "sum=" — without this skip the name reads empty and every
+            // field after it shifts one token early (the other half of
+            // the phantom-pet bug: the tail walk then lands mid-list)
+            int ni=0;
+            while (*q && *q!=' ' && *q!='\n' && ni<12){ pk_name[s][ni++]=*q++; } pk_name[s][ni]=0;
+            if (*q==' ') q++;
+            pk_hat[s]=parse_int(q);
+            // walk the rest of the summary: hat kills time zen, then
+            // the buddy tail [bnameidx bspecies]. This once walked only
+            // three fields, so it read ZEN as the name index and the
+            // name index as the species — the picker then cheerfully
+            // listed a pet the player does not have (Daniel, Nov 4)
+            for (int adv=0; adv<4; adv++){ while (*q && *q!=' ' && *q!='\n') q++; if (*q==' ') q++; }
+            if (*q && *q!='\n'){
+                int bni=parse_int(q);
+                while (*q && *q!=' ' && *q!='\n') q++; if (*q==' ') q++;
+                int bsp=parse_int(q);
+                if (bni>=0 && bsp>=0 && bsp<BUDN){
+                    scpy(pk_bname[s], BUD_ELF[bni%BUD_NAMES_N], 16);
+                    pk_bspecies[s]=bsp;
+                }
+            }
+        } else {
+            // legacy blob: the name rides on the first pl= line
+            const char *ls = slotbuf;
+            while (*ls){
+                if (ls[0]=='p' && ls[1]=='l' && ls[2]=='=' && ls[3]==' '){
+                    const char *q=ls+4;
+                    parse_int(q); while (*q && *q!=' ') q++; if (*q) q++;
+                    int ni=0; while (*q && *q!=' ' && *q!='\n' && ni<12){ pk_name[s][ni++]=*q++; } pk_name[s][ni]=0;
+                    break;
+                }
+                while (*ls && *ls!='\n') ls++;
+                if (*ls=='\n') ls++;
+            }
+        }
+        if (!pk_name[s][0]) scpy(pk_name[s], "DEV", 13);
+    }
+    refresh_has_save();
+}
+static void open_slots(int mode){
+    G.slots_mode=mode; G.slots_confirm=0;
+    peek_slots();
+    int pick = (G.slot>=1 && G.slot<=3)? G.slot-1 : 0;
+    if (mode==0 && !G.slot_has[pick+1])
+        for (int s=1;s<=3;s++) if (G.slot_has[s]){ pick=s-1; break; }
+    G.slots_sel = pick;
+    G.state=GS_SLOTS;
+}
+static void slots_activate(int i);   // defined with the menu code below
+static void slots_input(void){
+    if (IN.menu_up){ G.slots_sel=(G.slots_sel+3)%4; G.slots_confirm=0; }
+    if (IN.menu_down){ G.slots_sel=(G.slots_sel+1)%4; G.slots_confirm=0; }
+    if (IN.esc_pressed){ G.state=GS_MENU; return; }
+    if (IN.tapped){
+        for (int i=0;i<3;i++){ int y=116+i*52;
+            if (IN.tap_y>=y-4 && IN.tap_y<=y+48){
+                if (G.slots_mode==1 && G.slot_has[i+1] && G.slots_confirm!=i+1){
+                    G.slots_sel=i; G.slots_confirm=i+1; return;
+                }
+                G.slots_sel=i; slots_activate(i); return;
+            }
+        }
+        if (IN.tap_y>=272 && IN.tap_y<=300){ G.state=GS_MENU; return; }
+    }
+    if (IN.select_pressed || IN.interact_pressed) slots_activate(G.slots_sel);
+}
+
+// ---------------------------------------------------------------------------
+// Networking — one packet format for both platforms.
+//   client->host: 'J' name | 'I' keys,aim,weapon | 'B' item | 'L' leave
+//   host->client: 'R' roster | 'A' your-id | 'S' snapshot | 'W' walls | 'G' over
+// ---------------------------------------------------------------------------
+static u8 pkt[65536];
+static int pkt_src_token[MAXP];       // last transport token per slot (host)
+static float net_send_t=0;
+// event queue for snapshots (splats, purchases, wall builds...)
+typedef struct { u8 type; float x, y; } NetEv;
+static NetEv ev_queue[32]; static int ev_n=0;
+static void push_ev(int type, float x, float y){
+    if (G.net_mode!=NET_HOST) return;
+    if (ev_n<32){ ev_queue[ev_n].type=(u8)type; ev_queue[ev_n].x=x; ev_queue[ev_n].y=y; ev_n++; }
+}
+static void wr_u8(int *o, u8 v){ pkt[(*o)++]=v; }
+static void wr_u16(int *o, u16 v){ pkt[(*o)++]=v&255; pkt[(*o)++]=(v>>8)&255; }
+static void wr_flt(int *o, float f){ union{float f; u8 b[4];} u; u.f=f;
+    for (int i=0;i<4;i++) pkt[(*o)++]=u.b[i]; }
+static u8 rd_u8(const u8 *b, int *o){ return b[(*o)++]; }
+static u16 rd_u16(const u8 *b, int *o){ u16 v=b[*o] | (b[*o+1]<<8); *o+=2; return v; }
+static float rd_flt(const u8 *b, int *o){ union{float f; u8 b[4];} u;
+    for (int i=0;i<4;i++) u.b[i]=b[(*o)++]; return u.f; }
+
+static void host_send_roster(int dest){
+    int o=0; wr_u8(&o, 'R');
+    int n=0; for (int i=0;i<MAXP;i++) if (G.p[i].connected) n++;
+    wr_u8(&o, (u8)n);
+    for (int i=0;i<MAXP;i++) if (G.p[i].connected){
+        wr_u8(&o, (u8)i); wr_u8(&o, (u8)G.p[i].color);
+        for (int k=0;k<12;k++) wr_u8(&o, (u8)G.p[i].name[k]);
+    }
+    plat_net_send(pkt, o, dest);
+}
+static void host_send_walls(int dest){
+    int o=0; wr_u8(&o, 'W');
+    int n=0; for (int i=0;i<MAXWALLS;i++) if (G.walls[i].alive==1) n++;
+    wr_u16(&o, (u16)n);
+    for (int i=0;i<MAXWALLS;i++) if (G.walls[i].alive==1){
+        Wall *w=&G.walls[i];
+        wr_flt(&o, w->x); wr_flt(&o, w->y); wr_flt(&o, w->hp); wr_flt(&o, w->maxhp);
+        wr_u8(&o, (u8)w->horiz); wr_u8(&o, (u8)(w->stack>0? w->stack : 1));
+    }
+    plat_net_send(pkt, o, dest);
+}
+static void host_snapshot(void){
+    int o=0; wr_u8(&o, 'S');
+    wr_flt(&o, G.time);
+    wr_u16(&o, (u16)G.total_kills);
+    wr_u8(&o, (u8)G.diff_run);
+    for (int i=0;i<MAXP;i++){
+        Player *p=&G.p[i];
+        wr_u8(&o, p->connected?1:0);
+        if (!p->connected) continue;
+        wr_flt(&o, p->x); wr_flt(&o, p->y); wr_flt(&o, p->aim);
+        wr_u16(&o, (u16)(p->hp<0?0:p->hp)); wr_u16(&o, (u16)p->shield);
+        wr_u8(&o, (u8)p->weapon); wr_u8(&o, p->alive?1:0);
+        wr_u16(&o, (u16)p->stack_n); wr_flt(&o, p->carried); wr_flt(&o, p->heaviest);
+        wr_u16(&o, (u16)p->kills);
+        wr_u8(&o, (u8)p->rollback);
+        for (int w=0;w<NWEAP;w++) wr_u16(&o, (u16)p->owned[w]);
+        for (int u=0;u<5;u++) wr_u16(&o, (u16)p->upg[u]);
+        wr_flt(&o, p->banked); wr_u8(&o, (u8)p->hatstand); wr_u8(&o, (u8)p->in_mall);
+        wr_u8(&o, p->on_wall>=0? 1:0);
+        wr_u8(&o, (u8)p->whale_own); wr_u8(&o, (u8)p->whale_on);
+        wr_u8(&o, (u8)(p->whale_own>>8)); wr_u8(&o, (u8)(p->whale_on>>8));   // round 2 vanities (SKUs 7-14)
+    }
+    int bn=0; for (int i=0;i<MAXBUGS;i++) if (G.bugs[i].alive) bn++;
+    wr_u16(&o, (u16)bn);
+    for (int i=0;i<MAXBUGS;i++) if (G.bugs[i].alive){
+        Bug *b=&G.bugs[i];
+        wr_flt(&o, b->x); wr_flt(&o, b->y); wr_flt(&o, b->w);
+        wr_u8(&o, (u8)(255*b->hp/b->maxhp)); wr_u8(&o, (u8)b->kind);
+        wr_u8(&o, b->bp_t>0?1:0); wr_u8(&o, b->hit_t>0?1:0);
+        wr_flt(&o, b->leg_ph);
+    }
+    wr_u8(&o, (u8)ev_n);
+    for (int i=0;i<ev_n;i++){ wr_u8(&o, ev_queue[i].type); wr_flt(&o, ev_queue[i].x); wr_flt(&o, ev_queue[i].y); }
+    ev_n=0;
+    wr_u8(&o, shield_active()?1:0);
+    wr_u8(&o, 0);   // agents retired (Nov 2): the count byte stays, always zero
+    int bn2=0; for (int i=0;i<MAXP;i++) if (G.bud[i].active) bn2++;
+    wr_u8(&o, (u8)bn2);
+    for (int i=0;i<MAXP;i++) if (G.bud[i].active){
+        Buddy *bd=&G.bud[i];
+        wr_u8(&o, (u8)i); wr_u8(&o, (u8)bd->species);
+        wr_flt(&o, bd->x); wr_flt(&o, bd->y);
+        wr_u8(&o, (u8)(bd->maxhp>0? 255.0f*bd->hp/bd->maxhp : 0));
+        wr_u8(&o, bd->lunge_t>0? 1:0);
+        wr_u16(&o, (u16)(bd->xp>60000? 60000 : bd->xp));
+        wr_u8(&o, (u8)bd->up_hp); wr_u8(&o, (u8)bd->up_atk); wr_u8(&o, (u8)bd->up_def); wr_u8(&o, (u8)bd->skills);
+        wr_u8(&o, bd->fainted? 1:0);
+        wr_flt(&o, bd->walk_ph);
+        wr_u8(&o, (u8)bd->name_idx); wr_u8(&o, (u8)bd->color);
+        wr_u8(&o, (u8)bd->energy);
+        wr_u8(&o, (u8)(bd->on_wall+1));
+    }
+    plat_net_send(pkt, o, -1);
+}
+static void net_host_poll(void){
+    u8 buf[2048]; int src=0;
+    for (int iter=0; iter<10; iter++){
+        int n = plat_net_recv(buf, 2048, &src);
+        if (n<=0) break;
+        if (buf[0]=='J'){
+            // find the sender's slot or a free one
+            int slot=-1;
+            for (int i=1;i<MAXP;i++) if (G.p[i].connected && pkt_src_token[i]==src) slot=i;
+            if (slot<0) for (int i=1;i<MAXP;i++) if (!G.p[i].connected){ slot=i; break; }
+            if (slot<0) continue;
+            char nm[13]; int ni=0;
+            for (int k=0;k<12 && 1+k<n;k++){ char c=(char)buf[1+k]; nm[ni++]= c? c:' '; }
+            nm[ni]=0; while (ni>0 && nm[ni-1]==' ') nm[--ni]=0;
+            if (!G.p[slot].connected){
+                player_fresh(&G.p[slot], nm[0]?nm:"DEV", slot, rng_range(-40,40), 80);
+                G.p[slot].connected=1;
+            }
+            if (n>=15){ G.p[slot].whale_own = buf[13]; G.p[slot].whale_on = buf[14];
+                if (n>=17){ G.p[slot].whale_own |= buf[15]<<8; G.p[slot].whale_on |= buf[16]<<8; } }
+            pkt_src_token[slot]=src;
+            int o=0; wr_u8(&o,'A'); wr_u8(&o,(u8)slot);
+            plat_net_send(pkt, o, src);
+            host_send_roster(-1); host_send_walls(src);
+        } else if (buf[0]=='I'){
+            int slot=-1;
+            for (int i=1;i<MAXP;i++) if (G.p[i].connected && pkt_src_token[i]==src) slot=i;
+            if (slot<0 || n<8) continue;
+            int o=1;
+            G.p[slot].net_keys = rd_u8(buf,&o);
+            G.p[slot].net_aim = rd_flt(buf,&o);
+            int wp = rd_u8(buf,&o);
+            if (wp<NWEAP && G.p[slot].owned[wp]) G.p[slot].weapon=wp;
+            int act = rd_u8(buf,&o);
+            if (act&1) G.p[slot].want_wall=1;
+            if (act&2){ /* interact: handled as buy context by client UI */ }
+        } else if (buf[0]=='B' && n>=2){
+            int slot=-1;
+            for (int i=1;i<MAXP;i++) if (G.p[i].connected && pkt_src_token[i]==src) slot=i;
+            if (slot>=0) try_buy(slot, buf[1]);
+        } else if (buf[0]=='M' && n>=3){
+            int slot=-1;
+            for (int i=1;i<MAXP;i++) if (G.p[i].connected && pkt_src_token[i]==src) slot=i;
+            if (slot>=0) station_action(slot, buf[1], buf[2]);
+        } else if (buf[0]=='E'){
+            int slot=-1;
+            for (int i=1;i<MAXP;i++) if (G.p[i].connected && pkt_src_token[i]==src) slot=i;
+            if (slot>=0){
+                Player *p=&G.p[slot];
+                if (!p->in_mall && near_store(p)) mall_enter(slot);
+                else if (p->in_mall && on_exit_mat(p)) mall_exit(slot);
+            }
+        } else if (buf[0]=='T' && n>=2){
+            int slot=-1;
+            for (int i=1;i<MAXP;i++) if (G.p[i].connected && pkt_src_token[i]==src) slot=i;
+            if (slot>=0) G.p[slot].in_store = buf[1]? 1:0;
+        } else if (buf[0]=='L'){
+            for (int i=1;i<MAXP;i++) if (G.p[i].connected && pkt_src_token[i]==src){
+                G.p[i].connected=0; host_send_roster(-1);
+            }
+        }
+    }
+}
+static void net_client_poll(void){
+    u8 buf[65536]; int src=0;
+    for (int iter=0; iter<6; iter++){
+        int n = plat_net_recv(buf, 65536, &src);
+        if (n<=0) break;
+        if (buf[0]=='A' && n>=2 && G.my_id<0){ G.my_id = buf[1]; }
+        else if (buf[0]=='R'){
+            int o=1; int cnt=rd_u8(buf,&o);
+            for (int i=0;i<MAXP;i++) if (i!=G.my_id) G.p[i].connected=0;
+            for (int k=0;k<cnt;k++){
+                int id=rd_u8(buf,&o); int col=rd_u8(buf,&o);
+                char nm[13]; for (int j=0;j<12;j++) nm[j]=(char)rd_u8(buf,&o); nm[12]=0;
+                if (id>=0 && id<MAXP){
+                    G.p[id].connected=1; G.p[id].color=col;
+                    scpy(G.p[id].name, nm, 13);
+                    if (id==G.my_id) G.p[id].is_local=1;
+                }
+            }
+        } else if (buf[0]=='S'){
+            int o=1; G.time = rd_flt(buf,&o);
+            G.total_kills = rd_u16(buf,&o);
+            G.diff_run = rd_u8(buf,&o); if (G.diff_run<0 || G.diff_run>3) G.diff_run=0;
+            for (int i=0;i<MAXP;i++){
+                int conn = rd_u8(buf,&o);
+                if (!conn){ if (i!=G.my_id) G.p[i].connected=0; continue; }
+                Player *p=&G.p[i];
+                p->connected=1;
+                p->x=rd_flt(buf,&o); p->y=rd_flt(buf,&o);
+                { float av=rd_flt(buf,&o); if (i!=G.my_id) p->aim=av; }
+                // (our own facing stays local + instant; the host echoes it
+                // back in snapshots but we don't want the arm to lag)
+                p->hp=rd_u16(buf,&o); p->shield=rd_u16(buf,&o);
+                p->weapon=rd_u8(buf,&o); p->alive=rd_u8(buf,&o);
+                int sn=rd_u16(buf,&o); p->carried=rd_flt(buf,&o); p->heaviest=rd_flt(buf,&o);
+                p->kills=rd_u16(buf,&o); p->rollback=rd_u8(buf,&o);
+                for (int w=0;w<NWEAP;w++) p->owned[w]=rd_u16(buf,&o);
+                for (int u=0;u<5;u++) p->upg[u]=rd_u16(buf,&o);
+                p->banked=rd_flt(buf,&o); p->hatstand=rd_u8(buf,&o); p->in_mall=rd_u8(buf,&o);
+                p->on_wall = rd_u8(buf,&o)? 0 : -1;
+                p->whale_own=rd_u8(buf,&o); p->whale_on=rd_u8(buf,&o);
+                p->whale_own |= rd_u8(buf,&o)<<8; p->whale_on |= rd_u8(buf,&o)<<8;   // round 2 hi bytes
+                p->stack_n=sn;
+                // synthesize a plausible stack for the hat drawing
+                float each = sn>0? p->carried/sn : 0;
+                for (int s2=0;s2<sn && s2<MAXSTACK;s2++) p->stack[s2]=each*(0.6f+0.4f*((s2*7)%5)/4.0f);
+                p->dmg_mul = 1.0f + 0.25f*p->upg[0];
+                p->rate_mul = 1.0f + 0.18f*p->upg[1];
+                p->shield_max = shield_for(p->upg[2]);
+                p->maxhp = 100 + 25*p->upg[3];
+                p->walk_ph += 0.1f;
+            }
+            int bn = rd_u16(buf,&o);
+            smemset(G.bugs, 0, sizeof(G.bugs));
+            for (int i=0;i<bn && i<MAXBUGS;i++){
+                Bug *b=&G.bugs[i];
+                b->alive=1;
+                b->x=rd_flt(buf,&o); b->y=rd_flt(buf,&o); b->w=rd_flt(buf,&o);
+                float hf=rd_u8(buf,&o)/255.0f; b->kind=rd_u8(buf,&o);
+                b->bp_t=rd_u8(buf,&o)? 0.2f:0; b->hit_t=rd_u8(buf,&o)? 0.1f:0;
+                b->leg_ph=rd_flt(buf,&o);
+                b->maxhp=100; b->hp=hf*100;
+                b->seed=(u32)(i*7919);
+            }
+            int evc = rd_u8(buf,&o);
+            for (int i=0;i<evc;i++){
+                int t=rd_u8(buf,&o); float ex=rd_flt(buf,&o), ey=rd_flt(buf,&o);
+                if (t==1) splat(ex, ey, BUG_COL[i%4], 8, 110);
+                if (t==2) splat(ex, ey, COL(170,120,70), 10, 110);
+                if (t==3) sfx(11);
+                if (t==4) sfx(5);
+            }
+            shield_remote = rd_u8(buf,&o);
+            { int agn = rd_u8(buf,&o); (void)agn; }   // agents retired: count byte discarded
+            { int bn2 = rd_u8(buf,&o);
+              for (int i=0;i<MAXP;i++) G.bud[i].active=0;
+              for (int i=0;i<bn2;i++){
+                  int oi=rd_u8(buf,&o); int sp=rd_u8(buf,&o);
+                  float bx=rd_flt(buf,&o), by=rd_flt(buf,&o);
+                  int hf=rd_u8(buf,&o); int lu=rd_u8(buf,&o);
+                  int xp=rd_u16(buf,&o);
+                  int uh=rd_u8(buf,&o), ua=rd_u8(buf,&o), ud=rd_u8(buf,&o), sk=rd_u8(buf,&o);
+                  int fn=rd_u8(buf,&o);
+                  float wp=rd_flt(buf,&o);
+                  int nm2=rd_u8(buf,&o); int cl2=rd_u8(buf,&o); int en2=rd_u8(buf,&o);
+                  int ow2=rd_u8(buf,&o);
+                  if (oi>=0 && oi<MAXP){
+                      Buddy *bd=&G.bud[oi];
+                      bd->active=1; bd->species=sp%BUDN; bd->x=bx; bd->y=by;
+                      bd->on_wall = ow2-1;
+                      bd->up_hp=uh; bd->up_atk=ua; bd->up_def=ud; bd->skills=sk; bd->xp=xp;
+                      bd->fainted=fn? 1:0;
+                      bd->name_idx=nm2%BUD_NAMES_N; bd->color=cl2%BUD_COLORS_N; bd->energy=en2;
+                      buddy_refresh(oi);
+                      bd->hp = bd->maxhp * hf/255.0f;
+                      bd->lunge_t = lu? 0.15f : 0;
+                      if (wp != bd->walk_ph) bd->mv_t = 0.15f;   // a guest's buddy flops on the client's screen too
+                      bd->walk_ph = wp;
+                  }
+              } }
+            if (G.my_id>=0 && G.state==GS_MENU) G.state=GS_PLAY;
+        } else if (buf[0]=='W'){
+            int o=1; int cnt=rd_u16(buf,&o);
+            smemset(G.walls, 0, sizeof(G.walls));
+            for (int i=0;i<cnt && i<MAXWALLS;i++){
+                Wall *w=&G.walls[i];
+                w->x=rd_flt(buf,&o); w->y=rd_flt(buf,&o);
+                w->hp=rd_flt(buf,&o); w->maxhp=rd_flt(buf,&o);
+                w->horiz=rd_u8(buf,&o); w->stack=rd_u8(buf,&o); if (w->stack<1) w->stack=1;
+                w->alive=1; w->grp=-1; w->grp_old=-1;
+            }
+            walls_recompute();   // client side: groups/tiers only, no pools
+        } else if (buf[0]=='G'){
+            G.state=GS_OVER; G.gameover_t=0;
+        }
+    }
+}
+static void net_client_send_input(void){
+    int o=0; wr_u8(&o,'I');
+    wr_u8(&o, (u8)G.p[G.my_id<0?0:G.my_id].cur_keys);
+    // facing, resolved from the movement keys in resolve_local_input
+    wr_flt(&o, client_aim);
+    wr_u8(&o, (u8)client_weapon);
+    wr_u8(&o, (u8)(client_want_wall?1:0));
+    plat_net_send(pkt, o, 0);
+    client_want_wall=0;
+}
+
+// ---------------------------------------------------------------------------
+// Store purchases + store input
+// ---------------------------------------------------------------------------
+static void store_note(const char *msg){
+    scpy(G.store_msg, msg, 64); G.store_msg_t = 150;
+}
+static void try_buy(int pi, int sel){
+    Player *p=&G.p[pi];
+    if (pay_active) return;
+    if (G.state!=GS_STORE && G.net_mode!=NET_HOST) { /* local buys happen in store UI */ }
+    if (!near_store(p) && !p->in_store){
+        if (pi==G.my_id) store_note("YOU MUST BE AT THE STORE");
+        return;
+    }
+    int owned; int price = store_item_price(sel, p, &owned);
+    if (owned){
+        if (pi==G.my_id){ store_note(sel<5? "FULLY STACKED"
+                                          : (sel==11? "ALREADY AT FULL HP" : "FULLY UPGRADED")); sfx(16); }
+        return;
+    }
+    if (p->carried < (float)price){
+        if (pi==G.my_id){
+            char b[64]; char *q=b;
+            q=sappend(q, "NOT ENOUGH HAT - NEED ");
+            q=sapp_int(q, (int)(price - p->carried)); q=sappend(q, " KG MORE");
+            store_note(b); sfx(16);
+        }
+        return;
+    }
+    start_payment(pi, sel<5?0:1, sel<5? sel : sel-5, price);
+}
+static void client_tell_store(int open){
+    // let the host know we're browsing, so the Epicenter shield goes up
+    int o=0; wr_u8(&o,'T'); wr_u8(&o,(u8)open); plat_net_send(pkt, o, 0);
+}
+// drive one player's store browsing. The nav inputs come from whoever
+// owns the store session: P1's keyboard/pad-1 fields, or P2's pad-2
+// edges in local co-op — each shopper keeps their own cursor.
+static void store_input(int pi, int up, int down, int activate){
+    int *selp = (G.p2_slot>=0 && pi==G.p2_slot)? &G.store_sel2 : &G.store_sel;
+    if (up){ *selp = (*selp + STORE_ROWS-1)%STORE_ROWS; sfx(6); }
+    if (down){ *selp = (*selp + 1)%STORE_ROWS; sfx(6); }
+    // touch: tap a row to select it, tap the selected row to buy it,
+    // tap anywhere outside the panel to leave the store (P1 only)
+    if (pi==G.my_id && IN.tapped){
+        if (IN.tap_x<STORE_X-6 || IN.tap_x>STORE_X+STORE_W+6 ||
+            IN.tap_y<STORE_Y-6 || IN.tap_y>STORE_Y+STORE_H+6) G.tap_close_store=1;
+        else for (int i=0;i<STORE_ROWS;i++){
+            int ry = STORE_ROW0 + (i<5? i*STORE_ROWH : i*STORE_ROWH+STORE_UPGOFF);
+            if (IN.tap_y>=ry-5 && IN.tap_y<=ry+STORE_ROWH-2){
+                if (i==*selp) activate=1;
+                else { *selp=i; sfx(6); }
+                break;
+            }
+        }
+    }
+    if (activate){
+        if (G.net_mode==NET_CLIENT){
+            int o=0; wr_u8(&o,'B'); wr_u8(&o,(u8)*selp);
+            plat_net_send(pkt, o, 0);
+            sfx(10);
+        } else try_buy(pi, *selp);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Mall stations — the panels for the Gallery, the Bug Bank and the
+// Banzai Buddies store. Station 0 is the Bug Bounty counter and keeps
+// the original store panel + input. Everything buys with hat weight or
+// buddy XP, through the same one-at-a-time till.
+// ---------------------------------------------------------------------------
+#define HATSTAND_PRICE 150
+// a revive is priced off the buddy itself (Daniel, Nov 2): its
+// species, its training, and its taught moves — a fresh pet rock
+// is cheap to wake, a trained moose with both moves is not. A
+// faint never costs the buddy anything it earned: training, XP
+// and skills all ride through untouched (see hurt_buddy).
+static int bud_revive_price(Buddy *b){
+    int skills = (b->skills&1) + ((b->skills>>1)&1) + ((b->skills>>2)&1) + ((b->skills>>3)&1);
+    return 10 + BUD_PRICE[b->species%BUDN]/5
+         + 6*(b->up_hp + b->up_atk + b->up_def) + 15*skills;
+}
+#define MALL_ROW0 (STORE_ROW0 + 26)
+// training prices (Daniel): the first lessons are cheap; mastery is a
+// fortune. Flat 12/24/36... became roughly x1.45 a level past the basics.
+static int bud_train_cost(int lvl){
+    float c = 10.0f;
+    for (int i=0;i<lvl;i++) c = c*1.45f + 2.0f;
+    return (int)(c + 0.5f);
+}
+// ---------------------------------------------------------------------------
+// WHALES ONLY — the mall's fifth counter (in the old Gallery slot).
+// Seven purely cosmetic perks, $0.67 each, sold through Stripe payment
+// links. Tapping BUY opens the player's browser; after paying, the
+// payment page hands back a signed unlock code (Ed25519 — verified
+// offline against the public key below; the signing key never ships).
+// Codes are the player's receipt: entitlements live in the save data
+// (Daniel's warning, printed in the shop), and re-entering a code after
+// a wipe restores the perk. NOTHING here touches gameplay numbers.
+// ---------------------------------------------------------------------------
+#define WHALE_N 15
+static const char *WHALE_NAME[WHALE_N] = {
+    "GOLDEN CARCASS", "COMICALLY ENORMOUS GLASSES", "ROYAL CAPE",
+    "SPARKLE TRAIL", "THE FORBIDDEN MONOCLE", "DRAMATIC RAIN", "WHALE TITLE",
+    "ROYAL BUDDY", "PARADE DUCK", "DISCO MALL", "CONFETTI SQUASH",
+    "AURA OF IMPORTANCE", "SPACE BUDDY", "NAME IN LIGHTS", "KAZOO MODE" };
+static const char *WHALE_BLURB[WHALE_N] = {
+    "EVERY CARCASS YOU CARRY, CAST IN GOLD. SAME WEIGHT. MORE GLORY.",
+    "THE NERD GLASSES, BUT MORE. ENORMOUS-ER, EVEN. PURE VANITY.",
+    "A ROYAL CAPE THAT BILLOWS DRAMATICALLY. ROYALTY NOT INCLUDED.",
+    "YOU LEAVE A TRAIL OF SPARKLES. THE BUGS ARE NOT IMPRESSED.",
+    "A GOLD MONOCLE FOR YOUR BUDDY. IT HAS SEEN THINGS. TINY THINGS.",
+    "IT RAINS ON YOU. ONLY YOU. DRAMATICALLY. EVERYONE ELSE IS DRY.",
+    "THE WORD WHALE, FLOATING BY YOUR NAME. EARNED. PAID FOR. YOURS.",
+    "A TINY GOLDEN CROWN FOR YOUR BUDDY. ROYALTY, AT LAST.",
+    "A DUCK FOLLOWS YOU. IT DOES NOTHING. IT IS NEVER LATE.",
+    "THE BUG MALL FLOOR, BUT DISCO. THE KEEPERS PRETEND NOT TO NOTICE.",
+    "SQUASHED BUGS BURST INTO CONFETTI. CLEANUP IS SOMEONE ELSE'S PROBLEM.",
+    "A GOLDEN RING OF GLOW BENEATH YOU. YOU LOOK IMPORTANT. YOU ARE.",
+    "A BUBBLE HELMET FOR YOUR BUDDY. THE MUFFLE IS ADORABLE.",
+    "YOUR NAME IN MARQUEE BULBS ON THE TITLE SCREEN. TOP BILLING.",
+    "THE WHOLE BEETHOVEN LADDER, ON KAZOO. HE WOULD HAVE WANTED THIS." };
+// Stripe payment links — one per perk; filled in when the links exist.
+static const char *WHALE_LINK[WHALE_N] = {
+    "https://buy.stripe.com/bJebJ215lelo3QPe7OdUY01",   /* 0 Golden Carcass */
+    "https://buy.stripe.com/4gMbJ26pFfpsbjhaVCdUY02",   /* 1 Comically Enormous Glasses */
+    "https://buy.stripe.com/7sY6oIbJZ0uycnlbZGdUY03",   /* 2 Royal Cape */
+    "https://buy.stripe.com/eVqdRa29p5OSfzx8NudUY04",   /* 3 Sparkle Trail */
+    "https://buy.stripe.com/fZufZi4hxfpsafdbZGdUY05",   /* 4 The Forbidden Monocle */
+    "https://buy.stripe.com/00wbJ2bJZfpsdrp1l2dUY06",   /* 5 Dramatic Rain */
+    "https://buy.stripe.com/00wfZiaFV0uygDB7JqdUY07",  /* 6 WHALE Title */
+    "https://buy.stripe.com/14A14o01hcdgfzx2p6dUY08",  /* 7 Royal Buddy */
+    "https://buy.stripe.com/dRmbJ29BR6SWafd8NudUY09",  /* 8 Parade Duck */
+    "https://buy.stripe.com/8x2cN6dS7elo3QPfbSdUY0a",  /* 9 Disco Mall */
+    "https://buy.stripe.com/dRmeVe3dt6SW4UTbZGdUY0b",  /* 10 Confetti Squash */
+    "https://buy.stripe.com/28E14o4hx5OS9b97JqdUY0c",  /* 11 Aura of Importance */
+    "https://buy.stripe.com/eVqcN6eWb3GK3QPd3KdUY0d",  /* 12 Space Buddy */
+    "https://buy.stripe.com/9B65kE4hxa58bjh2p6dUY0e",  /* 13 Name in Lights */
+    "https://buy.stripe.com/7sYdRaaFV4KO2ML1l2dUY0f" }; /* 14 Kazoo Mode */
+// The issuer's Ed25519 public key (the private key lives server-side).
+static const u8 WHALE_PUB[32] = {
+    0xc6,0x92,0x89,0x6e,0x1b,0x3d,0x00,0x7a,0xc8,0x95,0x8d,0x45,0x46,0x57,0x98,0xd7,
+    0x46,0x06,0xa9,0xbc,0xa1,0xa2,0xb0,0x95,0xec,0xe4,0xc4,0x1f,0x29,0x7b,0x33,0xe4 };
+// code-entry panel state (per player; only the local player types)
+static int  whale_code_mode[MAXP];
+static int  whale_bs_hold[MAXP];   // frames Backspace has been held (hold-to-delete)
+static char whale_code_buf[MAXP][168];
+static int  whale_code_len[MAXP];
+
+static int b32_val(int c){
+    if (c>='a' && c<='z') c -= 32;
+    if (c>='0' && c<='9') return c-'0';
+    if (c=='O' || c=='o') return 0;
+    if (c=='I' || c=='L' || c=='i' || c=='l') return 1;
+    if (c>='A' && c<='H') return c-'A'+10;
+    if (c=='J') return 18;
+    if (c=='K') return 19;
+    if (c=='M') return 20;
+    if (c=='N') return 21;
+    if (c>='P' && c<='T') return c-'P'+22;
+    if (c>='V' && c<='Z') return c-'V'+27;
+    return -1;
+}
+// Decode + verify one cleaned run of exactly 119 significant chars.
+static int whale_try_sig(const char *s){
+    u8 raw[74]; int nb=0; u32 acc=0; int accn=0;
+    for (int i=0;i<119;i++){
+        int v = b32_val((u8)s[i]);
+        if (v<0) return -1;
+        acc = (acc<<5) | (u32)v; accn += 5;
+        if (accn>=8){ accn -= 8; if (nb<74) raw[nb++] = (u8)(acc>>accn); }
+    }
+    if (nb!=74 || raw[0]!=1) return -1;
+    int sku = raw[1];
+    if (sku>=WHALE_N) return -1;
+    if (!tsg_ed25519_verify(raw+10, WHALE_PUB, raw, 10)) return -1;
+    return sku;
+}
+// Decode + verify a pasted unlock code. Returns the sku (0..6) or -1.
+// Format: Crockford base32 of [version=1, sku, 8-byte nonce] || signature.
+// Copy accidents happen (Daniel's first real code arrived with 143 of
+// 142 chars showing and would not redeem): hyphens, spaces and look-alike
+// letters are forgiven, and ONE stray extra character anywhere in the
+// paste is forgiven too — the game tries dropping each character in
+// turn. A code with a character CHANGED still fails every try, so the
+// signature's protection is untouched.
+static int whale_redeem(const char *code){
+    char sig[200]; int n=0;
+    for (const char *s=code; *s && n<199; s++){
+        char c=*s;
+        if (c=='-' || c==' ' || c=='\n' || c=='\r' || c=='\t') continue;
+        if (b32_val((u8)c)<0) continue;   // stray punctuation is skipped, not fatal
+        sig[n++]=c;
+    }
+    sig[n]=0;
+    if (n==119) return whale_try_sig(sig);
+    if (n==120){
+        for (int k=0;k<120;k++){
+            char t[120]; int m=0;
+            for (int i=0;i<120;i++) if (i!=k) t[m++]=sig[i];
+            t[119]=0;
+            int sku = whale_try_sig(t);
+            if (sku>=0) return sku;
+        }
+        return -1;
+    }
+    if (n>120){ // several extra at a copy boundary: try both clean ends
+        char t[120];
+        for (int i=0;i<119;i++) t[i]=sig[i];
+        t[119]=0;
+        int sku = whale_try_sig(t);
+        if (sku>=0) return sku;
+        for (int i=0;i<119;i++) t[i]=sig[n-119+i];
+        t[119]=0;
+        return whale_try_sig(t);
+    }
+    return -1;
+}
+static void whale_grant(int sku){
+    G.whale_own |= (1<<sku); G.whale_on |= (1<<sku);
+    for (int i=0;i<MAXP;i++) if (G.p[i].connected && G.p[i].is_local){
+        G.p[i].whale_own=G.whale_own; G.p[i].whale_on=G.whale_on; }
+    do_save();
+}
+// background pickup: the web build returns from the payment page with
+// ?whale=<code>, and native players can drop the code into a
+// whale-code.txt beside their saves. Checked a couple of times a second.
+static float whale_poll_t = 0;
+static void whale_poll(float dt){
+    whale_poll_t -= dt;
+    if (whale_poll_t>0) return;
+    whale_poll_t = 0.4f;
+    char buf[200];
+    if (plat_whale_poll(buf, (int)sizeof(buf))<=0) return;
+    int sku = whale_redeem(buf);
+    if (sku>=0){ whale_grant(sku); store_note("UNLOCKED - CHECK THE WHALES ONLY COUNTER!"); sfx(11); }
+    else store_note("A CODE ARRIVED BUT DID NOT CHECK OUT");
+}
+
+
+static int station_rows(int st, Player *p){
+    if (st==1) return WHALE_N + 1;   // the vanities + ENTER UNLOCK CODE (Whales Only, below)
+    if (st==2) return 6;   // deposit all/half/quarter + withdraw all/half/quarter
+    if (st==3){ int pi=(int)(p-G.p); Buddy *b=&G.bud[pi];
+        int stage = bud_stage[pi];
+        if (stage==1 || stage==3){ int rem = BUD_NAMES_N - bud_page[pi]*12; int n = rem>12? 12 : rem; return n + 1; }   // + the MORE row, on every page
+        if (stage==2 || stage==4) return BUD_COLORS_N;
+        return !b->active? BUDN : b->fainted? 1 : 10; }
+    return 0;
+}
+static void store_sel_reset(int pi){
+    if (G.p2_slot>=0 && pi==G.p2_slot) G.store_sel2=0; else G.store_sel=0;
+}
+static const char *station_row_name(int st, int row, Player *p, char *buf){
+    Buddy *b=&G.bud[p-G.p];
+    char *q=buf;
+    if (st==1){ return row<WHALE_N? WHALE_NAME[row] : "ENTER UNLOCK CODE"; }
+    if (st==2){ static const char *BN[6] = { "DEPOSIT ALL", "DEPOSIT HALF", "DEPOSIT QUARTER",
+                                             "WITHDRAW ALL", "WITHDRAW HALF", "WITHDRAW QUARTER" };
+                return BN[row%6]; }
+    { int pi=(int)(p-G.p);
+      if (bud_stage[pi]==1 || bud_stage[pi]==3){
+          int base = bud_page[pi]*12;
+          if (row>=12 || base+row>=BUD_NAMES_N) return "MORE NAMES >>";
+          return BUD_ELF[base+row];
+      }
+      if (bud_stage[pi]==2 || bud_stage[pi]==4) return BUD_COLOR_NAME[row%BUD_COLORS_N]; }
+    if (!b->active){ q=sappend(q, "ADOPT A "); q=sappend(q, BUD_NAME[row%BUDN]); *q=0; return buf; }
+    if (b->fainted){ q=sappend(q, "REVIVE "); q=sappend(q, BUD_NAME[b->species%BUDN]); *q=0; return buf; }
+    switch (row){
+        case 0: return "TRAIN HEALTH";
+        case 1: return "TRAIN ATTACK";
+        case 2: return "TRAIN DEFENSE";
+        case 3: q=sappend(q, "TEACH: "); q=sappend(q, BUD_MOVE2[b->species%BUDN]); *q=0; return buf;
+        case 4: q=sappend(q, "TEACH: "); q=sappend(q, BUD_SPEC[b->species%BUDN]); *q=0; return buf;
+        case 5: q=sappend(q, "TEACH: "); q=sappend(q, BUD_MOVE3[b->species%BUDN]); *q=0; return buf;
+        case 6: q=sappend(q, "TEACH: "); q=sappend(q, BUD_MOVE4[b->species%BUDN]); *q=0; return buf;
+        case 8: q=sappend(q, "NAME: "); q=sappend(q, BUD_ELF[b->name_idx%BUD_NAMES_N]); *q=0; return buf;
+        case 9: q=sappend(q, "COLOR: "); q=sappend(q, BUD_COLOR_NAME[b->color%BUD_COLORS_N]); *q=0; return buf;
+        default: q=sappend(q, "CHANGE TO "); q=sappend(q, BUD_NAME[(b->species+1)%BUDN]); *q=0; return buf;
+    }
+}
+static const char *station_row_right(int st, int row, Player *p, char *buf){
+    Buddy *b=&G.bud[p-G.p];
+    char *q=buf;
+    if (st==1){
+        if (row>=WHALE_N) return "FREE";
+        if (p->whale_own & (1<<row)) return (p->whale_on & (1<<row))? "ON" : "OFF";
+        return "$0.67";
+    }
+    if (st==2){
+        // the amount THIS row will move (Daniel, Nov 2), not the
+        // whole balance on every row: deposits pop whole carcasses
+        // until the fraction is covered (simulated in hat order);
+        // withdraws pay exactly the fraction, in <=6 kg chunks.
+        float frac = (row%3==0)? 1.0f : (row%3==1)? 0.5f : 0.25f;
+        float amt;
+        if (row<3){
+            if (frac>=1.0f) amt = p->carried;
+            else { float target = p->carried*frac; amt = 0;
+                   for (int si=p->stack_n-1; si>=0 && amt<target; si--) amt += p->stack[si]; }
+        } else amt = p->banked * frac;
+        fmt_int(buf, "", (int)amt, " KG"); return buf;
+    }
+    if (bud_stage[(int)(p-G.p)]>0) return "";
+    if (!b->active){ fmt_int(buf, "", BUD_PRICE[row%BUDN], " KG"); return buf; }
+    if (b->fainted){ fmt_int(buf, "", bud_revive_price(b), " KG"); return buf; }
+    switch (row){
+        case 0: case 1: case 2: {
+            int lvl = row==0? b->up_hp : row==1? b->up_atk : b->up_def;
+            q=sapp_int(q, bud_train_cost(lvl)); q=sappend(q, " XP"); *q=0; return buf; }
+        case 3: return (b->skills&1)? "TAUGHT" : "40 XP";
+        case 4: return (b->skills&2)? "TAUGHT" : "80 XP";
+        case 5: return (b->skills&4)? "TAUGHT" : "60 XP";
+        case 6: return (b->skills&8)? "TAUGHT" : "120 XP";
+        case 8: case 9: return "FREE";
+        default: fmt_int(buf, "", BUD_PRICE[(b->species+1)%BUDN], " KG"); return buf;
+    }
+}
+static const char *station_blurb(int st, int row, Player *p){
+    if (st==1) return row<WHALE_N? WHALE_BLURB[row]
+                        : "PAID ON THE WEB? TYPE OR PASTE THE UNLOCK CODE IT GAVE YOU.";
+    Buddy *b=&G.bud[p-G.p];
+    if (st==2) return row<3? "SAFE FOREVER AND WEIGHS NOTHING - BUT NOT A HAT RECORD."
+                            : "BACK ON YOUR HEAD: COUNTS AGAIN - AND AT RISK AGAIN.";
+    { int stage = bud_stage[(int)(p-G.p)];
+      if (stage==1 || stage==3) return "OLD NAMES FROM THE ELDER DAYS. PICK WELL - THEY STICK.";
+      if (stage==2 || stage==4) return "A FRESH COAT. THE NEON RAINBOW IS... A LOT. WEAR IT PROUDLY."; }
+    if (!b->active){
+        if (row==0) return "LOYAL. FAST BITES, A POUNCE, AND A BARK THAT FREEZES BUGS.";
+        if (row==1) return "FAST CLAWS, A THREE-SLASH RAKE, AND ONE WET HAIRBALL.";
+        if (row==2) return "A WALKING WALL. ANTLERS, A CHARGE, AND A VERY LOUD STOMP.";
+        if (row==3) return "VENOMOUS, SEMI-AQUATIC, UNBOTHERED. SPUR DIVE + VENOM STING.";
+        if (row==4) return "IT IS A ROCK. IT ROLLS. IT ALMOST NEVER FAINTS. THAT IS ALL.";
+        return "PORCELAIN. PLUMBED. SPLASHES EVERYWHERE. IT HAS SEEN THINGS.";
+    }
+    if (b->fainted) return "OUT COLD - NOT GONE. BUDDIES ONLY EVER FAINT. A REVIVE FIXES IT.";
+    switch (row){
+        case 0: return "+25 MAX HEALTH PER LEVEL. A STURDIER FRIEND.";
+        case 1: return "+20% BUDDY DAMAGE PER LEVEL.";
+        case 2: return "YOUR BUDDY TAKES 12% LESS DAMAGE PER LEVEL.";
+        case 3: return "TEACH THE SECOND MOVE. YOUR BUDDY USES IT ON ITS OWN.";
+        case 4: return "TEACH THE SPECIAL MOVE. BIG, LOUD, AND ON A LONG COOLDOWN.";
+        case 5: return "TEACH THE THIRD MOVE. COSTS 30 ENERGY A POP IN A FIGHT.";
+        case 6: return "TEACH THE FOURTH MOVE. THE BIG ONE - 55 ENERGY, NO APOLOGIES.";
+        case 8: return "A NEW NAME FROM THE ELDER DAYS. FREE - NAMES WANT TO BE USED.";
+        case 9: return "A NEW COAT, STANDARD OR NEON RAINBOW. FREE.";
+        default: return "SWAP SPECIES. TRAINING, NAME AND XP CARRY OVER.";
+    }
+}
+static void station_note(int pi, const char *msg){
+    if (pi==G.my_id || pi==G.p2_slot) store_note(msg);
+}
+static void station_action(int pi, int st, int row){
+    Player *p=&G.p[pi];
+    Buddy *b=&G.bud[pi];
+    // while the till is counting THIS player's carcasses, the counter
+    // is closed to them (Daniel, Nov 6): no second purchase, and no
+    // bank run that drains the hat out from under the counting till
+    if (pay_active && pay_player==pi){ station_note(pi, "THE TILL IS COUNTING YOUR CARCASSES..."); sfx(16); return; }
+    if (st==1){
+        if (row<WHALE_N){
+            if (p->whale_own & (1<<row)){
+                p->whale_on ^= (1<<row);
+                if (pi==G.my_id || pi==G.p2_slot){   // a local player: the profile is the truth
+                    G.whale_own=p->whale_own; G.whale_on=p->whale_on; do_save(); }
+                station_note(pi, (p->whale_on>>row&1)? "SWITCHED ON" : "SWITCHED OFF"); sfx(6);
+            } else station_note(pi, "BUY IT FROM THE LINK - $0.67");   // guests: the host can't open their browser
+        }
+        return;   // row 7 (ENTER CODE) is local-only, see station_input
+    }
+    if (st==4){
+        // a LAN guest's bowling ball: the host just takes the carcass
+        // off their head — the game itself plays out on their screen
+        if (row==77 && p->stack_n>0) hat_pop(p);
+        return;
+    }
+    if (st==2){
+        // rows 0-2 deposit (all / half / quarter of the hat's weight),
+        // rows 3-5 withdraw (all / half / quarter of the vault)
+        float frac = (row%3==0)? 1.0f : (row%3==1)? 0.5f : 0.25f;
+        if (row<3){
+            if (p->stack_n<=0){ station_note(pi, "NOTHING ON YOUR HEAD TO DEPOSIT"); sfx(16); return; }
+            if (frac>=1.0f){ p->banked += p->carried; p->stack_n=0; p->carried=0; }
+            else { // whole carcasses pop until the fraction is covered
+                float target = p->carried * frac, moved = 0;
+                while (p->stack_n>0 && moved < target) moved += hat_pop(p);
+                p->banked += moved;
+            }
+            station_note(pi, "DEPOSITED. SAFE AND SOUND."); sfx(11);
+        } else {
+            if (p->banked<=0.01f){ station_note(pi, "THE VAULT IS EMPTY"); sfx(16); return; }
+            float target = p->banked * frac, moved = 0;
+            while (moved < target - 0.01f){
+                float w = target - moved; if (w>6.0f) w = 6.0f;
+                hat_push(p, w); p->banked -= w; moved += w;
+            }
+            if (p->banked<0.01f) p->banked=0;
+            station_note(pi, "WITHDRAWN. BACK ON YOUR HEAD."); sfx(11);
+        }
+        return;
+    }
+    if (st==3){
+        // the name/color picker runs before (and after) the till:
+        // adoption goes species -> name -> color -> payment
+        if (bud_stage[pi]==1 || bud_stage[pi]==3){
+            int base = bud_page[pi]*12;
+            if (row>=12 || base+row>=BUD_NAMES_N){ bud_page[pi] = (bud_page[pi]+1) % ((BUD_NAMES_N+11)/12); store_sel_reset(pi); sfx(6); return; }
+            if (bud_stage[pi]==1){ bud_dname[pi] = base+row; bud_stage[pi]=2; }
+            else { b->name_idx = base+row; bud_stage[pi]=0; do_save(); station_note(pi, "A NAME WORTH SINGING OF."); }
+            store_sel_reset(pi); sfx(11); return;
+        }
+        if (bud_stage[pi]==2 || bud_stage[pi]==4){
+            if (bud_stage[pi]==4){ b->color = row%BUD_COLORS_N; bud_stage[pi]=0; do_save(); station_note(pi, "LOOK AT YOU. GORGEOUS."); }
+            else {
+                bud_color_draft[pi] = row%BUD_COLORS_N; bud_stage[pi]=0;
+                if (pay_active) return;
+                if (p->carried < BUD_PRICE[bud_dsp[pi]]){ station_note(pi, "NOT ENOUGH HAT FOR THAT BUDDY"); sfx(16); return; }
+                start_payment(pi, 4, bud_dsp[pi], BUD_PRICE[bud_dsp[pi]]);
+            }
+            store_sel_reset(pi); sfx(11); return;
+        }
+        if (!b->active){
+            if (p->carried < BUD_PRICE[row%BUDN]){ station_note(pi, "NOT ENOUGH HAT FOR THAT BUDDY"); sfx(16); return; }
+            if (pi!=G.my_id && pi!=G.p2_slot){
+                // a LAN guest's panel can't run the picker (it lives
+                // here, host-side) — they adopt the classic way, with
+                // the species' own name and coat
+                if (pay_active) return;
+                bud_dname[pi] = BUD_DEF_NAME[row%BUDN]; bud_color_draft[pi] = 0;
+                start_payment(pi, 4, row%BUDN, BUD_PRICE[row%BUDN]);
+                return;
+            }
+            bud_dsp[pi] = row%BUDN; bud_page[pi]=0; bud_stage[pi]=1;
+            store_sel_reset(pi);
+            station_note(pi, "FIRST - A NAME."); sfx(6);
+            return;
+        }
+        if (b->fainted){
+            // the only business a fainted buddy does: a revive
+            if (pay_active) return;
+            { int price = bud_revive_price(b);
+              if (p->carried < price){ station_note(pi, "NOT ENOUGH HAT TO REVIVE"); sfx(16); return; }
+              start_payment(pi, 6, 0, price); }
+            return;
+        }
+        if (row<=2){
+            int *lvl = row==0? &b->up_hp : row==1? &b->up_atk : &b->up_def;
+            int cost = bud_train_cost(*lvl);
+            if (b->xp < cost){ station_note(pi, "NOT ENOUGH BUDDY XP"); sfx(16); return; }
+            b->xp -= cost; (*lvl)++;
+            if (row==0){ buddy_refresh(pi); b->hp += 25; if (b->hp>b->maxhp) b->hp=b->maxhp; }
+            station_note(pi, "TRAINED!"); sfx(11);
+            return;
+        }
+        if (row==3){
+            if (b->skills&1){ station_note(pi, "ALREADY TAUGHT"); sfx(16); return; }
+            if (b->xp < 40){ station_note(pi, "NEEDS 40 BUDDY XP"); sfx(16); return; }
+            b->xp -= 40; b->skills |= 1; station_note(pi, "MOVE TAUGHT!"); sfx(11);
+            return;
+        }
+        if (row==4){
+            if (b->skills&2){ station_note(pi, "ALREADY TAUGHT"); sfx(16); return; }
+            if (b->xp < 80){ station_note(pi, "NEEDS 80 BUDDY XP"); sfx(16); return; }
+            b->xp -= 80; b->skills |= 2; station_note(pi, "SPECIAL TAUGHT!"); sfx(11);
+            return;
+        }
+        if (row==5){
+            if (b->skills&4){ station_note(pi, "ALREADY TAUGHT"); sfx(16); return; }
+            if (b->xp < 60){ station_note(pi, "NEEDS 60 BUDDY XP"); sfx(16); return; }
+            b->xp -= 60; b->skills |= 4; station_note(pi, "THIRD MOVE TAUGHT!"); sfx(11);
+            return;
+        }
+        if (row==6){
+            if (b->skills&8){ station_note(pi, "ALREADY TAUGHT"); sfx(16); return; }
+            if (b->xp < 120){ station_note(pi, "NEEDS 120 BUDDY XP"); sfx(16); return; }
+            b->xp -= 120; b->skills |= 8; station_note(pi, "FOURTH MOVE TAUGHT!"); sfx(11);
+            return;
+        }
+        if (row==8 || row==9){
+            if (pi!=G.my_id && pi!=G.p2_slot){ station_note(pi, "NAMES + COATS ARE CHOSEN AT THE HOST'S TABLE"); sfx(16); return; }
+            if (row==8){ bud_page[pi] = b->name_idx/12; bud_stage[pi]=3; store_sel_reset(pi); station_note(pi, "A NEW NAME, THEN."); }
+            else { bud_stage[pi]=4; store_sel_reset(pi); station_note(pi, "PICK A COLOR."); }
+            sfx(6); return;
+        }
+        // change species
+        if (pay_active) return;
+        { int price = BUD_PRICE[(b->species+1)%BUDN];
+          if (p->carried < price){ station_note(pi, "NOT ENOUGH HAT TO CHANGE"); sfx(16); return; }
+          start_payment(pi, 5, (b->species+1)%BUDN, price); }
+        return;
+    }
+}
+
+// drive a mall station panel (station 0 delegates to the classic store)
+// WHALES ONLY scrolls (Daniel, Nov 5): sixteen rows never fit at a
+// readable size, so the panel windows over them like the craft menu —
+// full-size text, a scrollbar, and the selection always on screen.
+// Both the input (tap math) and the draw read the same window.
+#define WHALE_VIS 12
+static int whale_scroll[2];
+static int whale_slot_of(int pi){ return (G.p2_slot>=0 && pi==G.p2_slot)? 1 : 0; }
+static void whale_scroll_sync(int slot, int sel, int rows){
+    int *sc = &whale_scroll[slot];
+    if (sel < *sc) *sc = sel;
+    if (sel > *sc + WHALE_VIS-1) *sc = sel - (WHALE_VIS-1);
+    if (*sc > rows - WHALE_VIS) *sc = rows - WHALE_VIS;
+    if (*sc < 0) *sc = 0;
+}
+static void station_input(int pi, int st, int up, int down, int activate){
+    if (st==0){ store_input(pi, up, down, activate); return; }
+    if (st==4){ if (activate) G.bowl[pi].act=1; return; }   // Bug Bowl runs on its own input
+    // WHALES ONLY code entry: the local player is typing/pasting a code
+    if (st==1 && pi==G.my_id && whale_code_mode[pi]){
+        for (int i=0;i<IN.typed_n;i++){
+            char c = IN.typed[i];
+            if (c>='a' && c<='z') c = (char)(c-32);
+            if ((c>='A'&&c<='Z') || (c>='0'&&c<='9') || c=='-'){
+                if (whale_code_len[pi]<160){ whale_code_buf[pi][whale_code_len[pi]++]=c; whale_code_buf[pi][whale_code_len[pi]]=0; }
+            }
+        }
+        // Backspace: a tap deletes one character; HOLDING it down
+        // (Daniel's ask) keeps deleting — first repeat after ~0.35s,
+        // then about twenty a second. IN.backspace is only the press
+        // edge; IN.raw carries the held state.
+        { int held = (int)((IN.raw >> PK_BACKSPACE) & 1);
+          if (IN.backspace){ if (whale_code_len[pi]>0) whale_code_buf[pi][--whale_code_len[pi]]=0; whale_bs_hold[pi]=0; }
+          else if (held){
+              whale_bs_hold[pi]++;
+              if (whale_bs_hold[pi]>21 && (whale_bs_hold[pi]%3)==0 && whale_code_len[pi]>0)
+                  whale_code_buf[pi][--whale_code_len[pi]]=0;
+          } else whale_bs_hold[pi]=0; }
+        if (IN.enter_pressed){
+            int sku = whale_redeem(whale_code_buf[pi]);
+            whale_code_mode[pi]=0;
+            if (sku>=0){ whale_grant(sku); store_note("UNLOCKED! IT IS ON THE COUNTER."); sfx(11); }
+            else { store_note("THAT CODE DOES NOT CHECK OUT"); sfx(16); }
+        } else if (IN.esc_pressed){ whale_code_mode[pi]=0; sfx(5); }
+        return;
+    }
+    int *selp = (G.p2_slot>=0 && pi==G.p2_slot)? &G.store_sel2 : &G.store_sel;
+    int rows = station_rows(st, &G.p[pi]);
+    if (rows<=0) return;
+    if (*selp>=rows) *selp=0;
+    if (up){ *selp = (*selp + rows-1)%rows; sfx(6); }
+    if (down){ *selp = (*selp + 1)%rows; sfx(6); }
+    if (st==1) whale_scroll_sync(whale_slot_of(pi), *selp, rows);
+    if (pi==G.my_id && IN.tapped){
+        int w = G.ui_compact? 308 : STORE_W;
+        int x = G.ui_compact? G.view_x0 + (G.view_w - w)/2 : STORE_X;
+        if (IN.tap_x<x-6 || IN.tap_x>x+w+6 || IN.tap_y<STORE_Y-6 || IN.tap_y>STORE_Y+STORE_H+6) G.tap_close_store=1;
+        else if (st==1){
+            // tap math follows the SCROLLED window the draw shows
+            int sc = whale_scroll[whale_slot_of(pi)];
+            for (int i=sc;i<sc+WHALE_VIS && i<rows;i++){
+                int ry = MALL_ROW0 + (i-sc)*STORE_ROWH;
+                if (IN.tap_y>=ry-5 && IN.tap_y<=ry+STORE_ROWH-2){
+                    if (i==*selp) activate=1; else { *selp=i; sfx(6); }
+                    break;
+                }
+            }
+        }
+        else for (int i=0;i<rows;i++){
+            int ry = MALL_ROW0 + i*STORE_ROWH;
+            if (IN.tap_y>=ry-5 && IN.tap_y<=ry+STORE_ROWH-2){
+                if (i==*selp) activate=1; else { *selp=i; sfx(6); }
+                break;
+            }
+        }
+    }
+    if (activate){
+        // WHALES ONLY on the local screen: codes are typed here, and a
+        // buy opens THIS player's browser (never the host's).
+        if (st==1 && pi==G.my_id){
+            int row = *selp;
+            if (row==WHALE_N){ whale_code_mode[pi]=1; whale_code_len[pi]=0; whale_code_buf[pi][0]=0; sfx(6); return; }
+            if (row<WHALE_N && !(G.p[pi].whale_own & (1<<row))){
+                if (WHALE_LINK[row][0]){ plat_open_url(WHALE_LINK[row]); store_note("PAYMENT PAGE OPENED - YOUR CODE COMES AFTER"); }
+                else store_note("THE WHALE TILL IS NOT OPEN YET");
+                sfx(11); return;
+            }
+        }
+        if (G.net_mode==NET_CLIENT){
+            int o=0; wr_u8(&o,'M'); wr_u8(&o,(u8)st); wr_u8(&o,(u8)*selp);
+            plat_net_send(pkt, o, 0);
+            sfx(10);
+        } else station_action(pi, st, *selp);
+    }
+}
+// ---------------------------------------------------------------------------
+// BUG BOWL — the mall's bowling alley. You bowl with bug carcasses: one
+// carcass off your head per ball. The scoring is the real thing —
+// strikes score 10 plus your next two balls, spares 10 plus the next
+// one, and the tenth frame can run to three balls with fresh racks
+// after strikes and spares.
+// ---------------------------------------------------------------------------
+// The bowling ball's radius, in lane units. ONE constant rules both
+// sides of the throw: the carcass is DRAWN at this radius and it only
+// knocks a pin down when the two actually touch (ball radius + the
+// pin's own half-width). What you see is exactly what hits.
+#define BOWL_BALL_R 8
+#define BOWL_PIN_R 4
+static const float PIN_X[10] = { 0, -15, 15, -30, 0, 30, -45, -15, 15, 45 };
+static const float PIN_Y[10] = { 300, 322, 322, 344, 344, 344, 366, 366, 366, 366 };
+static void bowl_rack(Bowl *bw){ for (int i=0;i<10;i++){ bw->standing[i]=1; bw->pft[i]=0; } }
+static int bowl_pins_up(Bowl *bw){ int n=0; for (int i=0;i<10;i++) n+=bw->standing[i]; return n; }
+static void bowl_new_game(int pi){
+    Bowl *bw=&G.bowl[pi];
+    smemset(bw, 0, sizeof(*bw));
+    bowl_rack(bw);
+    bw->active=1; bw->phase=0; bw->angle_dir=1; bw->power_dir=1;
+    scpy(bw->msg, "FRAME 1 - YOUR THROW!", 40); bw->msg_t=1.4f;
+    sfx(19);
+}
+// cumulative score through frame f, or -1 if it can't be known yet
+static int bowl_cum(Bowl *bw, int f){
+    int ri=0, tot=0;
+    for (int fr=0; fr<=f; fr++){
+        if (fr<9){
+            if (ri>=bw->nrolls) return -1;
+            if (bw->rolls[ri]==10){
+                if (ri+2>=bw->nrolls) return -1;
+                tot += 10 + bw->rolls[ri+1] + bw->rolls[ri+2]; ri+=1;
+            } else {
+                if (ri+1>=bw->nrolls) return -1;
+                if (bw->rolls[ri]+bw->rolls[ri+1]==10){
+                    if (ri+2>=bw->nrolls) return -1;
+                    tot += 10 + bw->rolls[ri+2];
+                } else tot += bw->rolls[ri] + bw->rolls[ri+1];
+                ri+=2;
+            }
+        } else {
+            if (!bw->game_over) return -1;
+            while (ri<bw->nrolls){ tot += bw->rolls[ri]; ri++; }
+        }
+    }
+    return tot;
+}
+// the roll index where frame f's rolls begin (for the scoresheet)
+static int bowl_frame_ri(Bowl *bw, int f){
+    int ri=0;
+    for (int fr=0; fr<f && ri<bw->nrolls; fr++)
+        ri += (fr<9 && bw->rolls[ri]==10)? 1 : 2;
+    return ri;
+}
+static void bowl_record(Bowl *bw, int knocked){
+    char m = knocked==0? '-' : (knocked==bw->pins_before? (bw->pins_before==10? 'X' : '/') : (char)('0'+knocked));
+    if (bw->nrolls<21){ bw->rolls[bw->nrolls]=knocked; bw->marks[bw->nrolls]=m; bw->nrolls++; }
+    int f=bw->frame;
+    if (f<9){
+        if (bw->ball==0 && knocked<10){ bw->ball=1; }
+        else { bw->frame++; bw->ball=0; bw->ri_frame=bw->nrolls; bowl_rack(bw); }
+    } else {
+        int r1 = bw->rolls[bw->ri_frame];
+        if (bw->ball==0){
+            if (knocked==10) bowl_rack(bw);
+            bw->ball=1;
+        } else if (bw->ball==1){
+            int r2 = knocked;
+            if (r1==10){ if (r2==10) bowl_rack(bw); bw->ball=2; }
+            else if (r1+r2==10){ bowl_rack(bw); bw->ball=2; }
+            else bw->game_over=1;
+        } else bw->game_over=1;
+    }
+    if (bw->game_over){
+        bw->phase=5;
+        bw->final = bowl_cum(bw, 9);
+        if (bw->final > G.rec_bowl) G.rec_bowl = bw->final;
+    } else bw->phase=0;
+}
+static void bowl_knock(Bowl *bw, int i, float dx, float dy, float speed){
+    float len = fsqrt(dx*dx + dy*dy);
+    if (len<0.01f){ dx=0; dy=1; len=1; }
+    bw->standing[i]=0;
+    bw->pfx[i]=PIN_X[i]; bw->pfy[i]=PIN_Y[i];
+    bw->pfvx[i]=dx/len*speed + rng_range(-36.0f, 36.0f);
+    bw->pfvy[i]=dy/len*speed;
+    bw->pft[i]=0.30f;
+}
+static void bowl_throw(int pi){
+    Bowl *bw=&G.bowl[pi]; Player *p=&G.p[pi];
+    if (p->stack_n<=0){
+        scpy(bw->msg, "NO CARCASSES ON YOUR HEAD!", 40); bw->msg_t=1.6f;
+        sfx(16); bw->phase=0; return;
+    }
+    if (G.net_mode==NET_CLIENT){
+        // the guest's game is local; the host just takes the carcass
+        bw->bl_kind = ((int)p->stack[p->stack_n-1])%4;
+        int o=0; wr_u8(&o,'M'); wr_u8(&o,4); wr_u8(&o,77); plat_net_send(pkt, o, 0);
+    } else {
+        float w = hat_pop(p);
+        bw->bl_kind = ((int)w)%4;
+    }
+    bw->pins_before = bowl_pins_up(bw);
+    float sp = 260.0f + bw->power*3.0f;
+    bw->bx = bw->thrower_x; bw->by = 6;
+    bw->bvy = fcos(bw->angle)*sp;
+    bw->bvx = fsin(bw->angle)*sp*0.6f;
+    bw->bl_live=1; bw->bl_gutter=0; bw->phase=3;
+    sfx(15);
+}
+static int bowl_axis(int pi){
+    if (G.p2_slot>=0 && pi==G.p2_slot)
+        return (act2_down(ACT_RIGHT)?1:0) - (act2_down(ACT_LEFT)?1:0);
+    int k = IN.keys | IN.touch_keys;
+    return ((k&K_RIGHT)?1:0) - ((k&K_LEFT)?1:0);
+}
+static void bowl_update(int pi, float dt){
+    Bowl *bw=&G.bowl[pi];
+    int act = bw->act; bw->act=0;
+    if (bw->msg_t>0) bw->msg_t-=dt;
+    // toppling pins fly, and can take their neighbours down with them
+    for (int i=0;i<10;i++) if (bw->pft[i]>0){
+        bw->pft[i]-=dt;
+        bw->pfx[i]+=bw->pfvx[i]*dt; bw->pfy[i]+=bw->pfvy[i]*dt;
+        for (int j=0;j<10;j++) if (bw->standing[j]){
+            float dx=PIN_X[j]-bw->pfx[i], dy=PIN_Y[j]-bw->pfy[i];
+            if (dx*dx+dy*dy < 15*15)
+                bowl_knock(bw, j, bw->pfvx[i], bw->pfvy[i],
+                           fsqrt(bw->pfvx[i]*bw->pfvx[i]+bw->pfvy[i]*bw->pfvy[i])*0.75f);
+        }
+    }
+    if (!bw->active){ if (act) bowl_new_game(pi); return; }
+    if (bw->game_over){ if (act) bowl_new_game(pi); return; }
+    switch (bw->phase){
+    case 0: { int ax=bowl_axis(pi);
+              bw->thrower_x = fclamp(bw->thrower_x + ax*150.0f*dt, -52.0f, 52.0f);
+              if (act){ bw->phase=1; bw->angle=-0.42f; bw->angle_dir=1; sfx(6); } } break;
+    case 1: bw->angle += bw->angle_dir*1.15f*dt;   // kid-paced meters: the aim
+            if (bw->angle>0.42f){ bw->angle=0.42f; bw->angle_dir=-1; }   // sweep and the
+            if (bw->angle<-0.42f){ bw->angle=-0.42f; bw->angle_dir=1; }  // power bar both
+            if (act){ bw->phase=2; bw->power=0; bw->power_dir=1; sfx(6); } break;  // run slower
+    case 2: bw->power += bw->power_dir*130.0f*dt;
+            if (bw->power>100){ bw->power=100; bw->power_dir=-1; }
+            if (bw->power<0){ bw->power=0; bw->power_dir=1; }
+            if (act) bowl_throw(pi); break;
+    case 3: { float sp2 = fsqrt(bw->bvx*bw->bvx + bw->bvy*bw->bvy);
+              bw->bx += bw->bvx*dt; bw->by += bw->bvy*dt;
+              float fr = 1.0f - 0.10f*dt; bw->bvx*=fr; bw->bvy*=fr;
+              if (!bw->bl_gutter && (bw->bx<-60 || bw->bx>60)){
+                  // the ball drops in when its CENTER crosses the lane's
+                  // edge — the forgiving rule, so a throw from the far
+                  // side of the lane isn't born in the gutter
+                  bw->bl_gutter=1; bw->bx = bw->bx<0? -67 : 67; bw->bvx=0; sfx(16);
+              }
+              if (bw->bl_gutter) bw->bx = bw->bx<0? -67 : 67;
+              else for (int i=0;i<10;i++) if (bw->standing[i]){
+                  float dx=PIN_X[i]-bw->bx, dy=PIN_Y[i]-bw->by;
+                  if (dx*dx+dy*dy < (BOWL_BALL_R+BOWL_PIN_R)*(BOWL_BALL_R+BOWL_PIN_R)){
+                      bowl_knock(bw, i, dx, dy, 230.0f + sp2*0.28f);
+                      bw->bvx = bw->bvx*0.90f + dx*0.5f; bw->bvy *= 0.90f;
+                      sfx(3);
+                  }
+              }
+              if (bw->by>415 || sp2<50){ bw->phase=4; bw->settle_t=0.85f; bw->bl_live=0; } } break;
+    case 4: bw->settle_t-=dt;
+            if (bw->settle_t<=0){
+                int knocked = bw->pins_before - bowl_pins_up(bw);
+                int was_frame=bw->frame, was_ball=bw->ball, was_gutter=bw->bl_gutter;
+                bowl_record(bw, knocked);
+                if (bw->game_over){ scpy(bw->msg, "GAME OVER!", 40); sfx(11); }
+                else if (knocked==10 && bw->pins_before==10){ scpy(bw->msg, "STRIKE!", 40); sfx(11); }
+                else if (was_ball==1 && was_frame<9 && knocked>0 && knocked==bw->pins_before){ scpy(bw->msg, "SPARE!", 40); sfx(11); }
+                else if (was_gutter && knocked==0){ scpy(bw->msg, "INTO THE GUTTER...", 40); }
+                else if (knocked==0){ scpy(bw->msg, "A COMPLETE WHIFF!", 40); }
+                else { char *q=bw->msg; q=sapp_int(q, knocked); q=sappend(q, knocked==1? " PIN!" : " PINS!"); *q=0; }
+                bw->msg_t=1.8f;
+            } break;
+    }
+}
+static void draw_pin_shape(int x, int y, float tilt){
+    int tx = (int)tilt;
+    ellipse_fill(x, y+7, 6, 3, COL(198,192,184));
+    ellipse_fill(x+tx, y, 5, 8, COL(245,242,238));
+    rect_fill(x+tx-4, y-3, 8, 3, COL(200,60,50));
+    disc_fill(x+tx, y-6, 3, COL(245,242,238));
+    pset(x+tx-1, y-6, COL(30,30,40)); pset(x+tx+1, y-6, COL(30,30,40));   // beady bug eyes
+}
+static void draw_bowling(void){
+    Bowl *bw=&G.bowl[G.store_pi]; Player *me=&G.p[G.store_pi];
+    int x0=G.view_x0, vw=G.view_w, compact=G.ui_compact;
+    int cx = x0 + vw/2;
+    rect_fill(x0, G.view_y0, vw, G.view_h>0? G.view_h : VH, COL(16,14,28));
+    // header
+    rect_fill(x0+4, 22, vw-8, 30, COL(50,70,120)); rect_line(x0+4, 22, vw-8, 30, OUTLINE);
+    draw_text_center(cx, 26, "BUG BOWL", 2, COL(255,230,170));
+    { char b[64]; char *q=b;
+      if (!bw->active) q=sappend(q, "THE MALL LANES - ONE CARCASS A BALL");
+      else if (bw->game_over){ q=sappend(q, "FINAL SCORE: "); q=sapp_int(q, bw->final); }
+      else { if (bw->frame<9){ q=sappend(q, "FRAME "); q=sapp_int(q, bw->frame+1); }
+             else q=sappend(q, "TENTH FRAME");
+             q=sappend(q, " - BALL "); q=sapp_int(q, bw->ball+1);
+             q=sappend(q, " - CARCASSES: "); q=sapp_int(q, me->stack_n); }
+      *q=0; draw_text_center(cx, 42, b, 1, COL(200,220,255)); }
+    // scoresheet: ten frame boxes, roll marks on top, running total below
+    int sy=58, sh=compact? 36 : 40, fw=(vw-16)/10;
+    for (int f=0;f<10;f++){
+        int fx = x0+8+f*fw;
+        rect_line(fx, sy, fw-2, sh, COL(150,160,190));
+        int cells = f<9? 2 : 3, cw2=(fw-2)/cells;
+        for (int c=1;c<cells;c++) rect_fill(fx+c*cw2, sy, 1, 13, COL(150,160,190));
+        rect_fill(fx, sy+13, fw-2, 1, COL(150,160,190));
+        int fri = bowl_frame_ri(bw, f);
+        char mb[2]; mb[1]=0;
+        if (f<9){
+            int strike = (fri<bw->nrolls && bw->rolls[fri]==10);
+            if (strike){ mb[0]='X'; draw_text_center(fx+cw2+cw2/2, sy+3, mb, 1, COL(255,230,170)); }
+            else {
+                if (fri<bw->nrolls){ mb[0]=bw->marks[fri]; draw_text_center(fx+cw2/2, sy+3, mb, 1, COL(255,230,170)); }
+                if (fri+1<bw->nrolls){ mb[0]=bw->marks[fri+1]; draw_text_center(fx+cw2+cw2/2, sy+3, mb, 1, COL(255,230,170)); }
+            }
+        } else for (int c=0;c<3;c++)
+            if (fri+c<bw->nrolls){ mb[0]=bw->marks[fri+c]; draw_text_center(fx+c*cw2+cw2/2, sy+3, mb, 1, COL(255,230,170)); }
+        int cum = bowl_cum(bw, f);
+        if (cum>=0){ char cb[8]; char *q=cb; q=sapp_int(q, cum); *q=0;
+                     draw_text_center(fx+(fw-2)/2, sy+sh-14, cb, 1, COL(240,244,255)); }
+    }
+    // the lane
+    float KX = compact? 1.15f : 1.5f, KY = 0.49f;
+    int foul = VH-54;
+    int lane_top = foul - (int)(392*KY);
+    rect_fill(cx-(int)(76*KX), lane_top, (int)(152*KX), foul-lane_top+8, COL(96,80,66));
+    rect_fill(cx-(int)(60*KX), lane_top, (int)(120*KX), foul-lane_top+8, COL(216,186,130));
+    rect_fill(cx-(int)(60*KX), lane_top, (int)(120*KX), (int)(112*KY), COL(202,172,118));   // the deck
+    for (int a=0;a<5;a++){ int ax = cx + (int)((a-2)*15*KX), ay = foul - (int)(150*KY) - (a==2? 10:0);
+        tri_fill(ax, ay-6, ax-3, ay+4, ax+3, ay+4, COL(196,164,108)); }
+    rect_fill(cx-(int)(60*KX), foul, (int)(120*KX), 3, COL(200,60,50));                    // foul line
+    // pins, far row first
+    for (int i=9;i>=0;i--){
+        if (bw->standing[i]) draw_pin_shape(cx + (int)(PIN_X[i]*KX), foul - (int)(PIN_Y[i]*KY), 0);
+        else if (bw->pft[i]>0) draw_pin_shape(cx + (int)(bw->pfx[i]*KX), foul - (int)(bw->pfy[i]*KY), bw->pfvx[i]*0.045f);
+    }
+    // the ball: a carcass, rolled. Before the throw it waits in hand.
+    // Drawn from BOWL_BALL_R so the picture IS the physics: the sprite's
+    // radius on screen is the radius that knocks pins (draw_carcass's
+    // body radius is size+3 screen px, hence the -3).
+    if (bw->bl_live) draw_carcass(cx + (int)(bw->bx*KX), foul - (int)(bw->by*KY), (int)(BOWL_BALL_R*KX)-3, bw->bl_kind, bw->by*0.06f);
+    else if (bw->active && !bw->game_over && bw->phase<=2)
+        draw_carcass(cx + (int)(bw->thrower_x*KX) + 10, foul+13, (int)(BOWL_BALL_R*KX)-3, 0, 0.5f);
+    // the bowler: a mini dev in the player's own hoodie
+    if (bw->active && !bw->game_over){
+        int txp = cx + (int)(bw->thrower_x*KX), typ = foul+16;
+        ellipse_fill(txp, typ+8, 7, 3, COL(40,36,50));
+        rect_fill(txp-5, typ-2, 10, 9, HOODIE[me->color&3]); rect_line(txp-5, typ-2, 10, 9, OUTLINE);
+        disc_fill(txp, typ-6, 4, COL(240,200,160));
+        if (bw->phase==1 || bw->phase==2){
+            int sxp = cx + (int)(bw->thrower_x*KX), syp = foul - (int)(6*KY);
+            int ex = sxp + (int)(fsin(bw->angle)*54), ey = syp - (int)(fcos(bw->angle)*54);
+            for (int d=1;d<=3;d++){ int px2=sxp+(ex-sxp)*d/3, py2=syp+(ey-syp)*d/3;
+                disc_fill(px2, py2, 1, COL(255,240,200)); }
+        }
+        if (bw->phase==2){
+            rect_fill(cx-70, VH-42, 140, 8, COL(60,60,70)); rect_line(cx-70, VH-42, 140, 8, OUTLINE);
+            u32 pc = bw->power<50? COL(90,200,90) : bw->power<80? COL(240,200,60) : COL(230,80,60);
+            rect_fill(cx-69, VH-41, (int)(bw->power*1.38f), 6, pc);
+            draw_text_center(cx, VH-52, "POWER", 1, COL(200,210,230));
+        }
+    }
+    if (bw->msg_t>0) draw_text_center(cx, foul-108, bw->msg, 2, COL(255,214,64));
+    if (!bw->active && G.rec_bowl>0){ char b[48]; char *q=b; q=sappend(q, "BEST GAME SO FAR: "); q=sapp_int(q, G.rec_bowl); *q=0;
+        draw_text_center(cx, foul+30, b, 1, COL(200,220,255)); }
+    if (bw->active && !bw->game_over && me->stack_n<=0 && bw->phase<=2)
+        draw_text_center(cx, foul+30, "NO CARCASSES - GO SQUASH SOME BUGS!", 1, COL(255,140,120));
+    // the prompt line
+    { const char *ak = (G.store_pi==G.my_id)? key_name(G.bind[ACT_FIRE]) : "A";
+      char pb[96]; char *q=pb;
+      if (!bw->active || bw->game_over){ q=sappend(q, ak); q=sappend(q, " - NEW GAME"); }
+      else if (bw->phase==0){ q=sappend(q, "LEFT/RIGHT - POSITION - "); q=sappend(q, ak); q=sappend(q, " - AIM"); }
+      else if (bw->phase==1){ q=sappend(q, ak); q=sappend(q, " - LOCK THE ANGLE"); }
+      else if (bw->phase==2){ q=sappend(q, ak); q=sappend(q, " - THROW!"); }
+      else q=sappend(q, "ROLLING...");
+      *q=0; draw_text_center(cx, VH-20, pb, 1, COL(160,230,255)); }
+}
+
+static void draw_mall_panel(int st){
+    Player *me=&G.p[G.store_pi];
+    Buddy *bud=&G.bud[G.store_pi];
+    int sel = (G.p2_slot>=0 && G.store_pi==G.p2_slot)? G.store_sel2 : G.store_sel;
+    int y=STORE_Y, h=STORE_H;
+    int w = G.ui_compact? 308 : STORE_W;
+    int x = G.ui_compact? G.view_x0 + (G.view_w - w)/2 : STORE_X;
+    static const u32 BAND[4] = { COL(74,36,34), COL(64,40,84), COL(36,74,52), COL(120,66,32) };
+    if (!G.ui_compact) rect_fill(0, 0, VW, VH, COL(16,14,28));
+    else rect_fill(G.view_x0, G.view_y0, G.view_w, G.view_h>0? G.view_h : VH, COL(16,14,28));
+    rect_fill(x, y+1, w+8, h+8, COL(8,6,14));
+    rect_fill(x-4, y-4, w+8, h+8, OUTLINE);
+    rect_fill(x, y, w, h, COL(250,244,225));
+    rect_line(x+3, y+3, w-6, h-6, COL(198,164,84));
+    rect_fill(x, y, w, 32, BAND[st&3]);
+    rect_fill(x, y+31, w, 2, COL(198,164,84));
+    draw_text_center(x+w/2, y+3, MALL_STATION[st&3], 2, COL(255,226,150));
+    { char b[96]; char *q=b;
+      if (st==1){ q=sappend(q, "PURE VANITY - $0.67 EACH - NO GAMEPLAY EFFECT"); }
+      else if (st==2){ q=sappend(q, "BANKED: "); q=sapp_int(q, (int)me->banked); q=sappend(q, " KG - ON YOUR HEAD: "); q=sapp_int(q, (int)me->carried); q=sappend(q, " KG"); }
+      else if (bud_stage[G.store_pi]==1 || bud_stage[G.store_pi]==3){ q=sappend(q, "NAMES OF THE ELDER DAYS - PAGE "); q=sapp_int(q, bud_page[G.store_pi]+1); q=sappend(q, " OF "); q=sapp_int(q, (BUD_NAMES_N+11)/12); }
+      else if (bud_stage[G.store_pi]==2 || bud_stage[G.store_pi]==4){ q=sappend(q, "STANDARD COATS - AND ONE VERY NEON RAINBOW"); }
+      else if (bud->active){ q=sappend(q, BUD_ELF[bud->name_idx%BUD_NAMES_N]); q=sappend(q, " THE "); q=sappend(q, BUD_NAME[bud->species%BUDN]); q=sappend(q, " - XP "); q=sapp_int(q, bud->xp);
+          q=sappend(q, " - HP "); q=sapp_int(q, (int)bud->hp); q=sappend(q, "/"); q=sapp_int(q, (int)bud->maxhp);
+          if (bud->fainted) q=sappend(q, " - FAINTED"); }
+      else q=sappend(q, "NO BUDDY YET - EVERY DEV NEEDS A FRIEND");
+      draw_text_center(x+w/2, y+20, b, 1, COL(255,240,205)); }
+    if (!G.ui_compact)
+    { const char *sh = "SHIELD: UP";
+      draw_text(x+w-14-text_w(sh,1), y+8, sh, 1, COL(150,220,255)); }
+    if (st==1 && whale_code_mode[G.store_pi]){
+        // typing/pasting an unlock code replaces the price list
+        draw_text_center(x+w/2, y+64, "TYPE OR PASTE YOUR UNLOCK CODE", 2, COL(40,36,50));
+        rect_fill(x+16, y+108, w-32, 46, COL(255,252,240));
+        rect_line(x+16, y+108, w-32, 46, COL(198,164,84));
+        { const char *cb = whale_code_buf[G.store_pi]; int cl = whale_code_len[G.store_pi];
+          int show = cl>56? cl-56 : 0;
+          char disp[64]; int dn=0; for (int i=show;i<cl && dn<56;i++) disp[dn++]=cb[i]; disp[dn]=0;
+          draw_text_center(x+w/2, y+118, dn? disp : "...", 1, COL(40,36,50));
+          char cb2[24]; char *q2=cb2; q2=sapp_int(q2, cl); q2=sappend(q2, " / 142 CHARS"); *q2=0;
+          draw_text_center(x+w/2, y+136, cb2, 1, COL(120,110,90)); }
+        draw_text_center(x+w/2, y+176, "THE CODE IS YOUR RECEIPT - KEEP IT SAFE.", 1, COL(90,80,60));
+        draw_text_center(x+w/2, y+192, "UNLOCKS LIVE IN YOUR SAVE DATA; THE CODE RESTORES THEM.", 1, COL(90,80,60));
+        draw_text_center(x+w/2, y+224, "ENTER - REDEEM     ESC - CANCEL", 1, COL(40,36,50));
+        return;
+    }
+    int rows = station_rows(st, me);
+    int rowh = STORE_ROWH;   // Whales Only scrolls at full size now (Nov 5)
+    int wsc = 0;             // the visible window's first row (Whales Only)
+    if (st==1){ whale_scroll_sync(whale_slot_of(G.store_pi), sel, rows); wsc = whale_scroll[whale_slot_of(G.store_pi)]; }
+    int rows_end = rows;
+    if (st==1 && rows_end > wsc+WHALE_VIS) rows_end = wsc+WHALE_VIS;
+    char nb[40], rb[24];
+    for (int i=wsc;i<rows_end;i++){
+        int ry = MALL_ROW0 + (i-wsc)*rowh;
+        if (i%2==0) rect_fill(x+8, ry-2, w-16, rowh, COL(243,236,210));
+        rect_line(x+8, ry-2, w-16, rowh, COL(228,219,192));
+        if (i==sel){
+            rect_fill(x+8, ry-2, w-16, rowh, COL(255,224,138));
+            rect_fill(x+8, ry-2, 3, rowh, COL(190,60,40));
+            rect_line(x+8, ry-2, w-16, rowh, COL(198,164,84));
+        }
+        const char *nm = station_row_name(st, i, me, nb);
+        const char *rt = station_row_right(st, i, me, rb);
+        if (G.ui_compact) draw_text(x+16, ry+5, nm, 1, COL(40,36,50));
+        else draw_text(x+16, ry+2, nm, 2, COL(40,36,50));
+        if (st==3 && (bud_stage[G.store_pi]==2 || bud_stage[G.store_pi]==4)){
+            // a live swatch beside each coat — the rainbow one cycles
+            Buddy *pb = &G.bud[G.store_pi]; int keep = pb->color; pb->color = i;
+            u32 sw = bud_coat(pb, COL(168,164,158)); pb->color = keep;
+            int swx = x+w-40, swy = ry + (G.ui_compact? 4:6), sww = G.ui_compact? 14:18, swh = G.ui_compact? 9:12;
+            rect_fill(swx, swy, sww, swh, sw); rect_line(swx, swy, sww, swh, COL(90,80,60));
+        }
+        u32 pc = COL(150,95,30);
+        if (G.ui_compact) draw_text(x+w-14-text_w(rt,1), ry+5, rt, 1, pc);
+        else draw_text(x+w-14-text_w(rt,2), ry+2, rt, 2, pc);
+    }
+    if (st==1 && rows>WHALE_VIS){
+        // the scrollbar: a track in the panel margin, a thumb that
+        // says where in the sixteen rows you are (craft menu style)
+        int track_y = MALL_ROW0-2, track_h = WHALE_VIS*STORE_ROWH-4;
+        rect_fill(x+w-6, track_y, 3, track_h, COL(214,204,178));
+        int th = track_h*WHALE_VIS/rows; if (th<12) th=12;
+        int ty2 = track_y + (track_h-th)*wsc/(rows-WHALE_VIS);
+        rect_fill(x+w-6, ty2, 3, th, COL(190,60,40));
+    }
+    int by = y+h-40;
+    int bh = G.ui_compact? 24 : 20;
+    rect_fill(x+8, by-4, w-16, bh, COL(240,232,205));
+    rect_line(x+8, by-4, w-16, bh, COL(198,164,84));
+    rect_fill(x+8, by-4, 3, bh, COL(190,60,40));
+    if (G.ui_compact){
+        char bb[128]; scpy(bb, station_blurb(st, sel, me), 128);
+        int cut=-1; for (int i=0; bb[i] && i<34; i++) if (bb[i]==' ') cut=i;
+        if (cut>0 && bb[cut+1]){ bb[cut]=0;
+            draw_text(x+14, by+1, bb, 1, COL(80,66,44));
+            draw_text(x+14, by+12, bb+cut+1, 1, COL(80,66,44));
+        } else draw_text(x+14, by+2, bb, 1, COL(80,66,44));
+    }
+    else draw_text(x+14, by+2, station_blurb(st, sel, me), 1, COL(80,66,44));
+    if (pay_active) draw_text_center(x+w/2, y+h-13, "COUNTING CARCASSES...", 1, COL(190,60,40));
+    else if (G.store_msg_t>0) draw_text_center(x+w/2, y+h-13, G.store_msg, 1, COL(60,140,60));
+    else if (G.ui_compact) draw_text_center(x+w/2, y+h-13, "SHIELD UP - FIRE SELECTS - BACK LEAVES", 1, COL(88,76,54));
+    else if (mobile_ui()) draw_text_center(x+w/2, y+h-13, "TAP A ROW - TAP AGAIN TO SELECT - TAP OUTSIDE TO LEAVE", 1, COL(88,76,54));
+    else { char b[80]; char *q=b; q=sappend(q, "ARROWS CHOOSE - "); q=sappend(q, key_name(G.bind[ACT_FIRE]));
+           q=sappend(q, " SELECTS - "); q=sappend(q, key_name(G.bind[ACT_INTERACT])); q=sappend(q, " LEAVES");
+           draw_text_center(x+w/2, y+h-13, b, 1, COL(88,76,54)); }
+}
+static void draw_active_panel(void){
+    if (G.store_station==0) draw_store_panel();
+    else if (G.store_station==4) draw_bowling();
+    else draw_mall_panel(G.store_station);
+}
+
+// ---------------------------------------------------------------------------
+// Menus / splash / help / game over
+// ---------------------------------------------------------------------------
+static void draw_demo_scene(void){
+    // a living diorama behind the menus: plaza, store, a dev with a tower
+    // hat, and bugs wandering in circles
+    G.camx = 0; G.camy = 30;
+    render_world();                    // (no entities exist in menu state)
+    static Bug demo[8];
+    for (int i=0;i<8;i++){
+        Bug *b=&demo[i];
+        b->alive=1; b->kind=i%4; b->w=4+i*7; b->hp=b->maxhp=100;
+        float a = G.anim_t*0.35f + i*1.7f;
+        b->x = fcos(a)*(96+i*22); b->y = 128 + fsin(a*1.3f)*26 + i*5;
+        b->leg_ph = G.anim_t*9 + i; b->wobble = a; b->hit_t=0; b->bp_t=0; b->seed=i*31;
+        draw_bug_sprite(b);
+    }
+    // one absolute unit of a bug lumbering along the bottom, forever
+    { static Bug big;
+      float gx = G.anim_t*24.0f; gx -= (int)(gx/880.0f)*880.0f; gx -= 440.0f;
+      big.alive=1; big.kind=1; big.w=64; big.hp=big.maxhp=100;
+      big.x=gx; big.y=172; big.leg_ph=G.anim_t*5.0f; big.wobble=0.6f;
+      big.hit_t=0; big.bp_t=0; big.seed=777;
+      draw_bug_sprite(&big); }
+    static Player hero;
+    smemset(&hero, 0, sizeof(hero));
+    hero.connected=1; hero.alive=1; hero.name[0]=0;
+    hero.x=-52; hero.y=86; hero.weapon=0; hero.owned[0]=1;
+    hero.hp=hero.maxhp=100; hero.walk_ph=G.anim_t*4;
+    hero.aim=-0.5f + fsin(G.anim_t*0.45f)*0.45f;      // idly scanning for bugs
+    hero.stack_n = 30 + (int)(fsin(G.anim_t*0.6f)*9.0f);   // the hat breathes
+    hero.carried=190;
+    for (int i=0;i<48;i++) hero.stack[i]=3+(i%5);
+    draw_player_sprite(&hero);
+    // drifting pollen in the menu light (glow-up)
+    for (int i=0;i<22;i++){
+        float mx = fsin(G.anim_t*0.11f + i*2.39f)*300 + fcos(G.anim_t*0.05f+i)*40;
+        float my = 40 + (float)((i*67)%260) + fsin(G.anim_t*0.23f + i*1.7f)*9;
+        pset_blend(VW/2 + (int)mx, (int)my, COL(255,240,200), 70 + (i%4)*30);
+    }
+}
+static const char *menu_items(int *count){
+    static char buf[8][24];
+    int n=0;
+    if (G.has_save){ scpy(buf[n++], "CONTINUE", 24); }
+    scpy(buf[n++], "SINGLE PLAYER", 24);
+    scpy(buf[n++], "HOST LAN GAME", 24);
+    scpy(buf[n++], "JOIN LAN GAME", 24);
+    scpy(buf[n++], "HOW TO PLAY", 24);
+    *count=n;
+    // return base pointer via a hack: caller uses menu_item(i)
+    (void)buf;
+    return 0;
+}
+// Every build has the same dead-simple menu — START and go. There is
+// no LAN mode to pick: native builds are always hosts (friends join
+// from a browser), and the web build is a guest when a native host
+// served the page, single-player otherwise.
+#define MENU_SIMPLE 1
+#define MENU_FIELDS 1
+#ifdef PLAT_WASM
+#define START_MODE NET_OFF
+#else
+#define START_MODE NET_HOST
+#endif
+// the 2P CO-OP row exists only while two controllers are detected —
+// Daniel's rule: the option appears automatically with the hardware.
+static int coop_row(void){ return IN.pad_count>=2; }
+// with gamepads in use the SETTINGS / CONTROLS row (keyboard bindings,
+// touch scheme) leaves the menu — pad players never see it.
+static int menu_base_count(void){ return (G.has_save? 7:6) - (menu_pad_mode()? 1:0); }
+static const char *menu_item(int i){
+    static char buf[24];
+    static char dbuf[24];
+    int idx=i;
+    if (coop_row() && i==menu_base_count()) return G.coop_pref? "2P CO-OP: ON" : "2P CO-OP: OFF";
+    if (G.has_save){ if (idx==0) return "CONTINUE"; idx--; }
+    if (menu_pad_mode() && idx>=2) idx++;   // step over the hidden controls row
+    if (MENU_SIMPLE){
+        switch (idx){ case 0: return "START"; case 1: return "HOW TO PLAY";
+                      case 2: return mobile_ui()? (G.touch_ctl? "CONTROLS: STICK" : "CONTROLS: DRAG") : "SETTINGS";
+                      case 3: { char *q=dbuf; q=sappend(q, "DIFFICULTY: "); q=sappend(q, DIFF_NAME[G.difficulty&3]); *q=0; return dbuf; }
+                      case 4: return G.zen? "ZEN MODE: ON" : "ZEN MODE: OFF";
+                      default: return G.eddie? "EDDIE MODE: ON" : "EDDIE MODE: OFF"; }
+    }
+    switch (idx){
+        case 0: return "SINGLE PLAYER";
+        case 1: return "HOST LAN GAME";
+        case 2: return "JOIN LAN GAME";
+        default: return "HOW TO PLAY";
+    }
+    (void)buf;
+}
+static int menu_count(void){
+    if (MENU_SIMPLE) return menu_base_count() + (coop_row()? 1:0);
+    return G.has_save? 5:4;
+}
+static void slots_activate(int i){
+    if (i==3){ G.state=GS_MENU; return; }                       // BACK row
+    int s=i+1;
+    if (G.slots_mode==0){                                       // load
+        if (!G.slot_has[s]){ store_note("THAT SLOT IS EMPTY"); return; }
+        continue_run(s);
+    } else {                                                    // new game
+        if (G.slot_has[s] && G.slots_confirm!=s){ G.slots_confirm=s; return; }
+        G.slots_confirm=0; G.slot=s; start_run(START_MODE);
+    }
+}
+static void menu_activate(int sel){
+    int idx=sel;
+    if (coop_row() && sel==menu_base_count()){ G.coop_pref ^= 1; do_save(); sfx(6); return; }
+    if (G.has_save){ if (idx==0){ open_slots(0); return; } idx--; }
+    if (menu_pad_mode() && idx>=2) idx++;   // step over the hidden controls row
+    if (MENU_SIMPLE){
+        if (idx==0) open_slots(1);
+        else if (idx==1){ G.prev_state=G.state; G.state=GS_HELP; }
+        else if (idx==3){ G.difficulty = (G.difficulty+1)&3; do_save(); sfx(6); }   // difficulty for the next run
+        else if (idx==4){ G.zen ^= 1; do_save(); sfx(6); }              // zen for the next run
+        else if (idx==5){ G.eddie ^= 1; do_save(); sfx(6); }            // eddie: puffball bugs (cosmetic)
+        else if (mobile_ui()){ G.touch_ctl ^= 1; do_save(); sfx(6); }   // toggle drag <-> stick
+        else { G.set_sel=0; G.set_capture=0; G.state=GS_SETTINGS; }
+        return;
+    }
+    switch (idx){
+        case 0: start_run(NET_OFF); break;
+        case 1: start_run(NET_HOST); break;
+        case 2:
+            if (!G.join_ip[0]){ store_note("TYPE THE HOST IP FIRST"); G.menu_sel = menu_count()+1; }
+            else start_run(NET_CLIENT);
+            break;
+        default: G.prev_state=G.state; G.state=GS_HELP; break;
+    }
+}
+static void field_append(char *buf, int cap){
+    int n=slen(buf);
+    for (int i=0;i<IN.typed_n;i++){
+        char c=IN.typed[i];
+        if (n<cap-1){ buf[n++]=c; buf[n]=0; }
+    }
+    if (IN.backspace && n>0) buf[n-1]=0;
+}
+static void render_menu(void){
+    draw_demo_scene();
+    // dead bugs drift up past the scene like ash — the evidence rises
+    for (int i=0;i<12;i++){
+        unsigned h = (unsigned)i*2654435761u;
+        float rise = G.anim_t*(12.0f + (float)((h>>16)%11)) + (float)(h%340);
+        rise -= (int)(rise/400.0f)*400.0f;
+        int cx = (int)((h>>8)%620) + 10 + (int)(fsin(G.anim_t*1.2f + (float)i*1.7f)*9.0f);
+        draw_carcass(cx, 372 - (int)rise, 5 + (int)((h>>20)%3), (int)((h>>24)%4), G.anim_t*0.8f + (float)i);
+    }
+    // dim the top for the title
+    rect_fill(0, 0, VW, 150, COL(20,18,36));
+    // twinkling stars in the title band
+    for (int i=0;i<42;i++){
+        unsigned h = (unsigned)i*2246822519u + 97u;
+        int sx = (int)((h>>7)%636) + 2, sy = (int)((h>>15)%138) + 5;
+        int ph = (int)(G.anim_t*2.0f + (float)((h>>24)%5));
+        u32 c = (ph%5==0)? COL(255,250,220) : (ph%5==1)? COL(190,205,255) : COL(90,100,140);
+        rect_fill(sx, sy, 2, 2, c);
+    }
+    rect_fill(0, 148, VW, 2, COL(255,205,40));
+    glow_ellipse(VW/2, 42, 200, 36, COL(255,214,120), 26);   // a warm halo behind the title (glow-up)
+    // the title, letter by letter on a slow wave, gold shimmering
+    // (the font advances 8px per char times scale — 32px at scale 4)
+    { const char *T = "THE SURVIVAL GAME";
+      int x0 = VW/2 - (17*32)/2;
+      for (int i=0;i<17;i++){
+          if (T[i]==' ') continue;
+          char ch[2]; ch[0]=T[i]; ch[1]=0;
+          float ph2 = G.anim_t*3.0f - (float)i*0.55f;
+          int y = 22 + (int)(fsin(ph2)*3.0f);
+          float t2 = (fsin(ph2)+1.0f)*0.5f;
+          draw_text(x0+i*32, y, ch, 4, COL(255, 214 + (int)(34.0f*t2), 64 + (int)(120.0f*t2)));
+      } }
+    { float tp = (fsin(G.anim_t*2.0f)+1.0f)*0.5f;
+      draw_text_center(VW/2, 66, "SQUASH BUGS. WEAR THE EVIDENCE.", 1, COL(160 + (int)(70.0f*tp), 230 + (int)(20.0f*tp), 255)); }
+    // menu items (selection also covers the two text fields below them:
+    // rows n and n+1 are NAME and HOST IP — keyboard only, no mouse)
+    int n=menu_count();
+    if (G.menu_sel>=n+MENU_FIELDS) G.menu_sel=0;
+    for (int i=0;i<n;i++){
+        int y=160+i*22;
+        const char *label=menu_item(i);
+        if (i==G.menu_sel){
+            rect_fill(0, y-4, VW, 18, COL(255,205,40));   // full-width bar: the whole row is the option
+            draw_text_center(VW/2, y, label, 2, COL(30,26,44));
+        } else draw_text_center(VW/2, y, label, 2, COL(235,238,245));
+    }
+    // name field (+ ip field on native builds)
+    int fy=160+n*22+10;
+    int caret = ((int)(G.anim_t*2))%2==0;
+    int nx = MENU_SIMPLE? VW/2-82 : VW/2-150;
+    draw_text(nx, fy+3, "NAME:", 1, G.menu_sel==n? COL(255,205,40):COL(220,225,235));
+    rect_fill(nx+42, fy, 130, 13, G.menu_sel==n? COL(70,80,110):COL(44,46,66));
+    rect_line(nx+42, fy, 130, 13, G.menu_sel==n? COL(255,205,40):COL(140,150,180));
+    { char b[16]; char *q=b; q=sappend(q, G.my_name); if (G.menu_sel==n && caret) q=sappend(q, "_");
+      draw_text(nx+46, fy+3, b, 1, COL(255,255,255)); }
+    if (G.whale_on & 8192){   // WHALES ONLY: NAME IN LIGHTS — marquee bulbs chase around the name box
+        static const u32 BULB[4] = { COL(255,90,90), COL(255,205,60), COL(120,230,255), COL(255,240,210) };
+        int bx0 = nx+42, by0 = fy, bx1 = nx+42+130, by1 = fy+13, bi = 0;
+        for (int bx=bx0; bx<=bx1; bx+=11){ disc_fill(bx, by0-3, 2, BULB[(bi + (int)(G.anim_t*6))&3]); bi++; disc_fill(bx, by1+3, 2, BULB[(bi + (int)(G.anim_t*6))&3]); bi++; }
+        for (int by=by0+6; by<by1; by+=11){ disc_fill(bx0-4, by, 2, BULB[(bi + (int)(G.anim_t*6))&3]); bi++; disc_fill(bx1+4, by, 2, BULB[(bi + (int)(G.anim_t*6))&3]); bi++; }
+    }
+    if (!MENU_SIMPLE){
+    draw_text(VW/2+34, fy+3, "HOST IP:", 1, G.menu_sel==n+1? COL(255,205,40):COL(220,225,235));
+    rect_fill(VW/2+92, fy, 130, 13, G.menu_sel==n+1? COL(70,80,110):COL(44,46,66));
+    rect_line(VW/2+92, fy, 130, 13, G.menu_sel==n+1? COL(255,205,40):COL(140,150,180));
+    { char b[52]; char *q=b; q=sappend(q, G.join_ip[0]? G.join_ip : "192.168.1.X");
+      if (G.menu_sel==n+1 && caret) q=sappend(q, "_");
+      draw_text(VW/2+96, fy+3, b, 1, COL(255,255,255)); }
+    }
+    // hosting builds: tell the player how friends join — they just open
+    // this machine's address in a browser. No install, no mode to pick.
+    { const char *ja = plat_join_addr();
+      if (ja && ja[0]){
+          char b[96]; char *q=b;
+          q=sappend(q, "http://"); q=sappend(q, ja);
+          draw_text_center(VW/2, fy+28, "PLAY WITH FRIENDS - THEY JUST OPEN THIS IN A BROWSER:", 1, COL(150,160,185));
+          draw_text_center(VW/2, fy+42, b, 2, COL(255,214,64));
+      } }
+    // records strip
+    { char b[128]; char *q=b;
+      q=sappend(q, "ALL-TIME HEAVIEST HAT: "); q=sappend(q, G.rec_name); q=sappend(q, " - ");
+      q=sapp_int(q, (int)G.rec_hat); q=sappend(q, " KG  |  SQUASHED: ");
+      q=sapp_int(q, G.rec_kills); q=sappend(q, "  |  BEST BUG BOWL: "); q=sapp_int(q, G.rec_bowl);
+      draw_text_center(VW/2, VH-30, b, 1, COL(170,190,220)); }
+    // (no standing controls line under the menu any more, Daniel,
+    // Nov 6: the bottom of the screen stays clean — the pause menu's
+    // CONTROLS panel is the reference, and menus work the same
+    // everywhere: move, select, tap.)
+    if (G.store_msg_t>0) draw_text_center(VW/2, 122, G.store_msg, 1, COL(255,130,130));
+    (void)menu_items;
+}
+static void render_slots(void){
+    draw_demo_scene();
+    rect_fill(0, 0, VW, 96, COL(20,18,36));
+    rect_fill(0, 94, VW, 2, COL(255,205,40));
+    draw_text_center(VW/2, 14, "THE SURVIVAL GAME", 2, COL(255,214,64));
+    draw_text_center(VW/2, 44, G.slots_mode==0? "LOAD A SAVE" : "NEW GAME - PICK A SLOT", 2, COL(235,238,245));
+    for (int i=0;i<3;i++){
+        int s=i+1, y=116+i*52, x=100, w=440;
+        int sel = (G.slots_sel==i);
+        rect_fill(x, y, w, 44, COL(26,24,42));
+        if (sel){ blend_rect(x, y, w, 44, COL(255,205,40), 36);
+                  rect_line(x, y, w, 44, COL(255,205,40)); rect_line(x+1, y+1, w-2, 44-2, COL(255,205,40)); }
+        else rect_line(x, y, w, 44, COL(90,96,130));
+        { char b[40]; char *q=b; q=sappend(q, "SLOT "); q=sapp_int(q, s);
+          if (G.slot_has[s] && pk_name[s][0]){ q=sappend(q, " - "); q=sappend(q, pk_name[s]); }
+          *q=0;
+          draw_text(x+16, y+7, b, 2, sel? COL(255,214,64) : COL(220,225,235)); }
+        if (G.slots_confirm==s && G.slots_mode==1){
+            draw_text(x+16, y+28, "START FRESH HERE? THE OLD SAVE GOES AWAY.", 1, COL(255,120,120));
+        } else if (!G.slot_has[s]){
+            draw_text(x+16, y+28, "EMPTY", 1, COL(130,138,160));
+        } else {
+            char b[96]; char *q=b;
+            q=sappend(q, pk_name[s]);
+            if (pk_bname[s][0]){ q=sappend(q, " + "); q=sappend(q, pk_bname[s]); q=sappend(q, " THE "); q=sappend(q, BUD_NAME[pk_bspecies[s]%BUDN]); }
+            if (pk_hat[s]>0){ q=sappend(q, " - HAT "); q=sapp_int(q, pk_hat[s]); q=sappend(q, " KG"); }
+            q=sappend(q, " - "); q=sapp_int(q, pk_kills[s]); q=sappend(q, " SQUASHED - ");
+            q=sapp_int(q, pk_time[s]/60); q=sappend(q, ":");
+            if (pk_time[s]%60<10) q=sappend(q, "0"); q=sapp_int(q, pk_time[s]%60);
+            if (pk_zen[s]) q=sappend(q, " - ZEN");
+            draw_text(x+16, y+28, b, 1, COL(200,210,228));
+        }
+    }
+    { int y=278;
+      if (G.slots_sel==3){ rect_fill(0, y-4, VW, 19, COL(255,205,40)); draw_text_center(VW/2, y, "BACK", 2, COL(30,26,44)); }
+      else draw_text_center(VW/2, y, "BACK", 2, COL(235,238,245)); }
+    if (G.store_msg_t>0) draw_text_center(VW/2, 330, G.store_msg, 1, COL(255,130,130));
+}
+static void menu_input(void){
+    // The selection walks the menu items AND the text fields below them
+    // (row n = NAME, row n+1 = HOST IP, native only). On a field row,
+    // typed letters go into the field; Space selects (it must not also
+    // land in the field as a typed char). E is just a letter there.
+    int n=menu_count();
+    int rows=n+MENU_FIELDS;
+    if (IN.menu_up){ G.menu_sel=(G.menu_sel+rows-1)%rows; }
+    if (IN.menu_down){ G.menu_sel=(G.menu_sel+1)%rows; }
+    // touch: tap an item to go straight to it, tap a field to select it
+    if (IN.tapped){
+        int fy=160+n*22+10;
+        if (IN.tap_y>=fy-4 && IN.tap_y<=fy+17){
+            G.menu_sel = (MENU_FIELDS==2 && IN.tap_x>=376)? n+1 : n;
+        } else for (int i=0;i<n;i++){
+            if (IN.tap_y>=160+i*22-6 && IN.tap_y<=160+i*22+16){ menu_activate(i); return; }
+        }
+    }
+    if (G.menu_sel<n){
+        if (IN.interact_pressed || IN.select_pressed) menu_activate(G.menu_sel);
+    } else {
+        if (IN.select_pressed){
+            if (G.menu_sel==n){ if (MENU_FIELDS==2) G.menu_sel=n+1; }  // name -> ip
+            else menu_activate(G.has_save? 3:2);                       // ip -> JOIN LAN GAME
+        } else {
+            if (G.menu_sel==n) field_append(G.my_name, 13);
+            else field_append(G.join_ip, 48);
+        }
+    }
+    G.edit_field = G.menu_sel==n? 1 : (G.menu_sel==n+1? 2 : 0);
+}
+static void move_key_str(char *b){
+    // the four movement key names: concatenated when all are single
+    // characters ("WASD"), slash-joined otherwise ("W/UP/S/DOWN" style).
+    // key_name() returns a shared scratch buffer, so each name is copied
+    // into the output before the next call.
+    static const int idx[4] = { ACT_UP, ACT_LEFT, ACT_DOWN, ACT_RIGHT };
+    int one=1;
+    for (int i=0;i<4;i++) if (key_name(G.bind[idx[i]])[1]) one=0;
+    char *q=b;
+    for (int i=0;i<4;i++){ if (i && !one) q=sappend(q, "/"); q=sappend(q, key_name(G.bind[idx[i]])); }
+    *q=0;
+}
+static void render_help(void){
+    rect_fill(0,0,VW,VH,COL(24,22,38));
+    draw_text_center(VW/2, 18, help_page? "THE MALL + MORE" : "HOW TO PLAY", 3, COL(255,214,64));
+    if (help_page){
+        const char *lines2[] = {
+            "DIFFICULTY: EASY IS CLASSIC; THE REST MAKE BUGS MEANER.",
+            "",
+            "THE BUG BOUNTY IS NOW THE BUG MALL - PRESS INTERACT",
+            "AT THE HUT TO STEP INSIDE. FIVE SHOPS, ONE BUILDING:",
+            "THE COUNTER SELLS EVERYTHING IT ALWAYS DID.",
+            "",
+            "WHALES ONLY SELLS PURE VANITY FOR REAL MONEY: GOLD",
+            "CARCASSES, A CAPE, RAIN THAT FALLS ONLY ON YOU. NO",
+            "GAMEPLAY EFFECT WHATSOEVER - JUST GLORY. $0.67 EACH.",
+            "",
+            "THE BUG BANK KEEPS CARCASSES SAFE - THEY WEIGH NOTHING,",
+            "NEVER COUNT TO YOUR HEAVIEST HAT, MOVE IN FRACTIONS.",
+            "",
+            "BUG BOWL: THE MALL'S OWN LANES. ONE CARCASS A BALL,",
+            "FULL BOWLING SCORING: STRIKES, SPARES, TENTH FRAME.",
+            "",
+            "BANZAI BUDDIES: A PUPPY, KITTY, MOOSE, PLATYPUS, PET",
+            "ROCK OR KITCHEN SINK FIGHTS AT YOUR SIDE, EARNING XP",
+            "FROM KILLS AND ASSISTS TO SPEND ON TRAINING + MOVES.",
+            "YOU PICK ITS NAME (ELDER DAYS, MOSTLY) AND ITS COAT -",
+            "NEON RAINBOW INCLUDED. BUDDIES ONLY FAINT - NEVER DIE -",
+            "AND THE SHOP REVIVES THEM - TRAINED ONES COST MORE.",
+            "",
+            "BIG HATS ARE FRAGILE: ONCE YOU CARRY 50 KG OR MORE,",
+            "EVERY BITE SHAKES A CARCASS LOOSE. DON'T GET GREEDY.",
+            "",
+            "WALLS LINK UP: RUNS OF 5+ SHARE ONE BIG HEALTH POOL",
+            "AND YOU CAN CLIMB UP AND WALK ALONG THE TOP. BUT A",
+            "WALL MAY NEVER CLOSE INTO A LOOP - THE LOOP MUST",
+            "STAY OPEN.",
+        };
+        for (int i=0;i<(int)(sizeof(lines2)/sizeof(lines2[0]));i++)
+            draw_text_center(VW/2, 44+i*9, lines2[i], 1, COL(225,230,240));
+        if (pad_mode()) draw_text_center(VW/2, VH-24, "B - BACK TO MENU", 1, COL(160,230,255));
+        else if (mobile_ui()) draw_text_center(VW/2, VH-24, "TAP - BACK TO MENU", 1, COL(160,230,255));
+        else { char b[48]; char *q=b; q=sappend(q, key_name(G.bind[ACT_INTERACT])); q=sappend(q, " - BACK TO MENU");
+          draw_text_center(VW/2, VH-24, b, 1, COL(160,230,255)); }
+        return;
+    }
+    char mv[40], l0[96], l1[96], l2[96], l3[96], l4[96], l5[96];
+    scpy(l5, mobile_ui()? "CO-OP: A DESKTOP APP HOSTS - PHONES JOIN IN A BROWSER."
+                        : "CO-OP: THE APP HOSTS - FRIENDS JOIN FROM A BROWSER.", 96);
+    if (pad_mode()){
+        scpy(l0, "STICK OR D-PAD - MOVE. YOU FACE THE WAY YOU MOVE,", 96);
+        scpy(l1, "AND YOU FIRE THE WAY YOU FACE. A - FIRE + SELECT.", 96);
+        scpy(l2, "LB / RB - WEAPONS - X WALL - LT SPRINT - START PAUSE", 96);
+        scpy(l3, "B - ENTER AND LEAVE THE STORE. A PICKS, B BACKS OUT.", 96);
+        scpy(l4, "TWO PADS PLUGGED IN? FLIP ON 2P CO-OP IN THE MENU.", 96);
+    } else if (mobile_ui() && G.touch_ctl){
+        scpy(l0, "PUSH YOUR LEFT THUMB TO STEER WITH THE", 96);
+        scpy(l1, "STICK. YOU FIRE THE WAY YOU FACE.", 96);
+        scpy(l2, "HOLD FIRE TO SHOOT. THE WALL BUTTON BUILDS", 96);
+        scpy(l3, "A WALL FROM 3 CARCASSES. BY THE STORE,", 96);
+        scpy(l4, "TAP USE TO GO IN - OR TAP THE STORE ITSELF.", 96);
+    } else if (mobile_ui()){
+        scpy(l0, "DRAG TO MOVE. YOU FACE THE WAY YOU DRAG,", 96);
+        scpy(l1, "AND YOU FIRE THE WAY YOU FACE AS YOU GO.", 96);
+        scpy(l2, "TAP WALL TO BUILD A WALL FROM 3 CARCASSES.", 96);
+        scpy(l3, "WALK TO THE BUG MALL AND TAP TO GO IN.", 96);
+        scpy(l4, "IN THE SHOPS: TAP A ROW, TAP IT AGAIN TO BUY.", 96);
+    } else {
+    move_key_str(mv);
+    { char *q=l0; q=sappend(q, mv); q=sappend(q, " / ARROWS - MOVE. YOU FACE THE WAY YOU MOVE,"); }
+    { char *q=l1; q=sappend(q, "AND YOU FIRE THE WAY YOU FACE. "); q=sappend(q, key_name(G.bind[ACT_FIRE])); q=sappend(q, " - FIRE + SELECT."); }
+    { char *q=l2; q=sappend(q, key_name(G.bind[ACT_W1])); q=sappend(q, "-"); q=sappend(q, key_name(G.bind[ACT_W5]));
+      q=sappend(q, " WEAPONS - "); q=sappend(q, key_name(G.bind[ACT_WALL])); q=sappend(q, " WALL - ");
+      q=sappend(q, key_name(G.bind[ACT_SPRINT])); q=sappend(q, " SPRINT - "); q=sappend(q, key_name(G.bind[ACT_PAUSE])); q=sappend(q, " PAUSE (1P)"); }
+    { char *q=l3; q=sappend(q, key_name(G.bind[ACT_INTERACT])); q=sappend(q, " - ENTER AND LEAVE THE STORE. REBIND KEYS IN SETTINGS."); }
+    scpy(l4, "ON MOBILE: DRAG TO MOVE + SHOOT. TAP SELECTS + BUYS.", 96);
+    }
+    const char *lines[] = {
+        l0, l1, l2, l3, l4,
+        "",
+        "SQUASH BUGS: THEIR CARCASSES LAND ON YOUR HEAD.",
+        "YOUR HAT IS YOUR WALLET - AND IT SLOWS YOU DOWN.",
+        "HAUL IT TO THE BUG MALL AT THE EPICENTER AND PAY BY",
+        "WEIGHT AT THE COUNTER FOR WEAPONS, SHIELDS + MORE.",
+        "HURT? A HOTFIX PATCHES YOU UP: +50 HP, 20 KG A POP.",
+        "",
+        "WHILE ANYONE IS IN THE MALL, A SHIELD SEALS THE",
+        "EPICENTER - BUGS CAN'T CROSS THE RING. OTHERWISE IT'S",
+        "NOT SAFE: BUGS WANDER RIGHT IN. NEAR HOME THEY ARE",
+        "FEW, TINY AND SLOW: POCKET CHANGE.",
+        "BUGS SCALE WITH DISTANCE: TO FIND THE BIG ONES YOU",
+        "HAVE TO GO FAR OUT - WHERE THEY ARE BIGGER, MEANER,",
+        "FAR MORE NUMEROUS, AND EVEN THE LITTLE ONES ARE FAST.",
+        "",
+        "WALLS OF CARCASS BLOCK BUGS UNTIL THEY CHEW THROUGH.",
+        "YOUR SHOTS FLY OVER WALLS - BUGS HAVE TO CHEW THROUGH.",
+        "IF EVERY PLAYER FALLS, THE RUN IS OVER. THE WORLD SAVES",
+        "AS YOU GO. HEAVIEST HAT TOPS THE LEADERBOARD.",
+        "",
+        l5,
+        "ZEN MODE (MENU): EVERY BUG IS GIGANTIC AND SLOW.",
+        "A CALMER GAME - AND ZEN RUNS SET NO RECORDS.",
+    };
+    for (int i=0;i<(int)(sizeof(lines)/sizeof(lines[0]));i++)
+        draw_text_center(VW/2, 48+i*10, lines[i], 1, COL(225,230,240));
+    if (pad_mode()) draw_text_center(VW/2, VH-24, "B - PAGE 2: THE MALL + MORE", 1, COL(160,230,255));
+    else if (mobile_ui()) draw_text_center(VW/2, VH-24, "TAP - PAGE 2: THE MALL + MORE", 1, COL(160,230,255));
+    else { char b[48]; char *q=b; q=sappend(q, key_name(G.bind[ACT_INTERACT])); q=sappend(q, " - PAGE 2: THE MALL + MORE");
+      draw_text_center(VW/2, VH-24, b, 1, COL(160,230,255)); }
+}
+// ---------------------------------------------------------------------------
+// Settings: rebind every action. Bindings live in G.bind, are derived into
+// semantic input centrally (derive_input), and persist in the save file.
+// ---------------------------------------------------------------------------
+#define SET_ROWS 15   // 14 actions + RESET DEFAULTS
+static void settings_input(void){
+    if (G.set_capture){
+        // the next physical key pressed becomes the binding (ESC cancels)
+        if (g_raw_edges){
+            if (raw_edge(PK_ESC)) G.set_capture=0;
+            else for (int pk=0;pk<PK_COUNT;pk++) if ((g_raw_edges>>pk)&1){
+                G.bind[G.set_sel]=pk; G.set_capture=0; do_save(); break;
+            }
+        }
+        return;
+    }
+    if (IN.menu_up) G.set_sel=(G.set_sel+SET_ROWS-1)%SET_ROWS;
+    if (IN.menu_down) G.set_sel=(G.set_sel+1)%SET_ROWS;
+    if (IN.tapped){
+        for (int i=0;i<SET_ROWS;i++){ int ry=70+i*16;
+            if (IN.tap_y>=ry-3 && IN.tap_y<=ry+13){
+                if (i==G.set_sel && i<14) G.set_capture=1; else G.set_sel=i;
+                return;
+            }
+        }
+    }
+    if (IN.esc_pressed || IN.interact_pressed){ G.state=GS_MENU; return; }
+    if (IN.select_pressed){
+        if (G.set_sel<14) G.set_capture=1;
+        else { bind_defaults(G.bind); do_save(); }
+    }
+}
+static void render_settings(void){
+    rect_fill(0,0,VW,VH,COL(24,22,38));
+    draw_text_center(VW/2, 14, "SETTINGS", 3, COL(255,214,64));
+    draw_text_center(VW/2, 44, "KEY BINDINGS - ARROWS CHOOSE, SPACE REBINDS", 1, COL(160,230,255));
+    for (int i=0;i<SET_ROWS;i++){
+        int ry=70+i*16;
+        int sel = (i==G.set_sel);
+        if (sel) rect_fill(120, ry-3, 400, 15, COL(255,205,40));
+        u32 tc = sel? COL(30,26,44) : COL(235,238,245);
+        if (i<14){
+            draw_text(150, ry, act_name(i), 1, tc);
+            const char *kn = (sel && G.set_capture)? "PRESS A KEY..." : key_name(G.bind[i]);
+            draw_text(490-text_w(kn,1), ry, kn, 1, tc);
+        } else {
+            draw_text(150, ry, "RESET DEFAULTS", 1, tc);
+            draw_text(490-text_w("WASD + E F P",1), ry, "WASD + E F P", 1, tc);
+        }
+    }
+    if (G.set_capture)
+        draw_text_center(VW/2, 330, "PRESS ANY KEY FOR THE HIGHLIGHTED ACTION - ESC CANCELS", 1, COL(255,240,150));
+    else
+        draw_text_center(VW/2, 330, "GAMEPAD: STICK/DPAD MOVE - A FIRE - B INTERACT - X WALL - START PAUSE", 1, COL(140,150,170));
+    { char b[80]; char *q=b; q=sappend(q, key_name(G.bind[ACT_INTERACT]));
+      q=sappend(q, " - BACK TO MENU (ARROW KEYS ALWAYS WORK FOR MOVING)");
+      draw_text_center(VW/2, 344, b, 1, COL(140,150,170)); }
+}
+
+static void pause_save_quit(void){
+    do_save();                       // GS_PAUSE counts as in-run: writes the slot
+    if (G.net_mode==NET_HOST) plat_net_stop();
+    G.net_mode=NET_OFF;
+    for (int i=0;i<MAXP;i++){ G.p[i].connected=0; G.p[i].is_local=0; }
+    G.my_id=0; G.menu_sel=0;
+    G.state=GS_MENU;
+    sfx(6);
+}
+// ---------------------------------------------------------------------------
+// THE CONTROLS PANEL (Daniel, Nov 6): the bottom-of-screen control lines
+// are gone — they overlapped everything. Controls now live in menus:
+// the pause menu's CONTROLS row in the main game, and the Start-menu
+// inside Banzai World. One panel, drawn per place-you-are-standing
+// (ctx), and the buttons named follow the device in your hands.
+// ctx: 0 meadow+mall, 1 story/free, 2 entrances, 3 run, 4 craft, 5 bowl
+// ---------------------------------------------------------------------------
+static void draw_controls_panel(int vx, int vy, int vw2, int vh2, int ctx){
+    static const char *CTX_NAME[7] = { "THE MEADOW + THE MALL", "STORY + FREE PLAY", "ENTRANCES", "SUPER BUDDY RUN", "BUDDY CRAFT", "BUG BOWL", "TANK RESCUE" };
+    const char *act[10]; const char *btn[10]; int n=0;
+    static char mv[40], spr[8], pau[8], btnstore[10][24];
+    if (pad_mode()) scpy(mv, "STICK / DPAD", 40);
+    else if (mobile_ui()) scpy(mv, G.touch_ctl? "LEFT STICK" : "DRAG", 40);
+    else move_key_str(mv);
+    scpy(spr, pad_mode()? "LT" : key_name(G.bind[ACT_SPRINT]), 8);
+    scpy(pau, pad_mode()? "START" : key_name(G.bind[ACT_PAUSE]), 8);
+    const char *back = pad_mode()? "START" : (mobile_ui()? "THE MALL DOOR" : "ESC");
+    // ROW copies the button label NOW: key_name() returns a shared
+    // static buffer, so storing its pointer across calls would leave
+    // every row showing the LAST key looked up (INTERACT read as F).
+#define CTL_ROW(a, b) do{ act[n]=(a); scpy(btnstore[n], (b), 24); btn[n]=btnstore[n]; n++; }while(0)
+    switch (ctx){
+      case 0:
+        CTL_ROW("MOVE", mv);
+        CTL_ROW("FIRE", lbl_fire());
+        CTL_ROW("INTERACT", lbl_int());
+        CTL_ROW("THROW A WALL", lbl_wall());
+        CTL_ROW("WEAPONS", pad_mode()? "LB / RB" : (mobile_ui()? "TAP THE CHIPS" : "1 - 5"));
+        CTL_ROW("BACKFIRE BEAN", lbl_bean());
+        if (!mobile_ui()) CTL_ROW("SPRINT", spr);
+        if (!mobile_ui()) CTL_ROW("PAUSE MENU", pau);
+        break;
+      case 5:
+        CTL_ROW("POSITION", mv);
+        CTL_ROW("LOCK AIM, SET POWER, ROLL", lbl_fire());
+        CTL_ROW("LEAVE THE LANE", lbl_int());
+        break;
+      case 1:
+        CTL_ROW("MOVE", mv);
+        CTL_ROW("CHOOSE / ATTACK", lbl_fire());
+        CTL_ROW("TALK / USE", lbl_int());
+        CTL_ROW("LOG + PACK", lbl_wall());
+        CTL_ROW("LEAVE", back);
+        break;
+      case 2:
+        CTL_ROW("MOVE", mv);
+        CTL_ROW("THROW A STICK", lbl_fire());
+        CTL_ROW("OPEN / UNLOCK", lbl_int());
+        CTL_ROW("USE A PATCH NOTE", lbl_wall());
+        CTL_ROW("LEAVE", back);
+        break;
+      case 3:
+        CTL_ROW("RUN", mv);
+        CTL_ROW("JUMP", lbl_fire());
+        if (!mobile_ui()) CTL_ROW("STOMP (IN THE AIR)", "DOWN");
+        CTL_ROW("LEAVE", back);
+        break;
+      case 6:
+        CTL_ROW("DRIVE", mv);
+        CTL_ROW("FIRE THE CANNON", lbl_fire());
+        CTL_ROW("LEAVE", back);
+        break;
+      default:
+        CTL_ROW("MOVE", mv);
+        CTL_ROW("SWING", lbl_fire());
+        CTL_ROW("GATHER / REST", lbl_int());
+        CTL_ROW("CRAFTING MENU", lbl_wall());
+        CTL_ROW("IN THE MENU: PICK", mv);
+        CTL_ROW("IN THE MENU: CRAFT", lbl_fire());
+        CTL_ROW("LEAVE", back);
+        break;
+    }
+#undef CTL_ROW
+    int w = vw2<460? vw2-12 : 448; if (w<280) w=vw2-8;
+    int h = 58 + n*19 + 24;
+    int x = vx+(vw2-w)/2, y = vy+(vh2-h)/2; if (y<vy+2) y=vy+2;
+    blend_rect(vx, vy, vw2, vh2, COL(8,8,14), 120);
+    rect_fill(x, y, w, h, COL(16,18,28)); rect_line(x, y, w, h, COL(198,164,84));
+    draw_text_center(x+w/2, y+8, "CONTROLS", 2, COL(255,214,64));
+    draw_text_center(x+w/2, y+27, CTX_NAME[ctx], 1, COL(150,170,190));
+    for (int i=0;i<n;i++){
+        int ry = y+44+i*19;
+        draw_text(x+16, ry, act[i], 1, COL(228,232,238));
+        draw_text(x+w-16-text_w(btn[i],1), ry, btn[i], 1, COL(255,220,90));
+    }
+    draw_text_center(x+w/2, y+h-15, pad_mode()? "B / START - BACK" : (mobile_ui()? "TAP ANYWHERE - BACK" : "ESC / SPACE - BACK"), 1, COL(140,150,170));
+}
+
+static void render_pause(void){
+    render_world();
+    blend_rect(0, 0, VW, VH, COL(10,8,20), 150);
+    if (G.pause_ctl){
+        Player *me=&G.p[G.my_id];
+        draw_controls_panel(0, 0, VW, VH, (me->in_mall && me->station==4)? 5 : 0);
+        return;
+    }
+    draw_text_center(VW/2+3, 104+3, "PAUSED", 4, COL(10,8,20));
+    draw_text_center(VW/2, 104, "PAUSED", 4, COL(255,214,64));
+    { static const char *rows[3] = { "CONTINUE", "CONTROLS", "SAVE + QUIT TO TITLE" };
+      for (int i=0;i<3;i++){
+          int y=176+i*26;
+          if (i==G.pause_sel){ rect_fill(0, y-4, VW, 19, COL(255,205,40)); draw_text_center(VW/2, y, rows[i], 2, COL(30,26,44)); }
+          else draw_text_center(VW/2, y, rows[i], 2, COL(235,238,245));
+      } }
+    { char b[56]; char *q=b; q=sappend(q, "SAVES TO SLOT "); q=sapp_int(q, G.slot);
+      q=sappend(q, " - YOUR HAT IS SAFE HERE.");
+      draw_text_center(VW/2, 264, b, 1, COL(150,160,185)); }
+    draw_text_center(VW/2, 282, pad_mode()? "STICK/DPAD + A - START ALSO RESUMES" : (mobile_ui()? "TAP A ROW - TAP SAVE + QUIT TWICE" : "ARROWS + SPACE - ESC RESUMES"), 1, COL(140,150,170));
+}
+static float over_stack[MAXSTACK];
+static int over_stack_n=0;
+static float over_carried=0;
+static int over_have=0;
+static void render_over(void){
+    render_world();
+    rect_fill(120, 60, 400, 220, COL(24,22,38));
+    rect_line(120, 60, 400, 220, COL(255,90,90));
+    // you, as you fell — wearing the hat you died in (Daniel). Drawn
+    // before the text so a tall hat never hides a word.
+    if (over_have){
+        static Player hero;
+        Player *me=&G.p[G.my_id>=0? G.my_id : 0];
+        smemset(&hero, 0, sizeof(hero));
+        hero.connected=1; hero.alive=1; hero.name[0]=0;
+        hero.color=me->color; hero.weapon=0; hero.owned[0]=1;
+        hero.hp=hero.maxhp=100; hero.aim=-0.6f; hero.walk_ph=0;
+        hero.whale_on=me->whale_on; hero.whale_own=me->whale_own;
+        hero.stack_n=over_stack_n;
+        for (int i=0;i<over_stack_n;i++) hero.stack[i]=over_stack[i];
+        hero.carried=over_carried;
+        // stand him at screen (168, 252) whatever the camera is doing:
+        // invert SX/SY at zoom 1 so the portrait is always full size
+        float pz=G.zoom; G.zoom=1.0f;
+        int vw2 = G.view_w>0? G.view_w : VW, vh2 = G.view_h>0? G.view_h : VH;
+        hero.x = G.camx + (float)(168 - G.view_x0 - vw2/2);
+        hero.y = G.camy + (float)(252 - G.view_y0 - vh2/2);
+        draw_player_sprite(&hero);
+        G.zoom=pz;
+    }
+    draw_text_center(VW/2, 78, "GAME OVER", 3, COL(255,110,110));
+    draw_text_center(VW/2, 106, "THE BUGS GOT THE WHOLE TEAM", 1, COL(230,235,245));
+    { char b[64]; int t=(int)G.time; char *q=b;
+      q=sappend(q, "SURVIVED "); q=sapp_int(q, t/60); q=sappend(q, ":");
+      if (t%60<10) q=sappend(q,"0"); q=sapp_int(q, t%60);
+      q=sappend(q, " - SQUASHED "); q=sapp_int(q, G.total_kills);
+      q=sappend(q, " - CASHED "); q=sapp_int(q, (int)G.total_earned); q=sappend(q, " KG");
+      draw_text_fit(238, 128, 272, b, 1, COL(255,240,180)); }
+    int y=152;
+    for (int i=0;i<MAXP;i++) if (G.p[i].connected){
+        char b[64]; char *q=b;
+        q=sappend(q, G.p[i].name); q=sappend(q, " - HEAVIEST HAT ");
+        q=sapp_int(q, (int)G.p[i].heaviest); q=sappend(q, " KG - ");
+        q=sapp_int(q, G.p[i].kills); q=sappend(q, " KILLS");
+        draw_text_fit(238, y, 272, b, 1, COL(210,220,235)); y+=14;
+    }
+    { char b[64]; char *q=b;
+      q=sappend(q, "ALL-TIME BEST HAT: "); q=sappend(q, G.rec_name); q=sappend(q, " ");
+      q=sapp_int(q, (int)G.rec_hat); q=sappend(q, " KG");
+      draw_text_fit(238, y+8, 272, b, 1, COL(150,200,255)); }
+    if (mobile_ui()) draw_text_center(VW/2, 258, "TAP - BACK TO MENU", 1, COL(255,240,150));
+    else { char b[48]; char *q=b; q=sappend(q, key_name(G.bind[ACT_FIRE])); q=sappend(q, " - BACK TO MENU");
+      draw_text_center(VW/2, 258, b, 1, COL(255,240,150)); }
+#ifdef PLAT_WASM
+    // (the share buttons under the canvas speak for themselves —
+    // no standing line pointing at them; Daniel, Nov 6)
+#endif
+}
+
+// ---------------------------------------------------------------------------
+// Frame — input resolution, state machine, camera. Platform entry point.
+// ---------------------------------------------------------------------------
+static void resolve_local_input(void){
+    Player *me=&G.p[G.my_id];
+    if (!me) return;
+    me->cur_keys = IN.keys | IN.touch_keys;   // keyboard/pad bits + d-pad bits
+    // facing follows the movement keys; standing still keeps the last facing.
+    // (On a client this also aims our sprite between host snapshots.)
+    float mx=0, my=0;
+    if (IN.keys & K_UP) my-=1;
+    if (IN.keys & K_DOWN) my+=1;
+    if (IN.keys & K_LEFT) mx-=1;
+    if (IN.keys & K_RIGHT) mx+=1;
+    if (mx!=0 || my!=0) me->aim = fatan2(my, mx);
+    client_aim = me->aim;
+    // touch (mobile web): hold/drag to run toward the finger, firing as
+    // you go. Finger right on top of the player = stand and shoot the
+    // way you face.
+    if (IN.touch_down){
+        float psx = (me->x - G.camx) + VW/2, psy = (me->y - G.camy) + VH/2;
+        float dx = IN.touch_x - psx, dy = IN.touch_y - psy;
+        float d2 = dx*dx + dy*dy;
+        me->cur_keys |= K_FIRE;
+        if (d2 > 20*20){
+            float d = fsqrt(d2), ax = dx/d, ay = dy/d;
+            me->aim = fatan2(dy, dx); client_aim = me->aim;
+            if (ax > 0.38f) me->cur_keys |= K_RIGHT; else if (ax < -0.38f) me->cur_keys |= K_LEFT;
+            if (ay > 0.38f) me->cur_keys |= K_DOWN;  else if (ay < -0.38f) me->cur_keys |= K_UP;
+        }
+    }
+    if (IN.weapon_key>=1 && IN.weapon_key<=5){
+        int w=IN.weapon_key-1;
+        if (me->owned[w]){ me->weapon=w; client_weapon=w; sfx(6); }
+        else sfx(16);
+    }
+    if (IN.bean_key){ IN.bean_key=0; bean_use(G.my_id); }
+    if (IN.weapon_cycle!=0){          // gamepad bumpers: next/prev owned weapon
+        int w=me->weapon, tries=0;
+        do { w=(w+IN.weapon_cycle+NWEAP)%NWEAP; tries++; } while (!me->owned[w] && tries<NWEAP);
+        if (me->owned[w] && w!=me->weapon){ me->weapon=w; client_weapon=w; sfx(6); }
+    }
+    if (IN.wall_pressed){
+        if (G.net_mode==NET_CLIENT) client_want_wall=1;
+        else me->want_wall=1;
+    }
+}
+// ---------------------------------------------------------------------------
+// Local co-op: player 2 on the second controller, same machine, same run.
+// P1 keeps the keyboard + first pad (resolve_local_input); P2 is fed
+// from the pad-2 channel. The pair shares one camera while they stay
+// close and splits the screen when they separate — and whenever either
+// of them is in the store, so the shopper gets the Bug Bounty (shield
+// and all) while the other keeps playing.
+// ---------------------------------------------------------------------------
+static float vcamx[2], vcamy[2], vzoom[2];
+static int vsplit=0; static float vfit_t=0;
+// the split is a place, not a switch: vsplit_f eases 0 (one shared
+// view) toward 1 (two EVEN half views) — the seam sweeps in as the
+// players separate and back out as they return, but it always comes
+// to rest exactly in the middle: halves are never lopsided at rest
+// (the kids were right — an uneven split feels broken). vorient
+// picks the seam's direction from the direction of apartness
+// (1 = side by side, 0 = stacked), vp1first remembers which side
+// P1's view grew from.
+static float vsplit_f=0; static int vorient=1; static int vp1first=1;
+static int p2_rep_dir=0; static float p2_rep_t=0;
+static int act2_edge(int a){ return (int)((IN.act2_edges>>a)&1); }
+static int act2_down(int a){ return (int)((IN.act2_held>>a)&1); }
+static void resolve_p2_input(void){
+    Player *p=&G.p[G.p2_slot];
+    u32 h=IN.act2_held; int k=0;
+    if ((h>>ACT_UP)&1) k|=K_UP;
+    if ((h>>ACT_DOWN)&1) k|=K_DOWN;
+    if ((h>>ACT_LEFT)&1) k|=K_LEFT;
+    if ((h>>ACT_RIGHT)&1) k|=K_RIGHT;
+    if ((h>>ACT_FIRE)&1) k|=K_FIRE;
+    if ((h>>ACT_SPRINT)&1) k|=K_SPRINT;
+    p->cur_keys = k;
+    float mx=0, my=0;
+    if (k & K_UP) my-=1;
+    if (k & K_DOWN) my+=1;
+    if (k & K_LEFT) mx-=1;
+    if (k & K_RIGHT) mx+=1;
+    if (mx!=0 || my!=0) p->aim = fatan2(my, mx);
+    int cyc = act2_edge(ACT_WNEXT)? 1 : act2_edge(ACT_WPREV)? -1 : 0;
+    if (cyc){
+        int w=p->weapon, tries=0;
+        do { w=(w+cyc+NWEAP)%NWEAP; tries++; } while (!p->owned[w] && tries<NWEAP);
+        if (p->owned[w] && w!=p->weapon){ p->weapon=w; sfx(6); }
+    }
+    if (act2_edge(ACT_WALL)) p->want_wall=1;
+}
+// P2's store cursor: edges plus the same hold-to-repeat feel as P1's menus
+static void p2_store_nav(int *up, int *down, float dt){
+    *up=0; *down=0;
+    if (act2_edge(ACT_UP)){ *up=1; p2_rep_dir=-1; p2_rep_t=0.38f; }
+    else if (act2_edge(ACT_DOWN)){ *down=1; p2_rep_dir=1; p2_rep_t=0.38f; }
+    else if (p2_rep_dir!=0 && (act2_down(ACT_UP) || act2_down(ACT_DOWN))){
+        p2_rep_t -= dt;
+        if (p2_rep_t<=0){
+            if (p2_rep_dir<0 && act2_down(ACT_UP)) *up=1;
+            if (p2_rep_dir>0 && act2_down(ACT_DOWN)) *down=1;
+            p2_rep_t=0.09f;
+        }
+    } else p2_rep_dir=0;
+}
+static float zoom_target_of(Player *p){
+    if (p->in_mall) return 1.0f;
+    float sn=(float)p->stack_n;
+    float z = 1.0f - (sn*0.0016f>0.38f? 0.38f : sn*0.0016f);
+    // as THREAT climbs the bugs swell without limit — the camera gives
+    // ground in steps at set threat levels so the giants stay in frame
+    float th = G.threat;
+    z -= th>=8.0f? 0.16f : th>=5.0f? 0.12f : th>=3.0f? 0.08f : th>=2.0f? 0.04f : 0.0f;
+    return z<0.45f? 0.45f : z;
+}
+// a simple strip of what you've got: one icon slot per weapon, in
+// store order, gold frame on the one in your hands, Xn for stacks.
+// P2's HUD is text-only otherwise — this is how they see their kit.
+static void draw_weapon_icons(Player *p, int x, int y){
+    for (int w=0; w<NWEAP; w++){
+        if (!p->owned[w]) continue;
+        int sx = x + w*26;
+        rect_fill(sx, y, 22, 22, COL(16,14,28));
+        rect_line(sx, y, 22, 22, p->weapon==w? COL(255,205,40) : COL(104,98,138));
+        draw_item_icon(w, sx+11, y+11);
+        if (p->owned[w]>1){ char b[8]; char *q=b; *q++='X'; q=sapp_int(q, p->owned[w]); *q=0;
+            draw_text(sx+23-text_w(b,1), y+13, b, 1, COL(255,240,200)); }
+    }
+}
+static void render_hud_compact(Player *p, int vx, int vy, int vw2, int vh2){
+    // the split view's status card: what render_hud shows, in a card
+    // that hugs the view's top-left corner — plus one context line,
+    // what THIS player needs right now: safety in the mall, the threat
+    // level out in the field.
+    ui_panel(vx+6, vy+6, 236, 96);
+    draw_text_fit(vx+12, vy+9, 218, p->name, 1, COL(255,255,255));
+    draw_bar(vx+12, vy+20, 130, 7, p->maxhp? (float)p->hp/p->maxhp : 0, COL(120,230,90));
+    { char b[24]; fmt_int(b, "HP ", p->hp, ""); draw_text(vx+148, vy+19, b, 1, COL(255,255,255)); }
+    if (p->shield_max>0) draw_bar(vx+12, vy+29, 130, 4, p->shield_max? (float)p->shield/p->shield_max:0, COL(110,190,255));
+    { char b[40]; char *q=b; q=sappend(q, WEAPON_NAME[p->weapon]);
+      if (p->owned[p->weapon]>1){ q=sappend(q, " X"); q=sapp_int(q, p->owned[p->weapon]); }
+      *q=0;
+      draw_text_fit(vx+12, vy+36, 218, b, 1, COL(255,220,120)); }
+    { char b[48]; char *q=b; q=sappend(q, "HAT "); q=sapp_int(q, (int)p->carried); q=sappend(q, " KG - ");
+      q=sappend(q, hat_tier_name(p->stack_n, p->carried)); *q=0;
+      draw_text_fit(vx+12, vy+47, 218, b, 1, COL(255,240,180)); }
+    draw_weapon_icons(p, vx+12, vy+62);
+    if (p->in_arcade) draw_text(vx+12, vy+82, "IN THE ARCADE - SAFE", 1, COL(150,230,255));
+    else if (p->in_mall) draw_text(vx+12, vy+82, "IN THE MALL - SAFE", 1, COL(150,230,150));
+    else { char b[32]; char *q=b; q=sappend(q, "THREAT X"); q=sapp_int(q, (int)G.threat);
+           *q++='.'; *q++=(char)('0'+((int)(G.threat*10)%10)); *q=0;
+           draw_text(vx+12, vy+82, b, 1, COL(255,150,90)); }
+    if (!p->alive) draw_text_center(vx+vw2/2, vy+vh2/2-8, "DOWN", 2, COL(255,90,80));
+    else { char pb[64]; const char *pr = interact_prompt(p, pb, (G.p2_slot>=0 && p==&G.p[G.p2_slot])? 1:0);
+           if (pr) draw_text_center_fit(vx+vw2/2, vy+vh2-22, vw2-16, pr, 1, COL(255,240,180)); }
+}
+static void render_hud_mini(Player *p, int vx, int vy, int vw2){
+    // a name-and-health strip for a view that is still peeling open:
+    // the split is gradual now, and a sliver of screen can't hold the
+    // full card yet
+    int w = vw2-12; if (w>200) w=200; if (w<40) return;
+    ui_panel(vx+6, vy+6, w, 28);
+    draw_text_fit(vx+11, vy+9, w-10, p->name, 1, COL(255,255,255));
+    draw_bar(vx+11, vy+21, w-22>10? w-22:10, 4, p->maxhp? (float)p->hp/p->maxhp : 0, COL(120,230,90));
+}
+static void render_p2_chip(void){
+    Player *p=&G.p[G.p2_slot];
+    ui_panel(VW-208, VH-74, 200, 66);
+    draw_text_fit(VW-202, VH-68, 126, p->name, 1, COL(255,255,255));
+    if (!p->alive) draw_text(VW-70, VH-68, "DOWN", 1, COL(255,90,80));
+    draw_bar(VW-202, VH-57, 104, 6, p->maxhp? (float)p->hp/p->maxhp : 0, COL(120,230,90));
+    { char b[24]; char *q=b; q=sappend(q, "HAT "); q=sapp_int(q, (int)p->carried); q=sappend(q, "KG"); *q=0;
+      draw_text(VW-92, VH-58, b, 1, COL(255,240,180)); }
+    draw_weapon_icons(p, VW-202, VH-46);
+}
+static void coop_render(float dt){
+    Player *me=&G.p[G.my_id], *p2=&G.p[G.p2_slot];
+    Player *tp[2]; tp[0]=me; tp[1]=p2;
+    // one smoothed camera per player; a downed player's view follows
+    // their partner so they can watch the rescue (or the end)
+    for (int v=0; v<2; v++){
+        Player *t = tp[v]->alive? tp[v] : tp[v^1];
+        Buddy *tb = &G.bud[v? G.p2_slot : G.my_id];   // a BW view follows the buddy, not the DEV
+        float txv = tb->in_bw? tb->x : t->x, tyv = tb->in_bw? tb->y : t->y;
+        if (vzoom[v]<0.01f){ vcamx[v]=txv; vcamy[v]=tyv; vzoom[v]=1.0f; }
+        float f = dt*6>1? 1 : dt*6;
+        vcamx[v] += (txv - vcamx[v])*f;
+        vcamy[v] += (tyv - vcamy[v])*f;
+        vzoom[v] += ((tb->in_bw? 1.0f : zoom_target_of(t)) - vzoom[v])*0.045f;
+    }
+    // --- should the screen be split, and which way? -------------------
+    // A panel open, or the players in different zones (one in the mall),
+    // forces a full side-by-side split. Otherwise the distance decides:
+    // they share a view while they fit in one, and the split's goal is
+    // proportional to how far past fitting they have strayed.
+    int forced = (lstore[0] || lstore[1] || (me->in_mall != p2->in_mall) || G.bud[G.my_id].in_bw || G.bud[G.p2_slot].in_bw);
+    float z = vzoom[0]<vzoom[1]? vzoom[0] : vzoom[1];
+    float dx = me->x - p2->x; if (dx<0) dx=-dx;
+    float dy = me->y - p2->y; if (dy<0) dy=-dy;
+    float fitx = (VW-110)/z, fity = (VH-110)/z;
+    if (forced) { vsplit=1; vfit_t=0; }
+    else if (dx <= fitx && dy <= fity){ vfit_t += dt; if (vfit_t>0.6f) vsplit=0; }
+    else { vfit_t=0; vsplit=1; }
+    // a death ends the split on the spot (Daniel): no easing-out —
+    // one shared view of the rescue, right now
+    if (!me->alive || !p2->alive){ vsplit=0; vsplit_f=0; }
+    float goal = 0;
+    if (vsplit){
+        if (forced){ vorient=1; }
+        else {
+            int want_vert = dx >= dy;
+            if (want_vert != vorient){
+                // hysteresis: the other axis must clearly dominate
+                // before the seam turns, so it never flip-flops
+                if ((want_vert && dx > dy*1.35f) || (!want_vert && dy > dx*1.35f))
+                    vorient = want_vert;
+            }
+        }
+        goal = 1;   // always the full, even split — see the note above
+        if (vsplit_f < 0.05f)   // a split is being born: remember the sides
+            vp1first = vorient? (me->x <= p2->x) : (me->y <= p2->y);
+    }
+    // ease the amount toward its goal — quicker to open than to close
+    if (vsplit_f < goal){ vsplit_f += dt*2.4f; if (vsplit_f>goal) vsplit_f=goal; }
+    else if (vsplit_f > goal){ vsplit_f -= dt*1.6f; if (vsplit_f<goal) vsplit_f=goal; }
+
+    if (vsplit_f <= 0.02f && !vsplit){
+        // close together: one shared view centered between them
+        clip_x0=0; clip_x1=VW; clip_y0=0; clip_y1=VH;
+        G.view_x0=0; G.view_w=VW; G.view_y0=0; G.view_h=VH;
+        G.camx=(vcamx[0]+vcamx[1])*0.5f; G.camy=(vcamy[0]+vcamy[1])*0.5f;
+        G.zoom = vzoom[0]<vzoom[1]? vzoom[0] : vzoom[1];
+        G.view_pi=G.my_id; G.cam_lock=1;
+        render_world();
+        G.cam_lock=0;
+        render_hud();
+        render_p2_chip();
+        return;
+    }
+    // apart (or one is shopping): a view each. The seam sweeps in from
+    // the edge the second view grows out of, and settles at the middle
+    // only when the split is fully open.
+    int rx[2], ry[2], rw[2], rh[2], seam;
+    if (vorient){
+        seam = vp1first? VW - (int)((VW/2)*vsplit_f) : (int)((VW/2)*vsplit_f);
+        if (vp1first){ rx[0]=0; rw[0]=seam; rx[1]=seam; rw[1]=VW-seam; }
+        else { rx[1]=0; rw[1]=seam; rx[0]=seam; rw[0]=VW-seam; }
+        ry[0]=ry[1]=0; rh[0]=rh[1]=VH;
+    } else {
+        seam = vp1first? VH - (int)((VH/2)*vsplit_f) : (int)((VH/2)*vsplit_f);
+        if (vp1first){ ry[0]=0; rh[0]=seam; ry[1]=seam; rh[1]=VH-seam; }
+        else { ry[1]=0; rh[1]=seam; ry[0]=seam; rh[0]=VH-seam; }
+        rx[0]=rx[1]=0; rw[0]=rw[1]=VW;
+    }
+    for (int v=0; v<2; v++){
+        if (rw[v]<4 || rh[v]<4) continue;   // a hairline view draws nothing yet
+        clip_x0=rx[v]; clip_x1=rx[v]+rw[v]; clip_y0=ry[v]; clip_y1=ry[v]+rh[v];
+        G.view_x0=rx[v]; G.view_w=rw[v]; G.view_y0=ry[v]; G.view_h=rh[v];
+        G.camx=vcamx[v]; G.camy=vcamy[v]; G.zoom=vzoom[v];
+        G.view_pi = v? G.p2_slot : G.my_id; G.cam_lock=1;
+        int bwv = G.bud[G.view_pi].in_bw;
+        if (bwv) bw_render(G.view_pi); else render_world();
+        G.cam_lock=0;
+        if (bwv){ /* Banzai World draws its own card and hints */ }
+        else if (lstore[v] && rw[v]>=316){
+            G.store_pi = v? G.p2_slot : G.my_id;
+            G.store_station = lstation[v];
+            G.ui_compact=1;
+            draw_active_panel();
+            G.ui_compact=0;
+        } else if (rw[v]>=280 && rh[v]>=120) render_hud_compact(tp[v], rx[v], ry[v], rw[v], rh[v]);
+        else render_hud_mini(tp[v], rx[v], ry[v], rw[v]);
+        if (bwgate[G.view_pi]) bw_gate_draw(G.view_pi, rx[v], ry[v], rw[v], rh[v]);
+        if (arcgate[G.view_pi]) arc_gate_draw(G.view_pi, rx[v], ry[v], rw[v], rh[v]);
+        // every split view gets its own way-back arrow (hidden near home)
+        if (!bwv){ Player *t = tp[v]->alive? tp[v] : tp[v^1];
+          draw_home_arrow(t, rx[v] + rw[v]/2, ry[v] + rh[v]/2); }
+    }
+    clip_x0=0; clip_x1=VW; clip_y0=0; clip_y1=VH;
+    G.view_x0=0; G.view_w=VW; G.view_y0=0; G.view_h=VH;
+    if (vorient) rect_fill(seam-1, 0, 2, VH, COL(10,9,18));   // the seam
+    else rect_fill(0, seam-1, VW, 2, COL(10,9,18));
+}
+static void coop_frame(float dt){
+    Player *me=&G.p[G.my_id];
+    Player *p2=&G.p[G.p2_slot];
+    // who was in Banzai World when this frame BEGAN: a Start/Esc that
+    // leaves BW mid-frame must not also read as a pause press below
+    int p1bw0 = G.bud[G.my_id].in_bw, p2bw0 = G.bud[G.p2_slot].in_bw;
+    if (G.net_mode==NET_HOST)   // LAN guests still take their net input
+        for (int i=1;i<MAXP;i++) if (G.p[i].connected && i!=G.p2_slot) G.p[i].cur_keys = G.p[i].net_keys;
+    int p2up=0, p2down=0; p2_store_nav(&p2up, &p2down, dt);
+    // P1 at the gate panel: it owns P1's menu input while open
+    if (bwgate[G.my_id]){
+        me->cur_keys=0;
+        if (IN.menu_up){ bwgate_sel[G.my_id] = (bwgate_sel[G.my_id]+2)%3; sfx(6); }
+        if (IN.menu_down){ bwgate_sel[G.my_id] = (bwgate_sel[G.my_id]+1)%3; sfx(6); }
+        if (IN.tapped){ int vx,vy,vw2,vh2; p1_view_rect(&vx,&vy,&vw2,&vh2); bw_gate_tap(G.my_id, vx, vy, vw2, vh2); }
+        else if (IN.select_pressed || IN.enter_pressed) bw_gate_pick(G.my_id);
+        else if (IN.esc_pressed || IN.pause_pressed){ bwgate[G.my_id]=0; sfx(6); }
+    }
+    // P1 at a cabinet panel: same deal, two rows
+    if (arcgate[G.my_id]){
+        me->cur_keys=0;
+        if (IN.menu_up || IN.menu_down){ arcgate_sel[G.my_id] = (arcgate_sel[G.my_id]+1)%2; sfx(6); }
+        if (IN.tapped){ int vx,vy,vw2,vh2; p1_view_rect(&vx,&vy,&vw2,&vh2); arc_gate_tap(G.my_id, vx, vy, vw2, vh2); }
+        else if (IN.select_pressed || IN.enter_pressed) arc_gate_pick(G.my_id);
+        else if (IN.esc_pressed || IN.pause_pressed){ arcgate[G.my_id]=0; sfx(6); }
+    }
+    // P1 in Banzai World: P1's input drives the buddy in its own world
+    else if (G.bud[G.my_id].in_bw){
+        me->cur_keys=0;
+        if (IN.tapped){ int vx,vy,vw2,vh2; p1_view_rect(&vx,&vy,&vw2,&vh2); bw_battle_tap(G.my_id, vx, vy, vw2, vh2); }
+        BwIn bin; bw_fill_p1(&bin, dt);
+        bw_update(G.my_id, dt, &bin);
+    }
+    // P1's store (keyboard / pad 1)
+    else if (bwgate[G.my_id]){ me->cur_keys=0; }
+    else if (lstore[0]){
+        me->cur_keys=0;
+        station_input(G.my_id, lstation[0], IN.menu_up, IN.menu_down, IN.select_pressed);
+        if (IN.esc_pressed || IN.interact_pressed || G.tap_close_store){
+            // the till is counting YOUR carcasses: the panel stays
+            // open until it finishes (Daniel, Nov 6)
+            if (pay_active && pay_player==G.my_id){ store_note("THE TILL IS COUNTING - ONE MOMENT"); sfx(16); G.tap_close_store=0; }
+            else { lstore[0]=0; me->in_store=0; me->station=-1; G.tap_close_store=0; bud_stage[G.my_id]=0; }
+        }
+    } else if (IN.interact_pressed && me->alive && downed_near(me)){
+        try_revive(G.my_id);
+    } else if ((IN.interact_pressed || IN.enter_pressed) && me->alive){
+        if (!me->in_mall && near_store(me)){ mall_enter(G.my_id); }
+        else if (me->in_mall){
+            int st=station_at(me);
+            if (st>=0){ lstore[0]=1; lstation[0]=st; G.store_sel=0; me->station=st; me->in_store=1; me->cur_keys=0; sfx(19); }
+            else if (arcade_door_at(me)){ arcade_enter(G.my_id); }
+            else if (bw_door_at(me)){ bw_gate_try(G.my_id); }
+            else if (arcade_exit_at(me)){ arcade_exit(G.my_id); }
+            else if (cabinet_at(me)>=0){ arc_cab[G.my_id]=cabinet_at(me); arc_gate_try(G.my_id); }
+            else if (on_exit_mat(me)){ mall_exit(G.my_id); }
+        }
+    }
+    // P2 at the gate panel
+    if (bwgate[G.p2_slot]){
+        p2->cur_keys=0;
+        if (p2up){ bwgate_sel[G.p2_slot] = (bwgate_sel[G.p2_slot]+2)%3; sfx(6); }
+        if (p2down){ bwgate_sel[G.p2_slot] = (bwgate_sel[G.p2_slot]+1)%3; sfx(6); }
+        if (act2_edge(ACT_FIRE)) bw_gate_pick(G.p2_slot);
+        else if (act2_edge(ACT_INTERACT) || act2_edge(ACT_ESC)){ bwgate[G.p2_slot]=0; sfx(6); }
+    }
+    // P2 at a cabinet panel
+    if (arcgate[G.p2_slot]){
+        p2->cur_keys=0;
+        if (p2up || p2down){ arcgate_sel[G.p2_slot] = (arcgate_sel[G.p2_slot]+1)%2; sfx(6); }
+        if (act2_edge(ACT_FIRE)) arc_gate_pick(G.p2_slot);
+        else if (act2_edge(ACT_INTERACT) || act2_edge(ACT_ESC)){ arcgate[G.p2_slot]=0; sfx(6); }
+    }
+    // P2 in Banzai World: pad 2 drives P2's buddy in its own half
+    else if (G.bud[G.p2_slot].in_bw){
+        resolve_p2_input();
+        BwIn bin; bin.keys = p2->cur_keys;
+        bin.interact = act2_edge(ACT_INTERACT);
+        bin.exit_ = act2_edge(ACT_ESC);
+        bin.pause = act2_edge(ACT_PAUSE);
+        bin.sel = act2_edge(ACT_FIRE);
+        bin.up = p2up; bin.down = p2down;
+        bin.wall = act2_edge(ACT_WALL);
+        bin.sel_held = ((IN.act2_held>>ACT_FIRE)&1) || ((p2->cur_keys & K_UP) && G.bud[G.p2_slot].bw_mode!=5);   // mode 5: steering never fires (see bw_fill_p1)
+        bw_update(G.p2_slot, dt, &bin);
+        p2->cur_keys=0;   // P2's DEV stands at the gate meanwhile
+    }
+    // P2's store (pad 2)
+    else if (bwgate[G.p2_slot]){ p2->cur_keys=0; }
+    else if (lstore[1]){
+        p2->cur_keys=0;
+        station_input(G.p2_slot, lstation[1], p2up, p2down, act2_edge(ACT_FIRE));
+        if (act2_edge(ACT_INTERACT) || act2_edge(ACT_ESC)){
+            if (!(pay_active && pay_player==G.p2_slot)){ lstore[1]=0; p2->in_store=0; p2->station=-1; bud_stage[G.p2_slot]=0; }
+        }
+    } else if (act2_edge(ACT_INTERACT) && p2->alive && downed_near(p2)){
+        try_revive(G.p2_slot);
+    } else if (act2_edge(ACT_INTERACT) && p2->alive &&
+               ((!p2->in_mall && near_store(p2)) || (p2->in_mall && (station_at(p2)>=0 || bw_door_at(p2) || on_exit_mat(p2) || arcade_door_at(p2) || arcade_exit_at(p2) || cabinet_at(p2)>=0)))){
+        if (!p2->in_mall){ mall_enter(G.p2_slot); }
+        else {
+            int st=station_at(p2);
+            if (st>=0){ lstore[1]=1; lstation[1]=st; G.store_sel2=0; p2->station=st; p2->in_store=1; p2->cur_keys=0; sfx(19); }
+            else if (arcade_door_at(p2)){ arcade_enter(G.p2_slot); }
+            else if (bw_door_at(p2)){ bw_gate_try(G.p2_slot); }
+            else if (arcade_exit_at(p2)){ arcade_exit(G.p2_slot); }
+            else if (cabinet_at(p2)>=0){ arc_cab[G.p2_slot]=cabinet_at(p2); arc_gate_try(G.p2_slot); }
+            else mall_exit(G.p2_slot);
+        }
+    } else resolve_p2_input();
+    // pause: either player's Start — but never out from under a shopper
+    if (!lstore[0] && !lstore[1] && G.state==GS_PLAY &&
+        (G.net_mode==NET_OFF || (G.net_mode==NET_HOST && !any_remote_connected())) &&
+        ((IN.pause_pressed && !p1bw0) || (act2_edge(ACT_PAUSE) && !p2bw0))){
+        G.state=GS_PAUSE; me->cur_keys=0; p2->cur_keys=0; G.pause_sel=0; G.pause_ctl=0;
+        render_pause();
+        return;
+    }
+    update_sim(dt);
+    if (G.shake>0) G.shake -= dt*6;
+    if (G.state==GS_OVER) render_over();
+    else coop_render(dt);
+    if (G.net_mode==NET_HOST){
+        net_send_t -= dt;
+        if (net_send_t<=0){ net_send_t=1.0f/12; host_snapshot(); }
+        wall_send_t -= dt;
+        if (wall_send_t<=0){ wall_send_t=2.5f; host_send_walls(-1); }
+        if (G.state==GS_OVER){
+            int o=0; wr_u8(&o,'G'); plat_net_send(pkt, o, -1);
+        }
+    }
+}
+static void game_init(void){
+    smemset(&G, 0, sizeof(G));
+    scpy(G.my_name, "DEV", 13);
+    scpy(G.rec_name, "NOBODY", 13);
+    G.my_id=0;
+    G.p2_slot=-1; G.view_w=VW; G.view_y0=0; G.view_h=VH;
+    bind_defaults(G.bind);
+    load_records_and_check_save();
+    if (G.slot<1 || G.slot>3) G.slot=1;
+    probe_slots();
+    G.state=GS_MENU;
+}
+// Turn the platform's physical-key report (+ gamepad actions) into the
+// semantic input fields, through the player's bindings. Arrow keys are
+// permanent alternates for movement and the only keyboard menu keys —
+// that keeps typing in text fields from steering menus.
+static void derive_input(float dt){
+    // one-frame taps (the touch X button) must edge exactly once and
+    // never latch into the held mask: a latched bit only edges the
+    // first time, which made the X button work exactly once per load
+    u64 pulse = IN.pulse; IN.pulse = 0;
+    g_raw_edges = IN.edges_in | pulse | (IN.raw & ~prev_raw);
+    IN.edges_in = 0;
+    // last-device stamps (see pad_mode): any pad action — held or
+    // edged, either player's pad — counts as gamepad use; any
+    // physical key (or a touch, which renders keyboard-style labels
+    // through the mobile branches) counts as keyboard use.
+    IN.dev_t += dt;
+    if (IN.act_held || IN.act_edges || IN.act2_held || IN.act2_edges) IN.pad_last = IN.dev_t;
+    if (IN.raw || g_raw_edges || IN.touch_seen) IN.key_last = IN.dev_t;
+    int k=0;
+    if (raw_dn(G.bind[ACT_UP])    || raw_dn(PK_UP)    || (IN.act_held>>ACT_UP&1))    k|=K_UP;
+    if (raw_dn(G.bind[ACT_DOWN])  || raw_dn(PK_DOWN)  || (IN.act_held>>ACT_DOWN&1))  k|=K_DOWN;
+    if (raw_dn(G.bind[ACT_LEFT])  || raw_dn(PK_LEFT)  || (IN.act_held>>ACT_LEFT&1))  k|=K_LEFT;
+    if (raw_dn(G.bind[ACT_RIGHT]) || raw_dn(PK_RIGHT) || (IN.act_held>>ACT_RIGHT&1)) k|=K_RIGHT;
+    if (raw_dn(G.bind[ACT_FIRE])   || (IN.act_held>>ACT_FIRE&1))   k|=K_FIRE;
+    if (raw_dn(G.bind[ACT_SPRINT]) || (IN.act_held>>ACT_SPRINT&1)) k|=K_SPRINT;
+    IN.keys = k;
+    G.key_edges = k & ~prev_sem; prev_sem = k;
+    IN.enter_pressed    = raw_edge(PK_ENTER) || (int)((IN.act_edges>>ACT_ENTER)&1);
+    IN.select_pressed   = ((G.key_edges & K_FIRE)!=0) || raw_edge(G.bind[ACT_FIRE])
+                          || (int)((IN.act_edges>>ACT_FIRE)&1) || IN.enter_pressed;
+    IN.esc_pressed      = raw_edge(PK_ESC)   || (int)((IN.act_edges>>ACT_ESC)&1);
+    IN.interact_pressed = raw_edge(G.bind[ACT_INTERACT]) || (int)((IN.act_edges>>ACT_INTERACT)&1);
+    IN.wall_pressed     = raw_edge(G.bind[ACT_WALL])     || (int)((IN.act_edges>>ACT_WALL)&1);
+    IN.pause_pressed    = raw_edge(G.bind[ACT_PAUSE])    || (int)((IN.act_edges>>ACT_PAUSE)&1);
+    IN.backspace        = raw_edge(PK_BACKSPACE);
+    IN.weapon_key = 0;
+    for (int w=0;w<5;w++)
+        if (raw_edge(G.bind[ACT_W1+w]) || ((IN.act_edges>>(ACT_W1+w))&1)) IN.weapon_key=w+1;
+    IN.bean_key = raw_edge(26+6) || ((IN.act_edges>>ACT_BEAN)&1);   // the 6 key (digits are PK 26..35) or the pad's Y button
+    IN.weapon_cycle = ((IN.act_edges>>ACT_WNEXT)&1)? 1 : ((IN.act_edges>>ACT_WPREV)&1)? -1 : 0;
+    // menu navigation: arrow edges, synthesized auto-repeat while held
+    // (identical repeat timing in every build), gamepad edges
+    IN.menu_up=0; IN.menu_down=0;
+    if (raw_edge(PK_UP) || ((IN.act_edges>>ACT_UP)&1)){ IN.menu_up=1; menu_rep_dir=-1; menu_rep_t=0.38f; }
+    else if (raw_edge(PK_DOWN) || ((IN.act_edges>>ACT_DOWN)&1)){ IN.menu_down=1; menu_rep_dir=1; menu_rep_t=0.38f; }
+    else if (menu_rep_dir!=0 && (raw_dn(PK_UP) || raw_dn(PK_DOWN))){
+        menu_rep_t -= dt;
+        if (menu_rep_t<=0){
+            if (menu_rep_dir<0 && raw_dn(PK_UP)) IN.menu_up=1;
+            if (menu_rep_dir>0 && raw_dn(PK_DOWN)) IN.menu_down=1;
+            menu_rep_t=0.09f;
+        }
+    } else menu_rep_dir=0;
+    prev_raw = IN.raw;
+    IN.act_edges = 0;   // consumed
+}
+
+// ---------------------------------------------------------------------------
+// Game-over portrait: the hat you died in (Daniel). Death crashes the
+// stack to zero, so while the local player lives we keep a running
+// snapshot of the hat — the game-over screen wears it, and so does the
+// share card. (The statics live up by render_over; this is the keeper.)
+// ---------------------------------------------------------------------------
+static void over_refresh(void){
+    if (G.state!=GS_PLAY) return;
+    Player *me=&G.p[G.my_id>=0? G.my_id : 0];
+    if (!me->connected || !me->alive) return;
+    over_stack_n = me->stack_n<MAXSTACK? me->stack_n : MAXSTACK;
+    for (int i=0;i<over_stack_n;i++) over_stack[i]=me->stack[i];
+    over_carried = me->carried;
+    over_have = 1;
+}
+
+static double last_now=0; static int booted=0;
+void frame(void){
+    double now = plat_now();
+    float dt = booted? (float)(now-last_now) : 0.016f;
+    last_now = now;
+    if (dt>0.05f) dt=0.05f; if (dt<0) dt=0;
+    if (!booted){ booted=1; game_init(); }
+    if (want_autostart){
+        want_autostart = 0;
+        if (G.state==GS_MENU && G.net_mode==NET_OFF) start_run(NET_CLIENT);
+    }
+    G.anim_t += dt;
+    if (G.store_msg_t>0) G.store_msg_t--;
+    derive_input(dt);
+    G.view_pi = G.my_id>=0? G.my_id : 0;   // split passes override per view
+    touch_update(dt);
+    update_audio(dt);
+    whale_poll(dt);
+
+    if (G.net_mode==NET_HOST) net_host_poll();
+    if (G.net_mode==NET_CLIENT) net_client_poll();
+    over_refresh();
+    if (G.state!=GS_MENU) G.menu_pad=0;   // title-menu layout latch resets off-menu
+
+    switch (G.state){
+    case GS_MENU: menu_input(); render_menu(); break;
+    case GS_SETTINGS: settings_input(); render_settings(); break;
+    case GS_HELP:
+        if (IN.esc_pressed) G.state=GS_MENU;
+        else if (IN.interact_pressed || IN.select_pressed || IN.tapped){
+            help_page ^= 1;   // first press: page two. second: back to the menu
+            if (!help_page) G.state=GS_MENU;
+        }
+        render_help(); break;
+    case GS_PAUSE:
+        if (any_remote_connected()){ G.state=GS_PLAY; G.pause_ctl=0; }   // a guest arrived: action resumes
+        else if (G.pause_ctl){
+            if (IN.esc_pressed || IN.pause_pressed || IN.select_pressed || IN.interact_pressed || IN.tapped || act2_edge(ACT_PAUSE) || act2_edge(ACT_ESC)) G.pause_ctl=0;
+        }
+        else if (IN.esc_pressed || IN.pause_pressed || act2_edge(ACT_PAUSE) || act2_edge(ACT_ESC)) G.state=GS_PLAY;
+        else {
+            if (IN.menu_up) G.pause_sel = (G.pause_sel+2)%3;
+            if (IN.menu_down) G.pause_sel = (G.pause_sel+1)%3;
+            if (IN.tapped){
+                for (int i=0;i<3;i++){ int y=176+i*26;
+                    if (IN.tap_y>=y-6 && IN.tap_y<=y+17){
+                        if (i==2 && G.pause_sel!=2) G.pause_sel=2;    // first tap arms quit
+                        else if (i==0) G.state=GS_PLAY;
+                        else if (i==1) G.pause_ctl=1;
+                        else pause_save_quit();
+                        break; } }
+            }
+            else if (IN.select_pressed || IN.interact_pressed){
+                if (G.pause_sel==0) G.state=GS_PLAY;
+                else if (G.pause_sel==1) G.pause_ctl=1;
+                else pause_save_quit();
+            }
+        }
+        render_pause();
+        break;
+    case GS_SLOTS: slots_input(); render_slots(); break;
+    case GS_PLAY: case GS_STORE: {
+        if (G.net_mode==NET_CLIENT){
+            if (!client_joined){
+                client_joined=1;
+                int o=0; wr_u8(&o,'J');
+                for (int k2=0;k2<12;k2++) wr_u8(&o, (u8)G.my_name[k2]);
+                wr_u8(&o, (u8)G.whale_own); wr_u8(&o, (u8)G.whale_on);
+                wr_u8(&o, (u8)(G.whale_own>>8)); wr_u8(&o, (u8)(G.whale_on>>8));
+                plat_net_send(pkt, o, 0);
+            }
+            if (G.my_id<0){
+                // connecting screen
+                rect_fill(0,0,VW,VH,COL(24,22,38));
+                draw_demo_scene();
+                rect_fill(0, 140, VW, 60, COL(20,18,36));
+                draw_text_center(VW/2, 158, "CONNECTING TO HOST...", 2, COL(255,214,64));
+                draw_text_center(VW/2, 184, pad_mode()? "BACK - CANCEL" : "ESC - CANCEL", 1, COL(190,200,220));
+                if (IN.esc_pressed){ plat_net_stop(); G.net_mode=NET_OFF; G.state=GS_MENU; }
+                break;
+            }
+            // client: send inputs, render the host's world
+            Player *me=&G.p[G.my_id];
+            me->is_local=1;
+            resolve_local_input();
+            if (store_open_local){
+                station_input(G.my_id, client_station, IN.menu_up, IN.menu_down, IN.select_pressed);
+                if (client_station==4) bowl_update(G.my_id, dt);   // guests bowl on their own screen
+                G.store_station = client_station;
+                render_store();
+                if (IN.esc_pressed || (IN.interact_pressed && !(client_station==1 && whale_code_mode[G.my_id])) || G.tap_close_store){ store_open_local=0; G.tap_close_store=0; whale_code_mode[G.my_id]=0; client_tell_store(0); }
+            } else {
+                if ((IN.interact_pressed || IN.enter_pressed || (IN.tapped && !me->in_mall && tap_on_store())) && me->alive){
+                    if (!me->in_mall && near_store(me)){ int o=0; wr_u8(&o,'E'); plat_net_send(pkt, o, 0); sfx(19); }
+                    else if (me->in_mall){
+                        int st = station_at(me);
+                        if (st>=0){ store_open_local=1; client_station=st; G.store_sel=0; client_tell_store(1); sfx(19); }
+                        else if (on_exit_mat(me)){ int o=0; wr_u8(&o,'E'); plat_net_send(pkt, o, 0); sfx(19); }
+                    }
+                }
+                // particles/floaters still animate locally
+                update_fx(dt);
+                G.camx += (me->x - G.camx)*(dt*6>1?1:dt*6);
+                G.camy += (me->y - G.camy)*(dt*6>1?1:dt*6);
+                render_world(); render_hud();
+            }
+            net_send_t -= dt;
+            if (net_send_t<=0){ net_send_t=1.0f/30; net_client_send_input(); }
+            break;
+        }
+        // single player or host: full simulation
+        {
+            Player *me=&G.p[G.my_id];
+            resolve_local_input();
+            // local co-op: with the option on and two controllers in,
+            // a press on pad 2 drops P2 into the run beside P1
+            if (G.p2_slot<0 && G.coop_pref && G.net_mode!=NET_CLIENT && G.state==GS_PLAY && IN.pad_count>=2 && IN.act2_edges)
+                coop_spawn_p2(me->x-30, me->y);
+            if (G.p2_slot>=0 && G.net_mode!=NET_CLIENT){ coop_frame(dt); break; }
+            // remote players take their input from the net
+            if (G.net_mode==NET_HOST)
+                for (int i=1;i<MAXP;i++) if (G.p[i].connected){
+                    G.p[i].cur_keys = G.p[i].net_keys;
+                }
+            // pause whenever you're effectively solo (the sim simply
+            // stops advancing): offline, or hosting with no guests yet
+            if (G.state==GS_PLAY && !bwgate[G.my_id] && !arcgate[G.my_id] && !G.bud[G.my_id].in_bw && (G.net_mode==NET_OFF ||
+                (G.net_mode==NET_HOST && !any_remote_connected())) &&
+                (IN.esc_pressed || IN.pause_pressed)){
+                G.state=GS_PAUSE; me->cur_keys=0; G.pause_sel=0; G.pause_ctl=0; render_pause(); break;
+            }
+            int gate_was = bwgate[G.my_id] || arcgate[G.my_id];
+            if (G.state==GS_PLAY && bwgate[G.my_id]){
+                me->cur_keys=0;
+                if (IN.menu_up){ bwgate_sel[G.my_id] = (bwgate_sel[G.my_id]+2)%3; sfx(6); }
+                if (IN.menu_down){ bwgate_sel[G.my_id] = (bwgate_sel[G.my_id]+1)%3; sfx(6); }
+                if (IN.tapped) bw_gate_tap(G.my_id, 0, 0, VW, VH);
+                else if (IN.select_pressed || IN.enter_pressed) bw_gate_pick(G.my_id);
+                else if (IN.esc_pressed || IN.pause_pressed){ bwgate[G.my_id]=0; sfx(6); }
+            }
+            if (G.state==GS_PLAY && arcgate[G.my_id]){
+                me->cur_keys=0;
+                if (IN.menu_up || IN.menu_down){ arcgate_sel[G.my_id] = (arcgate_sel[G.my_id]+1)%2; sfx(6); }
+                if (IN.tapped) arc_gate_tap(G.my_id, 0, 0, VW, VH);
+                else if (IN.select_pressed || IN.enter_pressed) arc_gate_pick(G.my_id);
+                else if (IN.esc_pressed || IN.pause_pressed){ arcgate[G.my_id]=0; sfx(6); }
+            }
+            if (G.state==GS_PLAY && G.bud[G.my_id].in_bw){
+                // my buddy is off in Banzai World: my input drives it,
+                // and my DEV just stands at the gate in the mall
+                me->cur_keys=0;
+                if (IN.tapped) bw_battle_tap(G.my_id, 0, 0, VW, VH);
+                BwIn bin; bw_fill_p1(&bin, dt);
+                bw_update(G.my_id, dt, &bin);
+            }
+            if (G.state==GS_PLAY && !G.bud[G.my_id].in_bw && !gate_was){
+                if ((IN.interact_pressed || IN.enter_pressed || (IN.tapped && !me->in_mall && tap_on_store())) && me->alive){
+                    if (IN.interact_pressed && downed_near(me)){ try_revive(G.my_id); }
+                    else if (!me->in_mall && near_store(me)){ mall_enter(G.my_id); me->cur_keys=0; }
+                    else if (me->in_mall){
+                        int st = station_at(me);
+                        if (st>=0){ G.state=GS_STORE; G.store_station=st; G.store_sel=0; me->station=st; me->in_store=1; me->cur_keys=0; sfx(19); }
+                        else if (arcade_door_at(me)){ arcade_enter(G.my_id); me->cur_keys=0; }
+                        else if (bw_door_at(me)){ bw_gate_try(G.my_id); me->cur_keys=0; }
+                        else if (arcade_exit_at(me)){ arcade_exit(G.my_id); me->cur_keys=0; }
+                        else if (cabinet_at(me)>=0){ arc_cab[G.my_id]=cabinet_at(me); arc_gate_try(G.my_id); me->cur_keys=0; }
+                        else if (on_exit_mat(me)){ mall_exit(G.my_id); me->cur_keys=0; }
+                    }
+                }
+            } else if (G.state==GS_STORE) {
+                // This was a bare else once: with the gate panel open
+                // (or the buddy away in Banzai World) the frame fell
+                // into station_input against the STALE G.store_station
+                // — picking STORY MODE also withdrew the bank, and
+                // taps landed on a phantom panel (Daniel, Nov 4:
+                // "the menus got mixed up")
+                me->cur_keys=0;
+                station_input(G.my_id, G.store_station, IN.menu_up, IN.menu_down, IN.select_pressed);
+                // While an unlock code is being typed, the Interact key
+                // must not close the panel — codes are full of E's, and
+                // the E that types the letter was also slamming the panel
+                // shut mid-code (this is why a hand-typed code could
+                // never be finished). Esc still backs out.
+                if (IN.esc_pressed || (IN.interact_pressed && !(G.store_station==1 && whale_code_mode[G.my_id])) || G.tap_close_store){
+                    if (pay_active && pay_player==G.my_id){ store_note("THE TILL IS COUNTING - ONE MOMENT"); sfx(16); G.tap_close_store=0; }
+                    else { G.state=GS_PLAY; me->in_store=0; me->station=-1; G.tap_close_store=0; bud_stage[G.my_id]=0; whale_code_mode[G.my_id]=0; }
+                }
+            }
+            update_sim(dt);
+            G.camx += (me->x - G.camx)*(dt*6>1?1:dt*6);
+            G.camy += (me->y - G.camy)*(dt*6>1?1:dt*6);
+            if (G.shake>0) G.shake -= dt*6;
+            if (G.state==GS_STORE) render_store();
+            else if (G.state==GS_OVER) render_over();
+            else if (G.bud[G.my_id].in_bw) bw_render(G.my_id);
+            else { render_world(); render_hud(); if (bwgate[G.my_id]) bw_gate_draw(G.my_id, 0, 0, VW, VH); if (arcgate[G.my_id]) arc_gate_draw(G.my_id, 0, 0, VW, VH); }
+            if (G.net_mode==NET_HOST){
+                net_send_t -= dt;
+                if (net_send_t<=0){ net_send_t=1.0f/12; host_snapshot(); }
+                wall_send_t -= dt;
+                if (wall_send_t<=0){ wall_send_t=2.5f; host_send_walls(-1); }
+                if (G.state==GS_OVER){ // tell the clients the run ended
+                    int o=0; wr_u8(&o,'G'); plat_net_send(pkt, o, -1);
+                }
+            }
+        }
+        break; }
+    case GS_OVER:
+        G.gameover_t += dt;
+        render_over();
+        if ((IN.esc_pressed || IN.interact_pressed || IN.select_pressed || IN.tapped) && G.gameover_t>0.6f){
+            if (G.net_mode!=NET_OFF){ plat_net_stop(); G.net_mode=NET_OFF; }
+            for (int i=0;i<MAXP;i++) G.p[i].connected=0;
+            G.p2_slot=-1; coop_reset_views();
+            G.state=GS_MENU;
+        }
+        break;
+    }
+    // clear one-frame input edges
+    IN.act2_edges=0;   // pad-2 edges live exactly one frame, like P1's
+    IN.mclicked=0; IN.rclicked=0; IN.wall_pressed=0; IN.interact_pressed=0;
+    IN.esc_pressed=0; IN.enter_pressed=0; IN.typed_n=0; IN.backspace=0; IN.weapon_key=0; IN.bean_key=0;
+    IN.menu_up=0; IN.menu_down=0; IN.select_pressed=0; IN.pause_pressed=0; IN.tapped=0;
+    G.tap_close_store=0;
+}
+
+// ---------------------------------------------------------------------------
+// BANZAI WORLD (Daniel, Nov 3): through the torii gate in the mall's
+// south-east corner, you ARE your Banzai Buddy. A procedurally generated
+// open world of grass, rocks and trees — generated from the buddy's own
+// seed, so it is the same world every visit, and the buddy's saved
+// position puts it exactly where it left off. Hackers roam it; walking
+// into one starts a turn-based battle (choose an attack, attacks cost
+// energy, the hacker hits back). Winning earns buddy XP. Sleeping at a
+// tent restores HP and energy in full. Fainting wakes you in the mall.
+// Solo trip: no split-screen and no LAN guests in there (v1).
+// ---------------------------------------------------------------------------
+static void bw_render(int pi);
+static void bw_render_battle(int pi);
+static void bw_exit(int pi, int fainted);
+#define BW_TILE 48
+#define ENT_ROWS 10          // ENTRANCES room height in tiles (was 8)
+#define ENT_DOOR_LY 4        // the ENTRANCES doorway row in every room
+#define ENT_DOORY (ENT_DOOR_LY*BW_TILE + 24)
+#define BW_CELL 264
+#define BW_ROAMN 20
+#define TANK_W 26            // TANK RESCUE field width, tiles
+#define TANK_LEN 110         // TANK RESCUE field length, tiles (ty 0 = the top; you fight north)
+#define TANK_MAXEN 90
+#define TANK_GATE_TY 8       // the barrier row under the boss arena: shut while the core lives
+#define TANK_MID_TY 46       // the blockade barrier row, mid-field: shut while the blockade gun lives
+static int bw_tileof(float v){ int t=(int)(v/BW_TILE); if (v<0 && v!=(float)t*BW_TILE) t--; return t; }
+static int bw_cellof(float v){ int t=(int)(v/BW_CELL); if (v<0 && v!=(float)t*BW_CELL) t--; return t; }
+// regional density in 5x5-tile cells: 0 sparse, 1 normal, 2 lush — so
+// the meadow breathes: thick woods, then open ground (Nov 3, Daniel:
+// "filling the screen with some sparse areas")
+static int bw_lush_at(int tx, int ty, u32 seed){
+    int cx = tx>=0? tx/5 : (tx-4)/5, cy = ty>=0? ty/5 : (ty-4)/5;
+    int r = (int)(hash2(cx, cy, seed ^ 0xD3A7u) % 100);
+    return r < 42? 2 : (r < 78? 1 : 0);
+}
+static int bw_tile_at(int tx, int ty, u32 seed){   // 0 grass, 1 tree, 2 rock
+    if (tx>=-2 && tx<=2 && ty>=-3 && ty<=2) return 0;          // the gate clearing
+    int lush = bw_lush_at(tx, ty, seed);
+    int rockp = lush==2? 3 : lush==1? 2 : 1;
+    int treep = lush==2? 17 : lush==1? 8 : 2;
+    int r = (int)(hash2(tx, ty, seed ^ 0xB17u) % 100);
+    if (r < rockp) return 2;
+    if (r < rockp + treep) return 1;
+    return 0;
+}
+// --- Story Mode: fixed sites on the procedural meadow ----------------------
+// Free play never sees any of this. Story buddies get five hand-placed
+// places with procedural travel between them (Daniel's Alphaman brief).
+// The world WIDENED Nov 3 (Daniel: "Make the game wider"): the farm,
+// lake and compound spread far out, and a fifth place — the Overgrown
+// Ruins — rose in the far west.
+static const float BW_SITE_XY[5][3] = {   // x, y, radius
+    { -2600, -1400, 330 },   // 0 Patch Village
+    {  3400, -2400, 350 },   // 1 the Ruined Server Farm
+    { -1400,  4400, 350 },   // 2 the Frozen Lake of Deprecated Code
+    {  5800,  3400, 310 },   // 3 Zed's Compound
+    { -5200,  1800, 340 },   // 4 the Overgrown Ruins
+};
+static const char *BW_SITE_NAME[5] = { "PATCH VILLAGE", "THE RUINED SERVER FARM", "THE FROZEN LAKE", "ZED'S COMPOUND", "THE OVERGROWN RUINS" };
+static int bw_site_at_xy(Buddy *b, float x, float y){
+    if (b->bw_mode!=1) return -1;
+    for (int i=0;i<5;i++){
+        float dx=x-BW_SITE_XY[i][0], dy=y-BW_SITE_XY[i][1];
+        if (dx*dx+dy*dy < BW_SITE_XY[i][2]*BW_SITE_XY[i][2]) return i;
+    }
+    return -1;
+}
+static const char *BW_ITEM_NAME[4] = { "PATCH NOTES", "ENERGY DRINK", "ADRENAL COOKIE", "CTRL-Z" };
+static int bw_qstate(Buddy *b, int q){ return (b->story_bits >> (q*2)) & 3; }
+static void bw_qset(Buddy *b, int q, int s){ b->story_bits = (b->story_bits & ~(3 << (q*2))) | ((s&3) << (q*2)); }
+static int bw_qstate_x(Buddy *b, int q){ if (q<4) return bw_qstate(b,q); return (b->story_bits >> (18+(q-4)*2)) & 3; }
+static int bw_qstate2(Buddy *b, int q){ return (b->story_bits2 >> ((q-6)*2)) & 3; }   // quests 6-9
+static void bw_qset2(Buddy *b, int q, int s){ int sh=(q-6)*2; b->story_bits2 = (b->story_bits2 & ~(3<<sh)) | ((s&3)<<sh); }
+static int bw_qstate_g(Buddy *b, int q){ return q<6? bw_qstate_x(b,q) : bw_qstate2(b,q); }   // any quest, 0-9
+static int bw_lakekills(Buddy *b){ return (b->story_bits2>>8)&3; }
+static void bw_lakekills_set(Buddy *b, int n){ b->story_bits2 = (b->story_bits2 & ~(3<<8)) | ((n&3)<<8); }
+static int bw_signs_read(Buddy *b){ int n=0; for (int i=0;i<6;i++) n += (b->story_bits2>>(11+i))&1; return n; }
+static void bw_qset_x(Buddy *b, int q, int s){ if (q<4){ bw_qset(b,q,s); return; } int sh = 18+(q-4)*2; b->story_bits = (b->story_bits & ~(3<<sh)) | ((s&3)<<sh); }
+// story bit 22: the Cache Hoarder is down. bit 23: you carry the GATE
+// CRANK. bits 24-26: Mop's lost tools, found one by one.
+static int bw_has_crank(Buddy *b){ return (b->story_bits>>23)&1; }
+static const float BW_TOOL_XY[3][2] = { { 1000, 800 }, { -3600, 400 }, { 2000, 3000 } };
+static const char *BW_TOOL_NAME[3] = { "WRENCH", "HAMMER", "BRUSH" };
+static int bw_tools_found(Buddy *b){ return ((b->story_bits>>24)&1) + ((b->story_bits>>25)&1) + ((b->story_bits>>26)&1); }
+static int bw_tool_near(Buddy *b, float maxd){
+    if (b->bw_mode!=1) return -1;
+    for (int i=0;i<3;i++){
+        if ((b->story_bits>>(24+i))&1) continue;
+        float dx=BW_TOOL_XY[i][0]-b->x, dy=BW_TOOL_XY[i][1]-b->y;
+        if (dx*dx+dy*dy < maxd*maxd) return i;
+    }
+    return -1;
+}
+static int bw_farmkills(Buddy *b){ return (b->story_bits >> 8) & 15; }
+static void bw_farmkills_set(Buddy *b, int n){ b->story_bits = (b->story_bits & ~(15 << 8)) | ((n&15) << 8); }
+// NPCs: 0 Elder Patchina (village), 1 Mop (village), 2 Glitch (the lake hermit)
+static const float BW_NPC_XY[3][2] = { { -2620, -1440 }, { -2540, -1320 }, { -1400, 4340 } };
+static const u32 BW_NPC_ROBE[3] = { COL(116,74,158), COL(96,128,92), COL(84,96,118) };
+// the farm's terminal puzzle: three colored terminals, one right order,
+// and the order is scratched on a rack by the farm's south entrance
+static const float BW_TERM_XY[3][2] = { { 3230, -2460 }, { 3570, -2460 }, { 3400, -2210 } };
+static const u32 BW_TERM_COL[3] = { COL(255,90,80), COL(110,255,140), COL(110,170,255) };
+static const char *BW_TERM_NAME[3] = { "RED", "GREEN", "BLUE" };
+static void bw_term_order(Buddy *b, int out[3]){
+    static const int PERM[6][3] = { {0,1,2},{0,2,1},{1,0,2},{1,2,0},{2,0,1},{2,1,0} };
+    const int *p = PERM[(b->bw_seed/7) % 6];
+    out[0]=p[0]; out[1]=p[1]; out[2]=p[2];
+}
+static int bw_puz_prog(Buddy *b){ return (b->story_bits >> 12) & 7; }
+static void bw_puz_prog_set(Buddy *b, int n){ b->story_bits = (b->story_bits & ~(7 << 12)) | ((n&7) << 12); }
+static int bw_puz_done(Buddy *b){ return (b->story_bits >> 15) & 1; }
+static int bw_term_near(Buddy *b, float maxd){
+    if (b->bw_mode!=1 || bw_puz_done(b)) return -1;
+    for (int i=0;i<3;i++){
+        float dx=BW_TERM_XY[i][0]-b->x, dy=BW_TERM_XY[i][1]-b->y;
+        if (dx*dx+dy*dy < maxd*maxd) return i;
+    }
+    return -1;
+}
+static int bw_sign_near(Buddy *b, float maxd){
+    if (b->bw_mode!=1) return 0;
+    float dx=3400-b->x, dy=-2100-b->y;
+    return dx*dx+dy*dy < maxd*maxd;
+}
+// Help signs (Nov 4, Daniel: "help signs, so the user can get more
+// info about how to complete quests — don't give it all away, but make
+// everything clearer"). Wooden signposts stand at the village edge, at
+// every ridge pass, and on the south road. Each teaches one thing the
+// meadow never explained: facing, ridges, the crank, scarce tents.
+// Reading them is also Patchina's errand (quest 9).
+static const float BW_HSIGN_XY[6][2] = {
+    { -2470, -860 },   // 0 the village edge
+    {  1762, -1900 },  // 1 the farm pass
+    { -1700,  2082 },  // 2 the lake pass
+    { -3762,  1900 },  // 3 the ruins pass
+    {  5300,   382 },  // 4 the compound pass
+    { -1500,   620 },  // 5 the south road
+};
+static const char *BW_HSIGN_TXT[6] = {
+    "SIGN: HACKERS HUNT WHAT THEY SEE. MIND THEIR FACING.",
+    "SIGN: THE PASS. RIDGES STOP EVERYONE - HACKERS TOO.",
+    "SIGN: COLD LAKE. GLITCH LIKES COMPANY, RARELY GETS IT.",
+    "SIGN: WEST STANDS THE RUINS. SOMETHING SITS ON A CRANK.",
+    "SIGN: THE COMPOUND GATE OPENS FOR A CRANK, NOT ASKING.",
+    "SIGN: TENTS ARE SCARCE NOW. SLEEP WHERE IT COUNTS.",
+};
+static int bw_hsign_near(Buddy *b, float maxd){
+    if (b->bw_mode!=1) return -1;
+    for (int i=0;i<6;i++){
+        float dx=BW_HSIGN_XY[i][0]-b->x, dy=BW_HSIGN_XY[i][1]-b->y;
+        if (dx*dx+dy*dy < maxd*maxd) return i;
+    }
+    return -1;
+}
+// Bitling, the stray process (quest 8): a tiny lost bot drifting in a
+// slow lissajous south of Patch Village, perfectly happy about it.
+static void bw_bitling_pos(float *x, float *y){
+    float t = G.anim_t;
+    *x = -1800 + fsin(t*0.10f)*170;
+    *y =  700 + fsin(t*0.073f + 1.7f)*130;
+}
+static int bw_bitling_near(Buddy *b, float maxd){
+    if (b->bw_mode!=1) return 0;
+    float x, y; bw_bitling_pos(&x, &y);
+    float dx=x-b->x, dy=y-b->y;
+    return dx*dx+dy*dy < maxd*maxd;
+}
+static int bw_npc_near(Buddy *b, float maxd){
+    if (b->bw_mode!=1) return -1;
+    for (int i=0;i<3;i++){
+        float dx=BW_NPC_XY[i][0]-b->x, dy=BW_NPC_XY[i][1]-b->y;
+        if (dx*dx+dy*dy < maxd*maxd) return i;
+    }
+    return -1;
+}
+static int bw_site_solid(Buddy *b, float x, float y){
+    if (b->bw_mode!=1) return 0;
+    // village huts: three homes around the green
+    static const float HUT[3][2] = { { -2700, -1480 }, { -2500, -1480 }, { -2600, -1300 } };
+    for (int i=0;i<3;i++) if (x>HUT[i][0]-32 && x<HUT[i][0]+32 && y>HUT[i][1]-14 && y<HUT[i][1]+24) return 1;
+    // the farm's rack rows: a grid of dead cabinets (none in the centre clearing)
+    for (int gx=-2; gx<=2; gx++) for (int gy=-1; gy<=1; gy++){
+        float rx = BW_SITE_XY[1][0] + gx*92, ry = BW_SITE_XY[1][1] + gy*112;
+        float cdx = rx-BW_SITE_XY[1][0], cdy = ry-BW_SITE_XY[1][1];
+        if (cdx*cdx+cdy*cdy < 105*105) continue;
+        if (x>rx-29 && x<rx+29 && y>ry-16 && y<ry+16) return 1;
+    }
+    // the ring around the inner aisle; its south rack is SEALED until the
+    // terminal puzzle is solved, then it is simply gone
+    for (int k=0;k<8;k++){
+        float a = k*0.7854f;
+        float rx = BW_SITE_XY[1][0] + fcos(a)*108, ry = BW_SITE_XY[1][1] + fsin(a)*108;
+        if (k==2 && bw_puz_done(b)) continue;
+        if (x>rx-24 && x<rx+24 && y>ry-14 && y<ry+14) return 1;
+    }
+    // terminals and the scratched sign are furniture too
+    for (int i=0;i<3;i++){
+        float dx=BW_TERM_XY[i][0]-x, dy=BW_TERM_XY[i][1]-y;
+        if (dx*dx+dy*dy < 12*12) return 1;
+    }
+    { float dx=3400-x, dy=-2100-y; if (dx*dx+dy*dy < 12*12) return 1; }
+    // Zed's fence: a ring, firewalled — its south arc only gives for
+    // someone carrying the GATE CRANK out of the Sunken Cache
+    { float dx=x-BW_SITE_XY[3][0], dy=y-BW_SITE_XY[3][1]; float d=fsqrt(dx*dx+dy*dy);
+      if (d>BW_SITE_XY[3][2]-14 && d<BW_SITE_XY[3][2]+14){
+          float down = dy/d;   // 1.0 at the due-south point of the ring
+          if (!(down>0.93f && bw_has_crank(b))) return 1;
+      } }
+    // the Ruins' standing stones are furniture too
+    for (int k=0;k<7;k++){
+        float a = k*0.8976f, dx = BW_SITE_XY[4][0] + fcos(a)*120 - x, dy = BW_SITE_XY[4][1] + fsin(a)*120 - y;
+        if (dx*dx+dy*dy < 12*12) return 1;
+    }
+    // people are solid too
+    for (int i=0;i<3;i++){
+        float dx=BW_NPC_XY[i][0]-x, dy=BW_NPC_XY[i][1]-y;
+        if (dx*dx+dy*dy < 13*13) return 1;
+    }
+    return 0;
+}
+static int bw_solid_xy(float x, float y, u32 seed){
+    return bw_tile_at(bw_tileof(x), bw_tileof(y), seed) != 0;
+}
+// Story Mode hill ridges (Nov 4, Daniel: "impediments along your path
+// so you can't just walk straight there"): long impassable hill lines
+// across the direct routes between places, each with ONE pass. They
+// block buddies and hackers alike (both move through bw_solid_b).
+// { x1,y1, x2,y2, gap_s (distance along the ridge of the pass centre),
+//   gap_half } — the pass is the only way through on foot.
+static const float BW_RIDGES[4][6] = {
+    {  1700,-3600,  1700, -600, 1700, 130 },   // the farm road wall
+    { -3600, 2200,   800, 2200, 1900, 130 },   // the lake road wall
+    { -3900, -800, -3900, 3200, 2700, 130 },   // the ruins wall
+    {  3600,  500,  6600,  500, 1700, 130 },   // the compound wall
+};
+static float bw_ridge_dist(float x, float y, const float *r, float *along){
+    float dx=r[2]-r[0], dy=r[3]-r[1];
+    float len2 = dx*dx + dy*dy, len = fsqrt(len2);
+    float t = len2>0? ((x-r[0])*dx + (y-r[1])*dy)/len2 : 0;
+    if (t<0) t=0; if (t>1) t=1;
+    float px = r[0]+dx*t, py = r[1]+dy*t;
+    if (along) *along = t*len;
+    float ex=x-px, ey=y-py;
+    return fsqrt(ex*ex + ey*ey);
+}
+// dirt roads (Daniel, Nov 6): the story map was one flat green —
+// now the routes between the sites are worn into the ground, each
+// road bending through the ONE pass in its ridge. Purely visual:
+// nothing collides with a road, but your feet can follow one.
+static float bw_road_dist(float x, float y){
+    static const float SEG[8][4] = {
+        { -2600,-1400,  1700,-1900 }, {  1700,-1900,  3400,-2400 },   // village <-> the farm
+        { -2600,-1400, -1700, 2200 }, { -1700, 2200, -1400, 4400 },   // village <-> the lake
+        { -2600,-1400, -3900, 1900 }, { -3900, 1900, -5200, 1800 },   // village <-> the ruins
+        {  3400,-2400,  5300,  500 }, {  5300,  500,  5800, 3400 },   // the farm <-> Zed's compound
+    };
+    float best = 1e9f;
+    for (int i=0;i<8;i++){
+        float dx=SEG[i][2]-SEG[i][0], dy=SEG[i][3]-SEG[i][1];
+        float len2 = dx*dx + dy*dy;
+        float t = len2>0? ((x-SEG[i][0])*dx + (y-SEG[i][1])*dy)/len2 : 0;
+        if (t<0) t=0; if (t>1) t=1;
+        float px = SEG[i][0]+dx*t - x, py = SEG[i][1]+dy*t - y;
+        float d = fsqrt(px*px + py*py);
+        if (d<best) best = d;
+    }
+    return best;
+}
+static int bw_ridge_solid(float x, float y){
+    for (int i=0;i<4;i++){
+        float along; float d = bw_ridge_dist(x, y, BW_RIDGES[i], &along);
+        if (d >= 24) continue;
+        float g = along - BW_RIDGES[i][4];
+        if (g<0) g=-g;
+        if (g <= BW_RIDGES[i][5]) continue;   // the pass: walkable
+        return 1;
+    }
+    return 0;
+}
+// inside a ridge's pass (with a little apron): the way through is
+// KEPT CLEAR — no tree or rock tile counts there, or a lucky hash
+// could plug the only gap in the wall
+static int bw_ridge_pass_zone(float x, float y){
+    // the pass is a ROAD, not a doorway: the corridor through it —
+    // the gap's width, 240 units of approach on both sides — grows
+    // no trees and no rocks, in solidity or in drawing. (First cut
+    // cleared only the ridge line itself and a tree one tile out
+    // still plugged the way.)
+    for (int i=0;i<4;i++){
+        const float *r = BW_RIDGES[i];
+        float dx=r[2]-r[0], dy=r[3]-r[1];
+        float len = fsqrt(dx*dx + dy*dy); if (len<=0) continue;
+        float ux=dx/len, uy=dy/len;
+        float rx=x-r[0], ry=y-r[1];
+        float along = rx*ux + ry*uy;
+        float perp = rx*(-uy) + ry*ux; if (perp<0) perp=-perp;
+        float g = along - r[4]; if (g<0) g=-g;
+        if (g <= r[5] + 12 && perp <= 240) return 1;
+    }
+    return 0;
+}
+// The world has an edge (Nov 4, Daniel: "a hard boundary around the
+// whole world that is ocean, so you can only wander so far past the
+// relevant areas"). The bounds cover every site with room to roam;
+// the sea beyond them is solid — to buddies and hackers alike. (The
+// old fixed minimap window was drawn to exactly this extent.)
+#define BW_WX0 (-6200)
+#define BW_WY0 (-3200)
+#define BW_WX1 ( 6800)
+#define BW_WY1 ( 5400)
+static int bw_outside_world(float x, float y){ return x<BW_WX0 || x>BW_WX1 || y<BW_WY0 || y>BW_WY1; }
+static int bw_solid_b(Buddy *b, float x, float y){
+    if (b->bw_mode==2) return ent_solid((int)(b - G.bud), x, y);
+    if (bw_outside_world(x, y)) return 1;
+    if (b->bw_mode==1 && bw_ridge_pass_zone(x, y)) return bw_site_solid(b, x, y);
+    return bw_solid_xy(x, y, (u32)b->bw_seed) || bw_site_solid(b, x, y)
+        || (b->bw_mode==1 && bw_ridge_solid(x, y));
+}
+// one feature per encounter cell: 0 none, 1 tent, 2 hacker
+static int bw_cell_feat(int cx, int cy, u32 seed, float *ox, float *oy, int story){
+    if (cx>=-1 && cx<=1 && cy>=-1 && cy<=1){ *ox=0; *oy=0; return 0; }   // calm near the gate
+    u32 h = hash2(cx, cy, seed ^ 0xCE11u);
+    *ox = (float)((h>>8) % (BW_CELL-96)) + 48;
+    *oy = (float)((h>>16) % (BW_CELL-96)) + 48;
+    if (bw_outside_world(cx*BW_CELL + *ox, cy*BW_CELL + *oy)) return 0;   // no camps at sea (Daniel, Nov 5 — a Story Mode tent rendered in the ocean; roamers and props already had this check, cell features were missed)
+    int r = (int)(h % 100);
+    if (r < (story? 3 : 9)) return 1;   // Nov 4 (Daniel): fewer camps in Story Mode — 3% of cells, Free Play keeps 9%
+    if (r < 40) return 2;
+    return 0;
+}
+static int bw_cell_key(int cx, int cy){ return cx*73856093 ^ cy*19349663; }
+// Banzai World foes scale with the BUDDY, not the map (Daniel): level
+// is linearly commensurate with the buddy's capability — its damage
+// output and its bulk — so a trained buddy keeps meeting real fights
+// (and, since winnings pay 4 + 2*lvl XP, keeps being paid for them),
+// while a fresh buddy still meets fresh-buddy fights wherever it goes.
+static int bw_level_at(Buddy *b, int cell){
+    float dl = 0.40f*buddy_dmg(b) - 1.3f + ((float)b->maxhp - 100.0f)/150.0f;
+    int l = 1 + (dl>0? (int)dl : 0) + (int)(hash2(cell, 11, 5) % 2);
+    return l<1? 1 : l;
+}
+typedef struct { int cell; float x, y, wt, dir; int lvl; float alert; } BWHack;   // alert: story-mode chase memory (Nov 4)
+typedef struct { float x, y, vx, vy; int kind, state; float t; } PlatEn;   // SUPER BUDDY RUN critters: 0 crawl, 1 shell-bug, 2 shell, 3 piranha, 4 fly, 5 shroom, 6 flower
+typedef struct { float x, y, aim, ft, lo, hi; int kind, hp, dir; } TankEn;   // TANK RESCUE foes: 0 turret, 1 patrol tank, 2 prison hut, 3 repair pickup, 4 fortress core, 5 blockade gun. Patrol dir: +-1 runs on x, +-2 on y (sign = way), lo/hi bound that axis
+typedef struct {
+    int active, phase; float t;         // phases: 5 intro, 0 choose, 1 player msg, 2 foe msg, 3 won, 4 lost, 6 fled
+    int lvl, cell, sel, natt, site, boss, strikes, zcharge, zph;
+    float hhp, hmax, lastdmg;
+    int attacks[12];
+    char msg[96], msg2[72];
+} BwBattle;
+// Banzai World is a PER-PLAYER mode now (Nov 3): each local player has
+// their own sim — own roamers, own battle, own notes — so in split-screen
+// co-op one player can be in Banzai World in their half while the other
+// keeps playing the field. LAN play never enters (denied at the gate).
+typedef struct {
+    BwBattle bat;
+    BWHack roam[BW_ROAMN];
+    int defeated[64], defeated_n;
+    float grace_t, sleep_t, note_t;
+    int slept, log_open, log_sel, buff, site_cur;
+    int bw_menu, bw_msel;   // the Start-menu inside Banzai World: 0 off, 1 menu, 2 controls panel
+    int from_arcade, arc_cab;   // this trip began at an Arcade cabinet (Nov 10): exits return there
+    char note[72];
+    // ENTRANCES run state (Nov 5): a Doors-like hotel run inside BW —
+    // per-trip only, never saved; the records live on the Buddy (er).
+    int ent_room, ent_door_upto, ent_key, ent_bits, ent_sticks, ent_lant;
+    int ent_ev, ent_phase, ent_dark, ent_dupe_used, ent_libdone, ent_fuse_mask;
+    int ent_sub, ent_door_sub, ent_passes;   // SUBFLOOR: ent_sub=1 while downstairs; its own door counter and pass count
+    float ent_t, ent_grace, ent_zx, ent_zy, ent_zdir, ent_zspd;
+    float ent_tamb, ent_zt;                  // ambient dread timer; zip-roar retrigger timer
+    int ent_zpass;
+    float ent_tyx, ent_tyy, ent_tt, ent_twait; int ent_typs;
+    float ent_rvx, ent_rvy;
+    float ent_ix, ent_iy, ent_istun; int ent_chase;
+    float ent_fx[4], ent_fy[4]; int ent_fn; float ent_mt; int ent_mstep;   // chase-room floor fires + the Inspector's scary-music pulse (Nov 6)
+    float ent_bbx, ent_bby, ent_bbdir, ent_bbcharge, ent_noise;
+    int ent_loot_rooms[96], ent_loot_n;
+    int ent_finished;
+    // SUPER BUDDY RUN session (mode 3, Nov 5): a side-scrolling
+    // platformer. The level is generated into plat_grid on entry;
+    // records (levels done) live on the Buddy as pd.
+    int plat_lvl, plat_w, plat_score, plat_bits, plat_hearts, plat_power, plat_face, plat_ground, plat_up_prev;
+    float plat_vx, plat_vy, plat_t, plat_deadt, plat_cleart, plat_cpx, plat_coyote, plat_jbuf, plat_grace;
+    float plat_run_t, plat_skid, plat_land_t, plat_cleary, plat_dust_t; int plat_jumpheld;
+    float plat_puff_x[10], plat_puff_y[10], plat_puff_t[10]; int plat_puff_a[10];
+    int plat_en_n; PlatEn plat_en[24];
+    float plat_fx[8], plat_fy[8], plat_fvx[8], plat_fvy[8], plat_ft[8]; int plat_fa[8];
+    unsigned char plat_grid[240*15];
+    // BUDDY CRAFT session (mode 4): the world derives from the buddy's
+    // seed; materials, gear, builds and mined-out nodes all persist on
+    // the Buddy itself (cm/cn/cg/cw/cd), so only bugs, bolts and other
+    // mayflies live here.
+    int craft_menu, craft_sel, craft_cat, craft_biome, craft_hitn, craft_bugn, craft_prevk;
+    float craft_grace, craft_bt, craft_demolish, craft_swarm_t, craft_cache_t, craft_haste, craft_darkp, craft_beam_t;
+    int craft_hk[24], craft_hv[24];
+    float craft_bx[14], craft_by[14], craft_bph[14]; int craft_bhp[14], craft_bk[14]; float craft_btr[14];
+    float craft_bolt_x[4], craft_bolt_y[4], craft_bolt_vx[4], craft_bolt_vy[4], craft_bolt_t[4]; int craft_bolt_a[4];
+    float craft_cache_x, craft_cache_y; int craft_cache_on;
+    float craft_beam_x1, craft_beam_y1, craft_beam_x2, craft_beam_y2;
+    float craft_tz[48];   // per-build zapper-tower cooldowns (session)
+    int craft_nap;        // the current rest is a bedroll nap, not a fire sleep
+    int craft_scroll;     // crafting menu: first visible row of the scrolling list
+    float craft_sh_t; int craft_shn;   // sharks: they own the water
+    float craft_sh_x[6], craft_sh_y[6], craft_sh_ph[6], craft_sh_tr[6], craft_sh_hd[6]; int craft_sh_hp[6];
+    float craft_bmr_x, craft_bmr_y, craft_bmr_vx, craft_bmr_vy, craft_bmr_t; int craft_bmr_a;   // the boomerang
+    int craft_bolt_pc[4]; float craft_bolt_hc[4];   // storm-zapper pierce + per-bolt hit cooldown
+    // TANK RESCUE session (mode 5): per-run only — the field derives
+    // from (bw_seed, level) each load and the record (deepest level
+    // cleared) lives on the Buddy as td.
+    int tank_lvl, tank_hull, tank_lives, tank_pass, tank_score, tank_seed;
+    int tank_boss_hp, tank_boss_max, tank_en_n;
+    int tank_deliv, tank_quota, tank_mid_hp, tank_mid_max, tank_obj;   // the mission chain: deliveries, the quota, the blockade, the current objective phase
+    float tank_obj_x, tank_obj_y;                                      // where the yellow arrow is pointing
+    float tank_t, tank_fire_cd, tank_grace, tank_deadt, tank_cleart, tank_respawn_y, tank_fx, tank_fy;
+    TankEn tank_en[TANK_MAXEN];
+    float tank_cap_x[24], tank_cap_y[24]; int tank_cap_a[24];
+    float tank_sh_x[24], tank_sh_y[24], tank_sh_vx[24], tank_sh_vy[24], tank_sh_t[24]; int tank_sh_a[24];
+    float tank_es_x[32], tank_es_y[32], tank_es_vx[32], tank_es_vy[32], tank_es_t[32]; int tank_es_a[32];
+    unsigned char tank_dead[TANK_W*TANK_LEN], tank_hit[TANK_W*TANK_LEN];   // shot-away tiles + sandbag wear
+} BwSim;
+static BwSim BWS[MAXP];
+static int bw_defeated_has(BwSim *S, int key){ for (int i=0;i<S->defeated_n;i++) if (S->defeated[i]==key) return 1; return 0; }
+static int bw_tent_near(Buddy *b, float maxd, float *tx, float *ty){
+    u32 seed=(u32)b->bw_seed;
+    int cx0=bw_cellof(b->x)-1, cy0=bw_cellof(b->y)-1;
+    for (int cx=cx0; cx<=cx0+2; cx++) for (int cy=cy0; cy<=cy0+2; cy++){
+        float ox, oy; if (bw_cell_feat(cx, cy, seed, &ox, &oy, b->bw_mode==1)!=1) continue;
+        float wx=cx*BW_CELL+ox, wy=cy*BW_CELL+oy;
+        float dx=wx-b->x, dy=wy-b->y;
+        if (dx*dx+dy*dy < maxd*maxd){ *tx=wx; *ty=wy; return 1; }
+    }
+    return 0;
+}
+static int bw_feat_solid(Buddy *b, float x, float y){
+    if (b->bw_mode==2) return 0;
+    float tx, ty; Buddy tmp=*b; tmp.x=x; tmp.y=y;
+    return bw_tent_near(&tmp, 20, &tx, &ty);
+}
+// --- the battle ------------------------------------------------------------
+static const char *BW_HACK_NAME[6] = { "SCRIPT KIDDIE", "PHISHER", "BOT HERDER", "SPAM LORD", "RANSOMWARE RANDY", "ZERO-DAY ZED" };
+static const char *BW_HACK_MOVE[6] = { "BRUTE FORCE", "PHISH SPAM", "DDOS FLOOD", "ZERO-DAY", "RANSOMWARE", "STACK SMASH" };
+static const char *bw_hacker_name(int lvl){
+    int i = lvl<=1? 0 : lvl<=3? 1 : lvl<=5? 2 : lvl<=6? 3 : lvl<=8? 4 : 5;
+    return BW_HACK_NAME[i];
+}
+static void bw_attack_info(Buddy *b, int mv, const char **nm, float *cost, float *mult){
+    switch (mv){
+        case 1: *nm=BUD_MOVE2[b->species%BUDN]; *cost=BUD_EN_MOVE2; *mult=1.6f; break;
+        case 2: *nm=BUD_SPEC[b->species%BUDN];  *cost=BUD_EN_SPEC;  *mult=2.3f; break;
+        case 3: *nm=BUD_MOVE3[b->species%BUDN]; *cost=BUD_EN_MOVE3; *mult=2.2f; break;
+        case 4: *nm=BUD_MOVE4[b->species%BUDN]; *cost=BUD_EN_MOVE4; *mult=2.9f; break;
+        case 5: *nm="RUN AWAY"; *cost=0; *mult=0; break;
+        case 6: case 7: case 8: case 9: *nm=BW_ITEM_NAME[mv-6]; *cost=0; *mult=0; break;
+        default: *nm=BUD_BASIC[b->species%BUDN]; *cost=0; *mult=1.0f; break;
+    }
+}
+static void bw_battle_start(Buddy *b, BWHack *h){
+    BwSim *S = &BWS[(int)(b - G.bud)];
+    S->bat.active=1; S->bat.phase=5; S->bat.t=1.0f; S->bat.lvl=h->lvl; S->bat.cell=h->cell; S->bat.sel=0;
+    S->bat.boss=0; S->bat.strikes=0; S->bat.zcharge=0; S->bat.zph=0; S->bat.lastdmg=0;
+    S->bat.site = bw_site_at_xy(b, b->x, b->y);
+    S->bat.hmax = 26 + 20*h->lvl + (int)(hash2(h->cell, 7, 3) % 10);
+    S->bat.hhp = S->bat.hmax;
+    S->bat.natt=0; S->bat.attacks[S->bat.natt++]=0;
+    if (b->skills&1) S->bat.attacks[S->bat.natt++]=1;
+    if (b->skills&2) S->bat.attacks[S->bat.natt++]=2;
+    if (b->skills&4) S->bat.attacks[S->bat.natt++]=3;
+    if (b->skills&8) S->bat.attacks[S->bat.natt++]=4;
+    for (int it=0; it<4; it++) if (b->items[it]>0) S->bat.attacks[S->bat.natt++]=6+it;
+    S->bat.attacks[S->bat.natt++]=5;
+    { char *q=S->bat.msg; q=sappend(q, "A WILD "); q=sappend(q, bw_hacker_name(S->bat.lvl));
+      q=sappend(q, " APPEARED!"); *q=0; scpy(S->bat.msg2, "IT WANTS YOUR PASSWORD.", 72); }
+    sfx(7);
+}
+static void bw_boss_start(int pi, int boss){
+    BwSim *S = &BWS[pi];
+    Buddy *b=&G.bud[pi];
+    S->bat.active=1; S->bat.phase=5; S->bat.t=1.2f; S->bat.sel=0; S->bat.cell=0;
+    S->bat.boss=boss; S->bat.strikes=0; S->bat.zcharge=0; S->bat.zph=0; S->bat.lastdmg=0;
+    S->bat.site = bw_site_at_xy(b, b->x, b->y);
+    if (boss==1){
+        S->bat.lvl = 7; S->bat.hmax = 330;
+        scpy(S->bat.msg, "BROKEN RAID ROLLS OUT OF THE DARK!", 96);
+        scpy(S->bat.msg2, "EVERY BAD SECTOR YOU EVER MET. IN A TRENCHCOAT.", 72);
+    } else if (boss==3){
+        S->bat.lvl = 9; S->bat.hmax = 430;
+        scpy(S->bat.msg, "THE CACHE HOARDER WAKES ON ITS HOARD!", 96);
+        scpy(S->bat.msg2, "IT HAS BEEN SITTING ON THE GATE CRANK FOR YEARS.", 72);
+    } else {
+        S->bat.lvl = 12; S->bat.hmax = 560;
+        scpy(S->bat.msg, "ZERO-DAY ZED. UNPATCHED. UNBOTHERED.", 96);
+        scpy(S->bat.msg2, "THE FINAL BUG. PROBABLY.", 72);
+    }
+    S->bat.hhp = S->bat.hmax;
+    S->bat.natt=0; S->bat.attacks[S->bat.natt++]=0;
+    if (b->skills&1) S->bat.attacks[S->bat.natt++]=1;
+    if (b->skills&2) S->bat.attacks[S->bat.natt++]=2;
+    if (b->skills&4) S->bat.attacks[S->bat.natt++]=3;
+    if (b->skills&8) S->bat.attacks[S->bat.natt++]=4;
+    for (int it=0; it<4; it++) if (b->items[it]>0) S->bat.attacks[S->bat.natt++]=6+it;
+    S->bat.attacks[S->bat.natt++]=5;
+    sfx(7);
+}
+static void bw_battle_end(int pi, int won){
+    BwSim *S = &BWS[pi];
+    Buddy *b=&G.bud[pi];
+    if (won && S->bat.boss==0 && S->defeated_n<64) S->defeated[S->defeated_n++] = S->bat.cell;
+    S->bat.active=0; S->grace_t = won? 1.2f : 2.5f;
+    if (won){
+        int noted = 0;
+        if (S->bat.boss==1){
+            b->story_bits |= (1<<16); b->xp += 60;
+            b->items[2] += 2; if (b->items[2]>9) b->items[2]=9;
+            scpy(S->note, "BROKEN RAID SCRAPPED. +60 XP. THE AISLE GOES QUIET.", 72); S->note_t=4.2f; noted=1;
+        } else if (S->bat.boss==3){
+            b->story_bits |= (1<<22) | (1<<23);   // hoarder down, crank carried
+            if (bw_qstate_x(b,5)==1) bw_qset_x(b,5,2);
+            b->xp += 100;
+            for (int it=0; it<4; it++){ b->items[it] += 2; if (b->items[it]>9) b->items[it]=9; }
+            scpy(S->note, "THE HOARDER CRACKS OPEN. THE GATE CRANK IS YOURS.", 72); S->note_t=5.0f; noted=1;
+        } else if (S->bat.boss==2){
+            b->story_bits |= (1<<17);
+            if (bw_qstate(b,3)==1) bw_qset(b,3,2);
+            b->xp += 150;
+            for (int it=0; it<4; it++){ b->items[it] += 2; if (b->items[it]>9) b->items[it]=9; }
+            scpy(S->note, "ZERO-DAY ZED HAS BEEN FUNERALED. THE MEADOW IS PATCHED.", 72); S->note_t=5.0f; noted=1;
+        }
+        // story: clearing hackers AT the farm counts toward the quest
+        if (b->bw_mode==1 && S->bat.site==1 && bw_qstate(b, 1)==1){
+            int k = bw_farmkills(b) + 1; bw_farmkills_set(b, k);
+            if (k>=3){
+                bw_qset(b, 1, 2); b->xp += 30;
+                scpy(S->note, "QUEST DONE: CLEAR THE SERVER FARM. REPORT TO PATCHINA.", 72); S->note_t = 4.5f; noted = 1;
+            } else {
+                char *q=S->note; q=sappend(q, "SERVER FARM CLEARED: "); q=sapp_int(q, k); q=sappend(q, "/3"); *q=0;
+                S->note_t = 2.2f; noted = 1;
+            }
+        }
+        // story: clearing hackers ON the frozen lake counts for Glitch
+        if (b->bw_mode==1 && S->bat.site==2 && S->bat.boss==0 && bw_qstate2(b,6)==1){
+            int k = bw_lakekills(b) + 1; if (k>2) k=2; bw_lakekills_set(b, k);
+            if (k>=2){ scpy(S->note, "LAKE CLEARED: 2/2. GLITCH WILL WANT WORD.", 72); S->note_t = 3.6f; noted = 1; }
+            else { char *q=S->note; q=sappend(q, "LAKE CLEARED: "); q=sapp_int(q, k); q=sappend(q, "/2"); *q=0; S->note_t = 2.2f; noted = 1; }
+        }
+        // hackers sometimes drop something useful (a BW-only consumable)
+        if (rng_f()<0.25f){
+            int it = (int)(rng_f()*3.99f); if (it>3) it=3;
+            if (b->items[it]<9){
+                b->items[it]++;
+                if (!noted){ char *q=S->note; q=sappend(q, "THE HACKER DROPPED: "); q=sappend(q, BW_ITEM_NAME[it]); q=sappend(q, "!"); *q=0; S->note_t = 2.6f; }
+            }
+        }
+    }
+    if (b->hp<=0){ b->hp=0; b->fainted=1; bw_exit(pi, 1); }
+}
+static const char *bw_foe_name(BwSim *S){
+    return S->bat.boss==1? "BROKEN RAID" : S->bat.boss==2? "ZERO-DAY ZED" : S->bat.boss==3? "CACHE HOARDER" : bw_hacker_name(S->bat.lvl);
+}
+static void bw_foe_strike(int pi){
+    BwSim *S = &BWS[pi];
+    Buddy *b=&G.bud[pi];
+    const char *mv = BW_HACK_MOVE[(S->bat.lvl + (int)(G.anim_t*7)) % 6];
+    float f = (1.0f - 0.12f*b->up_def) * BUD_DEF[b->species%BUDN];
+    S->bat.strikes++;
+    if (S->bat.boss==1 && S->bat.strikes%3==0){
+        float dmg = S->bat.lastdmg * 0.5f * f; if (dmg<3) dmg=3;
+        b->hp -= dmg; if (b->hp<0) b->hp=0;
+        scpy(S->bat.msg, "BROKEN RAID MIRRORS YOUR LAST MOVE!", 96);
+        { char *q2=S->bat.msg2; q2=sappend(q2, BUD_ELF[b->name_idx%BUD_NAMES_N]); q2=sappend(q2, " TOOK ");
+          q2=sapp_int(q2, (int)(dmg+0.5f)); q2=sappend(q2, " DAMAGE. RUDE."); *q2=0; }
+        sfx(4); return;
+    }
+    if (S->bat.boss==3 && S->bat.strikes%4==0){
+        // the Hoarder's trick: it HOARDS the blow — no damage, and it
+        // feels better for it. Hit it three times between its hoards.
+        S->bat.hhp += 30; if (S->bat.hhp > S->bat.hmax) S->bat.hhp = S->bat.hmax;
+        scpy(S->bat.msg, "THE HOARDER HOARDS YOUR HIT. IT FEELS BETTER.", 96);
+        scpy(S->bat.msg2, "SOMEWHERE, A CACHE SINGS.", 72);
+        sfx(11); return;
+    }
+    if (S->bat.boss==2 && S->bat.hhp <= S->bat.hmax*0.34f && !S->bat.zcharge){
+        S->bat.zcharge = 1;
+        scpy(S->bat.msg, "ZERO-DAY ZED IS CHARGING SOMETHING AWFUL...", 96);
+        scpy(S->bat.msg2, "BRACE. OR RUN. BOTH ARE VALID.", 72);
+        sfx(16); return;
+    }
+    float mult2 = 1.0f;
+    if (S->bat.boss==2){
+        if (S->bat.zcharge){ mult2 = 2.5f; S->bat.zcharge = 0; }
+        else if (S->bat.hhp <= S->bat.hmax*0.67f) mult2 = 2.0f;
+    }
+    float dmg = (4.0f + 3.2f*S->bat.lvl) * rng_range(0.85f, 1.15f) * f * mult2;
+    b->hp -= dmg; if (b->hp<0) b->hp=0;
+    { char *q=S->bat.msg; q=sappend(q, bw_foe_name(S)); q=sappend(q, " USED "); q=sappend(q, mv); q=sappend(q, "!"); *q=0;
+      char *q2=S->bat.msg2; q2=sappend(q2, BUD_ELF[b->name_idx%BUD_NAMES_N]); q2=sappend(q2, " TOOK ");
+      q2=sapp_int(q2, (int)(dmg+0.5f)); q2=sappend(q2, " DAMAGE."); *q2=0; }
+    if (S->bat.boss==2){
+        int ph = S->bat.hhp > S->bat.hmax*0.67f? 0 : S->bat.hhp > S->bat.hmax*0.34f? 1 : 2;
+        if (ph > S->bat.zph){ S->bat.zph = ph;
+            scpy(S->bat.msg2, ph==1? "ZED: FINE. BOTH HANDS, THEN." : "ZED: ZERO DAY. TOMORROW IS CANCELLED.", 72); }
+    }
+    sfx(4);
+}
+// execute the highlighted attack (shared by the input handler and tests)
+static void bw_battle_pick(int pi){
+    BwSim *S = &BWS[pi];
+    Buddy *b=&G.bud[pi];
+    int mv = S->bat.attacks[S->bat.sel];
+    const char *nm; float cost, mult; bw_attack_info(b, mv, &nm, &cost, &mult);
+    if (mv>=6){   // a consumable: it spends the turn (Ctrl-Z spends the battle)
+        int it = mv-6;
+        if (b->items[it]<=0) return;
+        b->items[it]--;
+        if (mv==9){ scpy(S->bat.msg, "CTRL-Z! THE LAST TEN SECONDS UNDO THEMSELVES.", 96); scpy(S->bat.msg2, "", 72); S->bat.phase=6; S->bat.t=1.0f; sfx(11); return; }
+        if (mv==6){ b->hp += b->maxhp*0.4f; if (b->hp>b->maxhp) b->hp=b->maxhp;
+            char *q=S->bat.msg; q=sappend(q, BUD_ELF[b->name_idx%BUD_NAMES_N]); q=sappend(q, " USED PATCH NOTES."); *q=0;
+            char *q2=S->bat.msg2; q2=sappend(q2, "BACK TO "); q2=sapp_int(q2, (int)b->hp); q2=sappend(q2, " HP."); *q2=0; }
+        else if (mv==7){ b->energy += 50; if (b->energy>BUD_ENERGY_MAX) b->energy=BUD_ENERGY_MAX;
+            char *q=S->bat.msg; q=sappend(q, BUD_ELF[b->name_idx%BUD_NAMES_N]); q=sappend(q, " GLUGGED AN ENERGY DRINK."); *q=0;
+            scpy(S->bat.msg2, "THE WORLD VIBRATES SLIGHTLY FASTER.", 72); }
+        else { S->buff=1;
+            char *q=S->bat.msg; q=sappend(q, BUD_ELF[b->name_idx%BUD_NAMES_N]); q=sappend(q, " ATE THE ADRENAL COOKIE."); *q=0;
+            scpy(S->bat.msg2, "NEXT HIT LANDS DOUBLE.", 72); }
+        S->bat.phase=1; S->bat.t=1.15f; sfx(11);
+        return;
+    }
+    if (mv==5){
+        if (rng_f() < 0.75f){ scpy(S->bat.msg, "GOT AWAY CLEAN!", 96); scpy(S->bat.msg2, "", 72); S->bat.phase=6; S->bat.t=1.0f; sfx(11); }
+        else { scpy(S->bat.msg, "COULDN'T GET AWAY!", 96); scpy(S->bat.msg2, "", 72); bw_foe_strike(pi); S->bat.phase=2; S->bat.t=1.2f; }
+        return;
+    }
+    if (b->energy < cost){ scpy(S->bat.msg, "NOT ENOUGH ENERGY!", 96); scpy(S->bat.msg2, "SLEEP AT A TENT TO REFILL.", 72); sfx(16); return; }
+    b->energy -= cost;
+    if (S->buff){ mult *= 2.0f; S->buff=0; }   // the Adrenal Cookie, cashing in
+    float dmg = buddy_dmg(b) * 3.2f * mult * rng_range(0.9f, 1.1f);
+    S->bat.lastdmg = dmg;
+    S->bat.hhp -= dmg; if (S->bat.hhp<0) S->bat.hhp=0;
+    b->lunge_t = 0.22f;
+    { char *q=S->bat.msg; q=sappend(q, BUD_ELF[b->name_idx%BUD_NAMES_N]); q=sappend(q, " USED "); q=sappend(q, nm); q=sappend(q, "!"); *q=0;
+      char *q2=S->bat.msg2; q2=sappend(q2, "IT TOOK "); q2=sapp_int(q2, (int)(dmg+0.5f)); q2=sappend(q2, " DAMAGE."); *q2=0; }
+    S->bat.phase=1; S->bat.t=1.15f; sfx(3);
+}
+// touch parity for the battle menu (Daniel, Nov 4: on mobile there
+// was no way to tap an attack — the menu only listened to keys/pads).
+// Tap a move in the grid to use it. Geometry mirrors bw_battle_draw.
+static void bw_battle_tap(int pi, int vx, int vy, int vw2, int vh2){
+    BwSim *S = &BWS[pi];
+    if (!S->bat.active || S->bat.phase!=0) return;
+    int rows = (S->bat.natt+1)/2, bh = 84 + (rows>3? (rows-3)*15 : 0), rstep = rows>3? 15 : 18;
+    int top = vy+vh2-bh+22;                        // first row's text y
+    if (IN.tap_y < top-6 || IN.tap_y >= top-6 + rows*rstep) return;
+    if (IN.tap_x < vx+10) return;
+    int r = (IN.tap_y - (top-6)) / rstep;
+    int c = (IN.tap_x - (vx+16)) / (vw2/2-20); if (c<0) c=0; if (c>1) c=1;
+    int idx = r*2 + c;
+    if (idx<0 || idx>=S->bat.natt) return;
+    S->bat.sel = idx; IN.tapped = 0; bw_battle_pick(pi);
+}
+static void bw_battle_update(int pi, float dt, const BwIn *in){
+    BwSim *S = &BWS[pi];
+    Buddy *b=&G.bud[pi];
+    if (S->bat.phase==0){
+        if (in->up){ S->bat.sel = (S->bat.sel + S->bat.natt - 1) % S->bat.natt; sfx(6); }
+        if (in->down){ S->bat.sel = (S->bat.sel + 1) % S->bat.natt; sfx(6); }
+        if (in->sel) bw_battle_pick(pi);
+        return;
+    }
+    S->bat.t -= dt;
+    if (S->bat.t>0) return;
+    if (S->bat.phase==5){ S->bat.phase=0; }
+    else if (S->bat.phase==1){
+        if (S->bat.hhp<=0){
+            int xp = 4 + 2*S->bat.lvl; b->xp += xp;   // calibrated Nov 3 (Daniel: BW paid far too much, too easily)
+            { char *q=S->bat.msg; q=sappend(q, bw_foe_name(S)); q=sappend(q, " CRASHED!"); *q=0;
+              char *q2=S->bat.msg2; q2=sappend(q2, BUD_ELF[b->name_idx%BUD_NAMES_N]); q2=sappend(q2, " GAINED ");
+              q2=sapp_int(q2, xp); q2=sappend(q2, " XP."); *q2=0; }
+            S->bat.phase=3; S->bat.t=1.6f; sfx(11);
+        } else { bw_foe_strike(pi); S->bat.phase=2; S->bat.t=1.2f; }
+    }
+    else if (S->bat.phase==2){
+        if (b->hp<=0){ scpy(S->bat.msg, "YOUR BUDDY FAINTED!", 96); scpy(S->bat.msg2, "EVERYTHING GOES DARK...", 72); S->bat.phase=4; S->bat.t=1.8f; sfx(16); }
+        else S->bat.phase=0;
+    }
+    else if (S->bat.phase==3){ bw_battle_end(pi, 1); }
+    else if (S->bat.phase==4){ bw_battle_end(pi, 0); }
+    else if (S->bat.phase==6){ bw_battle_end(pi, 0); }
+}
+// --- enter / exit ------------------------------------------------------------
+static void bw_gate_try(int pi){
+    Player *p=&G.p[pi]; Buddy *b=&G.bud[pi];
+    if (G.net_mode==NET_CLIENT) return;
+    // split-screen co-op is welcome (you play in your own half); a LAN
+    // session with guests connected is not — their screens have no BW
+    if (G.net_mode==NET_HOST && any_remote_connected()){ spawn_floater(p->x, p->y-24, "BANZAI WORLD IS A SOLO TRIP", COL(255,200,150)); sfx(16); return; }
+    if (!b->active){ spawn_floater(p->x, p->y-24, "YOU NEED A BANZAI BUDDY FIRST", COL(255,150,150)); sfx(16); return; }
+    if (b->fainted){ spawn_floater(p->x, p->y-24, "YOUR BUDDY FAINTED - REVIVE IT FIRST", COL(255,150,150)); sfx(16); return; }
+    bwgate[pi]=1; bwgate_sel[pi]=0; sfx(19);
+}
+static void bw_enter_mode(int pi, int mode){
+    BwSim *S = &BWS[pi];
+    Buddy *b=&G.bud[pi];
+    if (G.net_mode==NET_CLIENT) return;
+    if (!b->active || b->fainted) return;
+    bwgate[pi]=0;
+    S->from_arcade = bw_arc_src[pi]; S->arc_cab = bw_arc_cab[pi]; bw_arc_src[pi]=0;
+    if (!b->bw_started){
+        b->bw_started = 1;
+        b->bw_seed = (int)(0x1000 + (rng_u32() % 60000));
+        b->bw_x = 0; b->bw_y = 56;
+    }
+    b->bw_mode = mode;
+    if (mode==2){ ent_reset(pi); }
+    if (mode==1 && !b->story_started){
+        b->story_started = 1; bw_qset(b, 0, 1);   // quest 0: meet the elder
+    }
+    S->defeated_n = 0; S->bat.active = 0; S->sleep_t = 0; S->grace_t = 0; S->note_t = 0;
+    for (int i=0;i<BW_ROAMN;i++) S->roam[i].alert = 0;   // a fresh entry is a fresh temper: no hunt survives the gate (alerts also freeze during battles, so a stale one could otherwise outlive its mode)
+    S->log_open = 0; S->site_cur = -2; S->bw_menu = 0; S->bw_msel = 0;
+    if (mode==2){ b->x = 3.5f*BW_TILE; b->y = ENT_DOORY; }
+    else if (mode==3){ plat_enter(pi); }
+    else if (mode==4){ craft_enter(pi); }
+    else if (mode==5){ tank_enter(pi); }
+    else { b->x = b->bw_x; b->y = b->bw_y; }
+    b->in_bw = 1;   // the DEV stays parked at the gate in the mall
+    if (mode==2){ char *q=S->note; q=sappend(q, "ENTRANCES. A COZY HOTEL. "); q=sappend(q, lbl_int()); q=sappend(q, " OPENS DOORS + DRAWERS. MIND THE ZIP BUG."); *q=0; }
+    else if (mode==3){ char *q=S->note; q=sappend(q, "SUPER BUDDY RUN. "); q=sappend(q, lbl_fire()); q=sappend(q, " JUMPS. STOMP BUGS. PLANT THE FLAG!"); *q=0; }
+    else if (mode==4){ char *q=S->note; q=sappend(q, "BUDDY CRAFT. "); q=sappend(q, lbl_int()); q=sappend(q, " GATHERS + RESTS. "); q=sappend(q, lbl_fire()); q=sappend(q, " SWINGS. "); q=sappend(q, lbl_wall()); q=sappend(q, " CRAFTS."); *q=0; }
+    else if (mode==5){ char *q=S->note; q=sappend(q, "TANK RESCUE. "); q=sappend(q, lbl_fire()); q=sappend(q, " FIRES THE CANNON. FREE CAPTIVES, DROP AT PADS."); *q=0; }
+    else if (mode==1 && b->story_bits==(1<<0)) scpy(S->note, "STORY MODE. PATCH VILLAGE LIES NORTH-WEST.", 72);
+    else if (mode==1) scpy(S->note, "BACK TO THE STORY. THE MEADOW REMEMBERS.", 72);
+    else scpy(S->note, "BANZAI WORLD. WATCH FOR HACKERS.", 72);
+    S->note_t = 3.4f;
+    sfx(19);
+}
+// the gate panel: STORY MODE / FREE PLAY / LEAVE, drawn over a view
+static void bw_gate_draw(int pi, int vx, int vy, int vw2, int vh2){
+    Buddy *b=&G.bud[pi];
+    int w = vw2<340? vw2-16 : 320, h = 150;
+    int x = vx + (vw2-w)/2, y = vy + (vh2-h)/2;
+    if (y < vy+4) y = vy+4;
+    rect_fill(x, y, w, h, COL(18,22,20)); rect_line(x, y, w, h, COL(198,164,84));
+    draw_text_center(x+w/2, y+10, "BANZAI WORLD", 2, COL(255,214,64));
+    { char buf[64]; char *q=buf; q=sappend(q, BUD_ELF[b->name_idx%BUD_NAMES_N]); q=sappend(q, " THE "); q=sappend(q, BUD_NAME[b->species%BUDN]); q=sappend(q, " IS ITCHING TO GO"); *q=0;
+      draw_text_center(x+w/2, y+32, buf, 1, COL(200,214,200)); }
+    // the gate is for the WORLD now (Nov 10): story and free play.
+    // Entrances, Super Buddy Run and Buddy Craft moved to the Arcade.
+    static const char *DESC[3] = {
+        "A SASSY LITTLE ADVENTURE. QUESTS, PLACES, TROUBLE.",
+        "THE ENDLESS MEADOW. ROAM, BONK, NAP.",
+        "STAY IN THE MALL." };
+    for (int r=0;r<3;r++){
+        int ry = y + 52 + r*20;
+        const char *nm = r==0? (b->story_started? "CONTINUE STORY" : "STORY MODE") : r==1? "FREE PLAY" : "LEAVE";
+        if (bwgate_sel[pi]==r){ rect_fill(x+10, ry-3, w-20, 15, COL(70,58,30)); draw_text(x+16, ry, ">", 1, COL(255,220,90)); }
+        draw_text(x+30, ry, nm, 1, bwgate_sel[pi]==r? COL(255,244,210) : COL(170,180,170));
+    }
+    draw_text_center(x+w/2, y+h-16, DESC[bwgate_sel[pi]%3], 1, COL(150,170,190));
+    if (mobile_ui() && !pad_mode() && pi==G.my_id)
+        draw_text_center(x+w/2, y+h-30, "TAP A MODE TO PLAY", 1, COL(120,132,150));
+    else { char buf[64]; char *q=buf; q=sappend(q, lbl_fire()); q=sappend(q, " - GO IN    "); q=sappend(q, lbl_exit()); q=sappend(q, " - STAY"); *q=0;
+      draw_text_center(x+w/2, y+h-30, buf, 1, COL(120,132,150)); }
+}
+static void bw_gate_pick(int pi){
+    int s2 = bwgate_sel[pi];
+    if (s2==0) bw_enter_mode(pi, 1);
+    else if (s2==1) bw_enter_mode(pi, 0);
+    else { bwgate[pi]=0; sfx(6); }
+}
+// touch parity for the gate panel (the store panels all take taps;
+// this one never did, so on a phone the rows were decoration —
+// Daniel, Nov 4). Tap a row to choose it; tap outside to back out.
+// Geometry mirrors bw_gate_draw exactly.
+static void bw_gate_tap(int pi, int vx, int vy, int vw2, int vh2){
+    int w = vw2<340? vw2-16 : 320, h = 150;
+    int x = vx + (vw2-w)/2, y = vy + (vh2-h)/2;
+    if (y < vy+4) y = vy+4;
+    IN.tapped = 0;
+    if (IN.tap_x<x || IN.tap_x>=x+w || IN.tap_y<y || IN.tap_y>=y+h){ bwgate[pi]=0; sfx(6); return; }
+    for (int r=0;r<3;r++){
+        int ry = y + 52 + r*20;
+        if (IN.tap_y>=ry-4 && IN.tap_y<=ry+15){ bwgate_sel[pi]=r; bw_gate_pick(pi); return; }
+    }
+}
+// --- the Arcade cabinet panel -------------------------------------------------
+// One cabinet per game: PLAY launches the cabinet's game with the
+// buddy, LEAVE keeps you in the arcade. Mirrors the gate panel's
+// behaviour (keys, pad, taps) so every device drives it the same way.
+static void arc_gate_try(int pi){
+    Player *p=&G.p[pi]; Buddy *b=&G.bud[pi];
+    if (G.net_mode==NET_CLIENT) return;
+    if (G.net_mode==NET_HOST && any_remote_connected()){ spawn_floater(p->x, p->y-24, "THE ARCADE IS A SOLO TRIP", COL(255,200,150)); sfx(16); return; }
+    if (!b->active){ spawn_floater(p->x, p->y-24, "YOU NEED A BANZAI BUDDY FIRST", COL(255,150,150)); sfx(16); return; }
+    if (b->fainted){ spawn_floater(p->x, p->y-24, "YOUR BUDDY FAINTED - REVIVE IT FIRST", COL(255,150,150)); sfx(16); return; }
+    arcgate[pi]=1; arcgate_sel[pi]=0; sfx(19);
+}
+static void arc_gate_draw(int pi, int vx, int vy, int vw2, int vh2){
+    Buddy *b=&G.bud[pi];
+    int cab = arc_cab[pi]&3;
+    int w = vw2<340? vw2-16 : 320, h = 132;
+    int x = vx + (vw2-w)/2, y = vy + (vh2-h)/2;
+    if (y < vy+4) y = vy+4;
+    rect_fill(x, y, w, h, COL(14,16,30)); rect_line(x, y, w, h, COL(120,240,255));
+    draw_text_center(x+w/2, y+10, ARC_NAME[cab], 2, COL(140,255,255));
+    { char buf[64]; char *q=buf; q=sappend(q, BUD_ELF[b->name_idx%BUD_NAMES_N]); q=sappend(q, " THE "); q=sappend(q, BUD_NAME[b->species%BUDN]); q=sappend(q, " GRABS THE CONTROLS"); *q=0;
+      draw_text_center(x+w/2, y+32, buf, 1, COL(200,214,200)); }
+    static const char *DESC[4] = {
+        "A COZY HOTEL OF DOORS. HIDE IN THE BUSHES. MIND THE ZIP BUG.",
+        "A SIDE-SCROLLING RUN. STOMP BUGS. PLANT THE FLAG.",
+        "AN ENDLESS WILD. CHOP, MINE, CRAFT, BUILD.",
+        "DRIVE THE TANK. FREE THE CAPTIVES. BREAK THE BOSS." };
+    for (int r=0;r<2;r++){
+        int ry = y + 52 + r*20;
+        const char *nm = r==0? "PLAY" : "LEAVE";
+        if (arcgate_sel[pi]==r){ rect_fill(x+10, ry-3, w-20, 15, COL(30,60,80)); draw_text(x+16, ry, ">", 1, COL(140,255,255)); }
+        draw_text(x+30, ry, nm, 1, arcgate_sel[pi]==r? COL(235,255,255) : COL(170,180,190));
+    }
+    draw_text_center(x+w/2, y+h-16, DESC[cab], 1, COL(150,170,190));
+    if (mobile_ui() && !pad_mode() && pi==G.my_id)
+        draw_text_center(x+w/2, y+h-30, "TAP TO PLAY", 1, COL(120,132,150));
+    else { char buf[64]; char *q=buf; q=sappend(q, lbl_fire()); q=sappend(q, " - PLAY    "); q=sappend(q, lbl_exit()); q=sappend(q, " - LEAVE"); *q=0;
+      draw_text_center(x+w/2, y+h-30, buf, 1, COL(120,132,150)); }
+}
+static void arc_gate_pick(int pi){
+    if (arcgate_sel[pi]==0){
+        int cab = arc_cab[pi]&3;
+        arcgate[pi]=0;
+        bw_arc_src[pi]=1; bw_arc_cab[pi]=cab;
+        bw_enter_mode(pi, ARC_MODE[cab]);
+    } else { arcgate[pi]=0; sfx(6); }
+}
+static void arc_gate_tap(int pi, int vx, int vy, int vw2, int vh2){
+    int w = vw2<340? vw2-16 : 320, h = 132;
+    int x = vx + (vw2-w)/2, y = vy + (vh2-h)/2;
+    if (y < vy+4) y = vy+4;
+    IN.tapped = 0;
+    if (IN.tap_x<x || IN.tap_x>=x+w || IN.tap_y<y || IN.tap_y>=y+h){ arcgate[pi]=0; sfx(6); return; }
+    for (int r=0;r<2;r++){
+        int ry = y + 52 + r*20;
+        if (IN.tap_y>=ry-4 && IN.tap_y<=ry+15){ arcgate_sel[pi]=r; arc_gate_pick(pi); return; }
+    }
+}
+// P1's current view rectangle in co-op, computed exactly as the
+// render pass computes view 0 (shared view, or P1's half of the split)
+static void p1_view_rect(int *x, int *y, int *w, int *h){
+    if (vsplit_f <= 0.02f && !vsplit){ *x=0; *y=0; *w=VW; *h=VH; return; }
+    if (vorient){
+        int seam = vp1first? VW - (int)((VW/2)*vsplit_f) : (int)((VW/2)*vsplit_f);
+        *y=0; *h=VH;
+        if (vp1first){ *x=0; *w=seam; } else { *x=seam; *w=VW-seam; }
+    } else {
+        int seam = vp1first? VH - (int)((VH/2)*vsplit_f) : (int)((VH/2)*vsplit_f);
+        *x=0; *w=VW;
+        if (vp1first){ *y=0; *h=seam; } else { *y=seam; *h=VH-seam; }
+    }
+}
+static void bw_exit(int pi, int fainted){
+    BwSim *S = &BWS[pi];
+    Player *p=&G.p[pi]; Buddy *b=&G.bud[pi];
+    if (b->bw_mode==2 || b->bw_mode==3 || b->bw_mode==5){ b->bw_x = 0; b->bw_y = 56; }
+    else if (b->bw_mode==4){ b->craft_x = b->x; b->craft_y = b->y; }
+    else { b->bw_x = b->x; b->bw_y = b->y; }
+    S->bat.active = 0;
+    S->bw_menu = 0;
+    b->in_bw = 0;
+    if (S->from_arcade){ p->x = ARC_SX[S->arc_cab&3]; p->y = ARC_CY-100; }   // back to your cabinet
+    else { p->x = BW_SX; p->y = MALL_CY+96; }
+    S->from_arcade = 0;
+    p->aim = -PI/2;
+    b->x = p->x - 30; b->y = p->y + 10;
+    do_save();
+    sfx(19);
+    if (fainted) spawn_floater(p->x, p->y-26, "YOU WAKE UP IN THE MALL. YOUR BUDDY FAINTED.", COL(255,180,150));
+}
+// --- the frame ---------------------------------------------------------------
+static void bw_roam_refresh(Buddy *b){
+    BwSim *S = &BWS[(int)(b - G.bud)];
+    if (b->bw_mode==2) return;
+    u32 seed=(u32)b->bw_seed;
+    int cx0=bw_cellof(b->x), cy0=bw_cellof(b->y);
+    int want_cell[BW_ROAMN]; int nw=0;
+    for (int cx=cx0-3; cx<=cx0+3 && nw<BW_ROAMN; cx++)
+        for (int cy=cy0-3; cy<=cy0+3 && nw<BW_ROAMN; cy++){
+            float ox, oy; if (bw_cell_feat(cx, cy, seed, &ox, &oy, b->bw_mode==1)!=2) continue;
+            int key=bw_cell_key(cx, cy);
+            if (bw_defeated_has(S, key)) continue;
+            float wx=cx*BW_CELL+ox, wy=cy*BW_CELL+oy;
+            if (bw_outside_world(wx, wy)) continue;   // no hackers at sea
+            float dx=wx-b->x, dy=wy-b->y;
+            if (dx*dx+dy*dy > 640*640) continue;
+            want_cell[nw++]=key;
+        }
+    // keep the roamers we already have, drop the rest, spawn the new
+    for (int i=0;i<BW_ROAMN;i++){
+        if (!S->roam[i].cell && S->roam[i].x==0 && S->roam[i].y==0) continue;
+        int keep=0; for (int j=0;j<nw;j++) if (want_cell[j]==S->roam[i].cell) keep=1;
+        if (!keep){ S->roam[i].cell=0; S->roam[i].x=0; S->roam[i].y=0; }
+    }
+    for (int j=0;j<nw;j++){
+        int have=0; for (int i=0;i<BW_ROAMN;i++) if (S->roam[i].cell==want_cell[j]) have=1;
+        if (have) continue;
+        for (int i=0;i<BW_ROAMN;i++) if (S->roam[i].cell==0 && S->roam[i].x==0 && S->roam[i].y==0){
+            // recover the cell coords from the key is not possible; recompute by scan
+            int cx0b=bw_cellof(b->x), cy0b=bw_cellof(b->y), done=0;
+            for (int cx=cx0b-3; cx<=cx0b+3 && !done; cx++)
+                for (int cy=cy0b-3; cy<=cy0b+3 && !done; cy++){
+                    if (bw_cell_key(cx, cy)!=want_cell[j]) continue;
+                    float ox, oy; bw_cell_feat(cx, cy, seed, &ox, &oy, b->bw_mode==1);
+                    S->roam[i].cell=want_cell[j];
+                    S->roam[i].x=cx*BW_CELL+ox; S->roam[i].y=cy*BW_CELL+oy;
+                    S->roam[i].wt=0; S->roam[i].dir=0; S->roam[i].alert=0; S->roam[i].lvl=bw_level_at(b, S->roam[i].cell);
+                    done=1;
+                }
+            break;
+        }
+    }
+}
+static void bw_press_term(int pi, int t){
+    BwSim *S = &BWS[pi]; Buddy *b=&G.bud[pi];
+    int ord[3]; bw_term_order(b, ord);
+    int prog = bw_puz_prog(b);
+    if (t == ord[prog]){
+        prog++; bw_puz_prog_set(b, prog); sfx(19);
+        if (prog>=3){
+            b->story_bits |= (1 << 15);
+            scpy(S->note, "OLD LOCKS LET GO SOMEWHERE. THE INNER AISLE IS OPEN.", 72); S->note_t=4.0f;
+        } else {
+            char *q=S->note; q=sappend(q, "THE "); q=sappend(q, BW_TERM_NAME[t]); q=sappend(q, " TERMINAL CHIRPS. "); q=sapp_int(q, prog); q=sappend(q, "/3"); *q=0;
+            S->note_t=2.6f;
+        }
+    } else {
+        bw_puz_prog_set(b, 0); sfx(16);
+        scpy(S->note, "THE TERMINALS BUZZ AND FORGET EVERYTHING. START OVER.", 72); S->note_t=3.2f;
+    }
+}
+static void bw_read_sign(int pi){
+    BwSim *S = &BWS[pi]; Buddy *b=&G.bud[pi];
+    int ord[3]; bw_term_order(b, ord);
+    char *q=S->note; q=sappend(q, "SCRATCHED DEEP: ");
+    for (int i=0;i<3;i++){ if (i) q=sappend(q, ". "); q=sappend(q, BW_TERM_NAME[ord[i]]); }
+    q=sappend(q, ". - R."); *q=0;
+    S->note_t=4.5f; sfx(6);
+}
+static void bw_pick_tool(int pi, int t){
+    BwSim *S = &BWS[pi]; Buddy *b=&G.bud[pi];
+    b->story_bits |= (1<<(24+t)); sfx(11);
+    char *q=S->note; q=sappend(q, "FOUND MOP'S "); q=sappend(q, BW_TOOL_NAME[t]); q=sappend(q, "! (");
+    q=sapp_int(q, bw_tools_found(b)); q=sappend(q, "/3)"); *q=0;
+    S->note_t=3.0f;
+}
+static void bw_read_hsign(int pi, int idx){
+    BwSim *S = &BWS[pi]; Buddy *b=&G.bud[pi];
+    int first = !((b->story_bits2>>(11+idx))&1);
+    if (first) b->story_bits2 |= (1<<(11+idx));
+    sfx(6);
+    if (first && bw_qstate2(b,9)==1 && bw_signs_read(b)>=3){
+        bw_qset2(b,9,2); b->xp += 20;
+        scpy(S->note, "THREE SIGNS READ. THE MEADOW APPROVES. +20 XP.", 72); S->note_t=4.0f;
+        return;
+    }
+    char *q=S->note; q=sappend(q, BW_HSIGN_TXT[idx]);
+    if (bw_qstate2(b,9)==1){ q=sappend(q, " ("); q=sapp_int(q, bw_signs_read(b)); q=sappend(q, "/3)"); }
+    *q=0; S->note_t=4.2f;
+}
+static void bw_meet_bitling(int pi){
+    BwSim *S = &BWS[pi]; Buddy *b=&G.bud[pi];
+    sfx(11);
+    if (bw_qstate2(b,8)==1){
+        bw_qset2(b,8,2); b->xp += 30;
+        b->items[0] += 1; if (b->items[0]>9) b->items[0]=9;
+        scpy(S->note, "BITLING CHIRPS AND TROTS HOME. +30 XP. PATCHINA WILL BE GLAD.", 72); S->note_t=4.5f;
+    } else {
+        scpy(S->note, "BITLING: BEEP. (IT SEEMS LOST, AND HAPPY ABOUT IT.)", 72); S->note_t=3.4f;
+    }
+}
+static void bw_talk(int pi, int npc){
+    BwSim *S = &BWS[pi]; Buddy *b=&G.bud[pi];
+    sfx(6);
+    S->grace_t = 4.0f;   // a conversation is a breather (Nov 4): with hunters about, nobody should get jumped mid-dialogue or while opening the quest log right after
+    if (npc==0){   // Elder Patchina
+        if (bw_qstate(b,0)==1){
+            bw_qset(b,0,2); bw_qset(b,1,1); bw_qset(b,2,1); bw_qset2(b,9,1);
+            b->items[0] += 2; if (b->items[0]>9) b->items[0]=9;
+            scpy(S->note, "PATCHINA: BONK 3 HACKERS AT THE SERVER FARM, DEAR.", 72); S->note_t=4.5f;
+        } else if (bw_qstate(b,1)==2 && bw_qstate(b,3)==0){
+            bw_qset(b,3,1); bw_qset_x(b,5,1);
+            scpy(S->note, "PATCHINA: ZED'S GATE NEEDS ITS CRANK. IT SANK IN THE WESTERN RUINS.", 72); S->note_t=4.5f;
+        } else if (bw_qstate(b,1)==2 && bw_qstate_x(b,5)==1){
+            scpy(S->note, "PATCHINA: WEST, DEAR. THE RUINS. MIND THE HOARDER.", 72); S->note_t=4.0f;
+        } else if (bw_qstate(b,1)==2 && bw_qstate2(b,8)==0){
+            bw_qset2(b,8,1);
+            scpy(S->note, "PATCHINA: A STRAY PROCESS WANDERS SOUTH OF US. FETCH IT HOME.", 72); S->note_t=4.5f;
+        } else if (bw_qstate(b,1)==2){
+            scpy(S->note, "PATCHINA: THROUGH THE GATE, DEAR. GIVE HIM A LOVELY FUNERAL.", 72); S->note_t=4.0f;
+        } else {
+            scpy(S->note, "PATCHINA: THE FARM, DEAR. EAST-NORTH-EAST. MIND THE RACKS.", 72); S->note_t=4.0f;
+        }
+    } else if (npc==1){   // Mop
+        if (bw_qstate_x(b,4)==1 && bw_tools_found(b)>=3){
+            bw_qset_x(b,4,2); b->xp += 40;
+            b->items[2] += 2; if (b->items[2]>9) b->items[2]=9;
+            scpy(S->note, "MOP: MY TOOLS! COOKIES FOR YOU. +40 XP.", 72); S->note_t=4.0f;
+        } else if (bw_qstate_x(b,4)==2 && bw_qstate2(b,7)==0){
+            bw_qset2(b,7,1); b->story_bits2 |= (1<<10);   // parcel carried
+            scpy(S->note, "MOP: TAKE THIS PARCEL TO GLITCH AT THE LAKE. MIND IT.", 72); S->note_t=4.2f;
+        } else if (bw_qstate(b,0)==2 && bw_qstate_x(b,4)==0){
+            bw_qset_x(b,4,1);
+            scpy(S->note, "MOP: LOST MY WRENCH, HAMMER AND BRUSH OUT THERE. FIND THEM?", 72); S->note_t=4.2f;
+        } else if (bw_qstate_x(b,4)==1){
+            char *q=S->note; q=sappend(q, "MOP: "); q=sapp_int(q, bw_tools_found(b)); q=sappend(q, "/3 TOOLS HOME. THE MEADOW HIDES THEM WELL."); *q=0;
+            S->note_t=3.6f;
+        } else if (bw_qstate_x(b,4)==2){
+            scpy(S->note, "MOP: THE MEADOW FEARS MY MOP AGAIN.", 72); S->note_t=3.6f;
+        } else {
+            scpy(S->note, "MOP: I PATCH MY SOCKS WITH OLD CODE. SLIGHTLY CURSED.", 72); S->note_t=3.6f;
+        }
+    } else {   // Glitch, the lake hermit
+        if (bw_qstate(b,2)==1){
+            bw_qset(b,2,2);
+            b->items[1] += 3; if (b->items[1]>9) b->items[1]=9;
+            scpy(S->note, "GLITCH: COMPANY! TAKE THESE. +3 ENERGY DRINKS.", 72); S->note_t=4.0f;
+        } else if (bw_qstate2(b,7)==1 && ((b->story_bits2>>10)&1)){
+            bw_qset2(b,7,2); b->story_bits2 &= ~(1<<10);
+            b->xp += 40; b->items[2] += 1; if (b->items[2]>9) b->items[2]=9;
+            scpy(S->note, "GLITCH: MOP'S PARCEL! UNBROKEN. +40 XP. THE COOKIE IS YOURS.", 72); S->note_t=4.5f;
+        } else if (bw_qstate2(b,6)==1 && bw_lakekills(b)>=2){
+            bw_qset2(b,6,2); b->xp += 50;
+            b->items[1] += 2; if (b->items[1]>9) b->items[1]=9;
+            scpy(S->note, "GLITCH: QUIET ICE AGAIN. +50 XP. DRINKS FOR THE ROAD.", 72); S->note_t=4.5f;
+        } else if (bw_qstate(b,2)==2 && bw_qstate2(b,6)==0){
+            bw_qset2(b,6,1);
+            scpy(S->note, "GLITCH: THE LAKE IS CRAWLING. BONK 2 ON THE ICE FOR ME.", 72); S->note_t=4.5f;
+        } else if (bw_qstate_x(b,5)==1 && !bw_has_crank(b)){
+            scpy(S->note, "GLITCH: THE CACHE SINGS UNDER THE WESTERN STONES. IT SITS ON IT.", 72); S->note_t=4.0f;
+        } else if (bw_has_crank(b) && !((b->story_bits>>17)&1)){
+            scpy(S->note, "GLITCH: YOU CRANKED IT. ZED NEXT. GIVE HIM MY WORST.", 72); S->note_t=4.0f;
+        } else {
+            scpy(S->note, "GLITCH: THE LAKE KEEPS WHAT THE COMPILER THREW AWAY.", 72); S->note_t=3.6f;
+        }
+    }
+}
+static void bw_use_item(int pi, int it){
+    BwSim *S = &BWS[pi]; Buddy *b=&G.bud[pi];
+    if (b->items[it]<=0){ scpy(S->note, "NONE LEFT. HACKERS DROP THEM, CAMPS STOCK THEM.", 72); S->note_t=2.4f; sfx(16); return; }
+    if (it==0){
+        if (b->hp>=b->maxhp){ scpy(S->note, "ALREADY FINE. SAVE THE PATCH.", 72); S->note_t=2.2f; return; }
+        b->items[0]--; b->hp += b->maxhp*0.4f; if (b->hp>b->maxhp) b->hp=b->maxhp;
+        scpy(S->note, "PATCH NOTES APPLIED. STINGS LESS.", 72); S->note_t=2.4f; sfx(11);
+    } else if (it==1){
+        if (b->energy>=BUD_ENERGY_MAX){ scpy(S->note, "ALREADY BUZZING.", 72); S->note_t=2.2f; return; }
+        b->items[1]--; b->energy += 50; if (b->energy>BUD_ENERGY_MAX) b->energy=BUD_ENERGY_MAX;
+        scpy(S->note, "ENERGY DRINK DOWN. BUZZING.", 72); S->note_t=2.4f; sfx(11);
+    } else if (it==2){
+        b->items[2]--; S->buff=1;
+        scpy(S->note, "COOKIE EATEN. THE NEXT HIT LANDS DOUBLE.", 72); S->note_t=2.6f; sfx(11);
+    } else {
+        scpy(S->note, "CTRL-Z ONLY UNDOES BATTLES. NICE TRY, THOUGH.", 72); S->note_t=2.4f; sfx(6);
+    }
+}
+// --- Banzai World P1 input, unified across devices (Daniel, Nov 5) ----
+// Daniel's rule: pick a touch scheme once — STICK or DRAG — and it works
+// the same in every minigame. Before this fill existed as one place, the
+// touch FIRE button never produced a `sel` (no stick-throwing in
+// Entrances, no swinging in Buddy Craft), menu navigation ignored the
+// stick entirely, and DRAG steered nothing at all in Banzai World.
+// Both P1 call sites (solo/co-op frame and the net-client frame) pack
+// P1's BwIn through here, so every mode inherits the same scheme.
+static int bw_tf_prev, bw_drag_prev, bw_nav_dir; static float bw_nav_rep;
+static void bw_fill_p1(BwIn *bin, float dt){
+    Buddy *b = &G.bud[G.my_id]; BwSim *S = &BWS[G.my_id];
+    bin->keys = IN.keys | IN.touch_keys;
+    int tf = (IN.touch_keys & K_FIRE)? 1:0;
+    bin->sel = IN.select_pressed || (tf && !bw_tf_prev);
+    // the K_UP fold is the platformer's hold-to-jump-higher; in TANK
+    // RESCUE (mode 5) Up is just steering north, and folding it into
+    // sel_held made the cannon fire the whole way up the field —
+    // steering must never pull the trigger there (Nov 10 fix)
+    bin->sel_held = ((IN.act_held>>ACT_FIRE)&1) || ((IN.raw>>G.bind[ACT_FIRE])&1) || ((bin->keys & K_UP) && b->bw_mode!=5) || tf;
+    bw_tf_prev = tf;
+    bin->interact = IN.interact_pressed || IN.enter_pressed;
+    bin->exit_ = IN.esc_pressed;
+    bin->pause = (IN.pause_pressed && G.net_mode!=NET_CLIENT)? 1:0;   // Start/P opens the BW menu now (guests can't pause — standing rule)
+    bin->wall = IN.wall_pressed;
+    bin->up = IN.menu_up; bin->down = IN.menu_down;
+    // stick flicks walk BW menus (craft menu, story log, battles): a
+    // fresh edge, then the same auto-repeat timing the arrow keys get
+    int dir = (IN.touch_keys & K_UP)? -1 : (IN.touch_keys & K_DOWN)? 1 : 0;
+    if (dir && dir!=bw_nav_dir){ if (dir<0) bin->up=1; else bin->down=1; bw_nav_rep = 0.38f; }
+    else if (dir){ bw_nav_rep -= dt; if (bw_nav_rep<=0){ if (dir<0) bin->up=1; else bin->down=1; bw_nav_rep = 0.09f; } }
+    bw_nav_dir = dir;
+    // holding FIRE (or a DRAG hold) in the field-combat modes swings at
+    // the weapon's own pace; the single edge above is for menus/throws
+    if ((tf || (G.touch_ctl==0 && IN.touch_down)) && !S->bat.active && !S->craft_menu && !S->bw_menu
+        && (b->bw_mode==2 || b->bw_mode==4) && b->atk_cd<=0) bin->sel = 1;
+    // DRAG in Banzai World: steer toward the finger, meadow-style. The
+    // buddy sits at his view's centre in the top-down modes; in the
+    // platformer, run toward the finger and jump when it rides high.
+    if (G.touch_ctl==0 && IN.touch_down && !S->bat.active){
+        int vx,vy,vw2,vh2; p1_view_rect(&vx,&vy,&vw2,&vh2);
+        if (vw2>=VW && !S->craft_menu){
+            int dx = IN.touch_x-(vx+vw2/2), dy = IN.touch_y-(vy+vh2/2);
+            if (b->bw_mode==3){
+                if (dx>16) bin->keys |= K_RIGHT; else if (dx<-16) bin->keys |= K_LEFT;
+                if (dy<-44){ if (!bw_drag_prev) bin->sel=1; bin->sel_held=1; }
+            } else {
+                if (dx>16) bin->keys |= K_RIGHT; else if (dx<-16) bin->keys |= K_LEFT;
+                if (dy>16) bin->keys |= K_DOWN; else if (dy<-16) bin->keys |= K_UP;
+                if (b->bw_mode!=5) bin->sel_held = 1;   // drag-steering a tank is not firing it
+            }
+        }
+        bw_drag_prev = 1;
+    } else bw_drag_prev = 0;
+    // in DRAG there is no USE button: a tap IS the interact button
+    // (doors, drawers, gathering, talking). The craft menu and the
+    // story log consume their own taps, so hands off while they're up.
+    if (G.touch_ctl==0 && IN.tapped && !S->bat.active && !S->craft_menu && !S->log_open && !S->bw_menu) bin->interact = 1;
+}
+
+static void bw_update(int pi, float dt, const BwIn *in){
+    BwSim *S = &BWS[pi];
+    Buddy *b=&G.bud[pi];
+    if (b->mv_t>0) b->mv_t-=dt;
+    // the Start-menu (Daniel, Nov 6): Start/P used to dump you out of
+    // the minigame; now it opens a menu — RESUME / CONTROLS / LEAVE —
+    // and the CONTROLS panel shows THIS mode's buttons. While it is
+    // open the world holds its breath. Escape still leaves instantly.
+    if (S->bw_menu){
+        if (S->bw_menu==2){   // the controls panel: anything backs out
+            if (in->sel || in->interact || in->exit_ || in->pause) S->bw_menu=1;
+            if (pi==G.my_id && IN.tapped){ S->bw_menu=1; IN.tapped=0; }
+        } else {
+            if (in->up){ S->bw_msel = (S->bw_msel+2)%3; sfx(6); }
+            if (in->down){ S->bw_msel = (S->bw_msel+1)%3; sfx(6); }
+            int act = (in->sel || in->interact)? S->bw_msel : -1;
+            if (pi==G.my_id && IN.tapped){
+                int vx,vy,vw2,vh2; p1_view_rect(&vx,&vy,&vw2,&vh2);
+                int pw=300, ph=140, px=vx+(vw2-pw)/2, py=vy+(vh2-ph)/2;
+                int tx=IN.tap_x, ty=IN.tap_y; IN.tapped=0;
+                act = -2;   // a tap outside the panel just closes it
+                if (tx>=px && tx<px+pw && ty>=py && ty<py+ph)
+                    for (int i=0;i<3;i++){ int ry=py+48+i*26;
+                        if (ty>=ry-6 && ty<ry+17){ act=i; break; } }
+            }
+            if (act==0) S->bw_menu=0;
+            else if (act==1) S->bw_menu=2;
+            else if (act==2){ S->bw_menu=0; bw_exit(pi, 0); return; }
+            else if (act==-2) S->bw_menu=0;
+            else if (in->exit_ || in->pause) S->bw_menu=0;
+        }
+        return;
+    }
+    if (in->pause){ S->bw_menu=1; S->bw_msel=0; sfx(6); return; }
+    if (!b->active){ bw_exit(pi, 0); return; }
+    if (S->grace_t>0) S->grace_t-=dt;
+    if (S->note_t>0) S->note_t-=dt;
+    if (S->bat.active){ b->bw_x = b->x; b->bw_y = b->y; bw_battle_update(pi, dt, in); return; }
+    if (S->sleep_t>0){
+        S->sleep_t -= dt;
+        if (!S->slept && S->sleep_t<=0.7f){
+            S->slept=1; b->hp=b->maxhp; b->energy=BUD_ENERGY_MAX;
+            if (b->items[0]<9) b->items[0]++;   // every camp keeps a spare Patch Notes
+            scpy(S->note, "YOU SLEPT SOUNDLY. GOOD AS NEW.", 72); S->note_t=2.6f;
+            do_save();
+        }
+        return;
+    }
+    if (!S->log_open && in->wall && !S->bat.active && b->bw_mode<2){ S->log_open = 1; S->log_sel=0; sfx(6); return; }
+    if (S->log_open){
+        if (in->up){ S->log_sel = (S->log_sel+3)%4; sfx(6); }
+        if (in->down){ S->log_sel = (S->log_sel+1)%4; sfx(6); }
+        if (in->sel) bw_use_item(pi, S->log_sel);
+        if (in->exit_ || in->wall) S->log_open = 0;
+        return;
+    }
+    if (b->bw_mode==2){ ent_update(pi, dt, in); return; }
+    if (b->bw_mode==3){ plat_update(pi, dt, in); return; }
+    if (b->bw_mode==4){ craft_update(pi, dt, in); return; }
+    if (b->bw_mode==5){ tank_update(pi, dt, in); return; }
+    float mx=0, my=0; int k=in->keys;
+    if (k&K_UP) my-=1; if (k&K_DOWN) my+=1; if (k&K_LEFT) mx-=1; if (k&K_RIGHT) mx+=1;
+    if (mx!=0 || my!=0){
+        float d=fsqrt(mx*mx+my*my); mx/=d; my/=d;
+        b->aim = fatan2(my, mx);
+        float sp = BUD_SPD[b->species%BUDN];
+        float nx = b->x + mx*sp*dt, ny = b->y + my*sp*dt;
+        if (!bw_solid_b(b, nx, b->y) && !bw_feat_solid(b, nx, b->y)) b->x = nx;
+        if (!bw_solid_b(b, b->x, ny) && !bw_feat_solid(b, b->x, ny)) b->y = ny;
+        b->walk_ph += dt*9;
+        b->mv_t = 0.15f;
+    }
+    if (b->lunge_t>0) b->lunge_t-=dt;
+    // NO passive energy regen in the story world (Daniel, Nov 6):
+    // energy comes back at tents and from Energy Drinks, never by
+    // just waiting around. (Entrances, Buddy Craft and the meadow
+    // keep their own rules — this is the story/free roam only.)
+    b->bw_x = b->x; b->bw_y = b->y;
+    // roamers wander; one touching you is a battle
+    // the two big residents are fought by walking up to them
+    if (b->bw_mode==1 && !S->bat.active && S->sleep_t<=0 && !S->log_open){
+        // (grace deliberately NOT checked here: it shields you from
+        // being jumped by roamers, it must never refuse a boss you
+        // deliberately walk up to — that refusal cost a test run)
+        if (bw_puz_done(b) && !((b->story_bits>>16)&1)){
+            float dx=b->x-BW_SITE_XY[1][0], dy=b->y-BW_SITE_XY[1][1];
+            if (dx*dx+dy*dy < 27*27){ bw_boss_start(pi, 1); return; }
+        }
+        if (!((b->story_bits>>17)&1)){
+            float dx=b->x-BW_SITE_XY[3][0], dy=b->y-BW_SITE_XY[3][1];
+            if (dx*dx+dy*dy < 32*32){
+                if (bw_qstate(b,1)==2 && bw_qstate(b,3)==0) bw_qset(b,3,1);
+                bw_boss_start(pi, 2); return;
+            }
+        }
+        if (!((b->story_bits>>22)&1)){
+            float dx=b->x-BW_SITE_XY[4][0], dy=b->y-BW_SITE_XY[4][1];
+            if (dx*dx+dy*dy < 30*30){ bw_boss_start(pi, 3); return; }
+        }
+    }
+    bw_roam_refresh(b);
+    for (int i=0;i<BW_ROAMN;i++){
+        BWHack *h=&S->roam[i];
+        if (h->cell==0 && h->x==0 && h->y==0) continue;
+        // Story Mode hunters (Nov 4, Daniel: "let bad guys actually
+        // chase you if they see you where they are facing, or if you
+        // get in proximity"): a hacker that spots the buddy — close
+        // enough to hear (64), or inside its facing cone out to 180 —
+        // gives chase at 88 u/s (every buddy outruns it, barely) and
+        // remembers the hunt for 1.8 s after losing sight. Free Play
+        // hackers just wander, as they always have.
+        int hunting = 0;
+        if (h->alert > 0) h->alert -= dt;   // the hunt is forgotten in every mode
+        if (b->bw_mode==1){
+            float dx=b->x-h->x, dy=b->y-h->y; float d2=dx*dx+dy*dy;
+            int sees = 0;
+            if (d2 < 64*64) sees = 1;
+            else if (d2 < 180*180){
+                float dl = fsqrt(d2);
+                if (dl>0 && (fcos(h->dir)*dx + fsin(h->dir)*dy)/dl > 0.30f) sees = 1;
+            }
+            if (sees) h->alert = 1.8f;
+            if (h->alert > 0){ h->dir = fatan2(dy, dx); hunting = 1; }
+        }
+        if (hunting){
+            float hx = h->x + fcos(h->dir)*88*dt, hy = h->y + fsin(h->dir)*88*dt;
+            if (!bw_solid_b(b, hx, hy)){ h->x=hx; h->y=hy; }
+            else { float hx2 = h->x + fcos(h->dir)*88*dt; if (!bw_solid_b(b, hx2, h->y)) h->x=hx2;
+                   else { float hy2 = h->y + fsin(h->dir)*88*dt; if (!bw_solid_b(b, h->x, hy2)) h->y=hy2; } }
+        } else {
+            h->wt -= dt;
+            if (h->wt<=0){ h->wt = 1.6f + rng_f()*1.6f; h->dir = rng_f()*6.28318f; }
+            float hx = h->x + fcos(h->dir)*26*dt, hy = h->y + fsin(h->dir)*26*dt;
+            if (!bw_solid_b(b, hx, hy)){ h->x=hx; h->y=hy; }
+        }
+        float dx=b->x-h->x, dy=b->y-h->y;
+        if (S->grace_t<=0 && dx*dx+dy*dy < 21*21){ bw_battle_start(b, h); return; }
+    }
+    // story: arriving somewhere new is worth a title card of a note
+    if (b->bw_mode==1){
+        int st = bw_site_at_xy(b, b->x, b->y);
+        if (st!=S->site_cur){
+            S->site_cur = st;
+            if (st>=0){
+                static const char *ARRIVE[5] = {
+                    "PATCH VILLAGE. SOMEONE HERE KEEPS THE LIGHTS ON.",
+                    "THE RUINED SERVER FARM. IT HUMS IN ITS SLEEP.",
+                    "THE FROZEN LAKE OF DEPRECATED CODE.",
+                    "ZED'S COMPOUND. THE FENCE IS A FIREWALL. LITERALLY.",
+                    "THE OVERGROWN RUINS. SOMETHING SITS ON THE PAST." };
+                scpy(S->note, ARRIVE[st], 72); S->note_t = 3.2f;
+            }
+        }
+    }
+    if (in->exit_){ bw_exit(pi, 0); return; }   // pad: Back or Start; keys: Esc/P
+    if (in->interact){
+        int npc = bw_npc_near(b, 46);
+        if (npc>=0){ bw_talk(pi, npc); return; }
+        int term = bw_term_near(b, 44);
+        if (term>=0){ bw_press_term(pi, term); return; }
+        if (bw_sign_near(b, 44)){ bw_read_sign(pi); return; }
+        int hs = bw_hsign_near(b, 44);
+        if (hs>=0){ bw_read_hsign(pi, hs); return; }
+        if (bw_bitling_near(b, 44)){ bw_meet_bitling(pi); return; }
+        int tool = bw_tool_near(b, 44);
+        if (tool>=0){ bw_pick_tool(pi, tool); return; }
+        float dx=b->x, dy=b->y+6;
+        if (dx*dx+dy*dy < 46*46){ bw_exit(pi, 0); return; }       // at the gate
+        float tx, ty;
+        if (bw_tent_near(b, 42, &tx, &ty)){ S->sleep_t=1.4f; S->slept=0; sfx(11); }
+    }
+}
+static void bw_draw_hacker(float wx, float wy, int lvl, float lunge, int named);
+static void bw_draw_big_hacker(float wx, float wy, int boss, int named);
+static void bw_draw_tent(float wx, float wy);
+// --- ENTRANCES (Nov 5, Daniel) -------------------------------------------------
+// A Doors-like hotel run inside Banzai World, built for Wesley: the loop
+// of Doors (numbered doors, one-rule monsters, hide, hunt for keys and
+// loot) with the horror drained out — getting caught is a bonk and a
+// kazoo, never a scare. Daniel's verdict on the original: too scary.
+// Rooms are uniform 12x8-tile slabs laid end to end along +x; room k's
+// right wall holds ENTRANCE k+1. Everything about a room derives from
+// hash(seed, k), so the hotel is endless and needs no stored map.
+// Tiles: 0 floor, 1 wall, 2 door (closed), 3 bush (hide in it),
+// 4 drawer, 5 shelf, 6 tent, 7 the EXIT door, 8 the lobby door home.
+#define ENT_STRIDE 15        // room width in tiles (was 12 — bigger rooms, longer runs to the door and the bushes: Daniel, Nov 5)
+static u32 ent_rnd(Buddy *b, int k, int salt){ return hash2(k*31+7, salt*131+3, (u32)b->bw_seed ^ 0xE77u); }
+static int ent_room_of(float x){ int k = (int)(x / (ENT_STRIDE*BW_TILE)) + 1; return k<1? 1 : k; }
+static float ent_room_x0(int k){ return (float)((k-1)*ENT_STRIDE*BW_TILE); }   // left wall face
+static int ent_in_chase_seg(int k){ for (int d=0; d<5; d++){ int s=k-d; if (s>=19 && s%30==19) return 1; } return 0; }   // Inspector segments: rooms 19-23, 49-53, 79-83 — at least 30 doors apart, five doors long (Daniel, Nov 6)
+static int ent_door_locked(int pi, int k){
+    Buddy *b=&G.bud[pi]; BwSim *S=&BWS[pi];
+    if (S->ent_sub) return ent_rnd(b, k, 2400) % 5 == 0 && k>=3;
+    if (k<3 || k==25 || k==50 || k==51) return 0;   // 25 is the Library: the fuses are its lock
+    if (ent_in_chase_seg(k)) return 0;
+    return ent_rnd(b, k, 400) % 5 == 0;
+}
+static int ent_dupe_room(Buddy *b, int k){
+    if (k<4 || k==25 || k%10==0 || ent_in_chase_seg(k)) return 0;
+    return ent_rnd(b, k, 305) % 10 < 6;   // painted doors in most rooms now (Daniel, Nov 6) — and they look the part
+}
+// the real door is not always in the middle any more (Daniel, Nov 6):
+// its row wanders per room, and the west door of the next room is the
+// same doorway seen from the other side
+static int ent_door_ly(Buddy *b, int k){
+    static const int ROWS[5] = { 2, 3, 4, 5, 6 };
+    return ROWS[ent_rnd(b, k, 350) % 5];
+}
+static int ent_doory(Buddy *b, int k){ return ent_door_ly(b, k)*BW_TILE + 24; }
+// painted doors share the real door's row set, so row alone tells
+// you nothing: 1-2 dupes, never on the real row
+static int ent_dupe_n(Buddy *b, int k){ return ent_dupe_room(b, k)? 1 + (int)(ent_rnd(b, k, 307) % 2) : 0; }
+static int ent_dupe_ly_i(Buddy *b, int k, int i){
+    static const int ROWS[5] = { 2, 3, 4, 5, 6 };
+    int real = ent_door_ly(b, k), cand[4], n = 0;
+    for (int j=0;j<5;j++) if (ROWS[j]!=real) cand[n++] = ROWS[j];
+    int a = cand[ent_rnd(b, k, 300) % 4];
+    if (!i) return a;
+    int c2 = cand[(ent_rnd(b, k, 300) % 4 + 1 + (int)(ent_rnd(b, k, 302) % 3)) % 4];
+    if (c2==a) c2 = cand[(ent_rnd(b, k, 300) % 4 + 2) % 4];
+    return c2;
+}
+static int ent_dupe_ly(Buddy *b, int k){ return ent_dupe_ly_i(b, k, 0); }
+// the noise-sensitive Big Bug keeps a few ordinary rooms too now
+// (Daniel, Nov 6) — nowhere the chase, a landing, or the Library
+static int ent_bigbug_room(int k){
+    if (k<6 || k==25 || k%10==0 || ent_in_chase_seg(k)) return 0;
+    return k%13==7 || k%17==9;
+}
+static int ent_furn(int pi, int tx, int ty){
+    Buddy *b=&G.bud[pi]; BwSim *S=&BWS[pi];
+    if (tx<0) return 0;
+    int k = tx/ENT_STRIDE + 1, lx = tx%ENT_STRIDE, ly = ty;
+    if (S->ent_sub){   // the service floor: sparser, greyer — vents to hide in, the odd crate, a cot every 20
+        if (k%20==0 && lx==3 && ly==1) return 6;
+        int nd = (int)(ent_rnd(b, k, 2200) % 2);
+        for (int i=0;i<nd;i++){
+            int dx = 2 + (int)(ent_rnd(b, k, 2210+i) % (ENT_STRIDE-4)), dy = (ent_rnd(b, k, 2220+i)&1)? 1 : ENT_ROWS-2;
+            if (lx==dx && ly==dy) return 4;
+        }
+        int nb = 3 + (int)(ent_rnd(b, k, 2100) % 3);   // the service floor gets its share too (3-5 vents)
+        for (int i=0;i<nb;i++){
+            int bx = 1 + (int)(ent_rnd(b, k, 2110+i) % (ENT_STRIDE-2)), by = 1 + (int)((ent_rnd(b, k, 2120+i)>>3) % (ENT_ROWS-2));
+            if ((by==ent_door_ly(b, k-1) && bx<=2) || (by==ent_door_ly(b, k) && bx>=ENT_STRIDE-3)) continue;
+            if (lx==bx && ly==by) return 3;
+        }
+        return 0;
+    }
+    if (k==25){   // the library: shelf rows with two gaps each
+        if ((ly==3 || ly==6) && lx>=2 && lx<=ENT_STRIDE-3){
+            int g1 = 2 + (int)(ent_rnd(b, 25, 900 + ly) % (ENT_STRIDE-4));
+            int g2 = 2 + (int)(ent_rnd(b, 25, 940 + ly) % (ENT_STRIDE-4)); if (g2==g1) g2 = g1>=ENT_STRIDE-3? 2 : g1+1;
+            if (lx!=g1 && lx!=g2) return 5;
+        }
+        return 0;
+    }
+    if (k%10==0 && lx==3 && ly==1) return 6;   // a landing's tent
+    int nd = 1 + (int)(ent_rnd(b, k, 200) % 2);
+    for (int i=0;i<nd;i++){
+        int dx = 2 + (int)(ent_rnd(b, k, 210+i) % (ENT_STRIDE-4)), dy = (ent_rnd(b, k, 220+i)&1)? 1 : ENT_ROWS-2;
+        if (lx==dx && ly==dy) return 4;
+    }
+    int nb = 4 + (int)(ent_rnd(b, k, 100) % 3);   // 4-6 bushes a room: more shelter, more often (Daniel, Nov 6)
+    for (int i=0;i<nb;i++){
+        int bx = 1 + (int)(ent_rnd(b, k, 110+i) % (ENT_STRIDE-2)), by = 1 + (int)((ent_rnd(b, k, 120+i)>>3) % (ENT_ROWS-2));
+        if ((by==ent_door_ly(b, k-1) && bx<=2) || (by==ent_door_ly(b, k) && bx>=ENT_STRIDE-3)) continue;   // keep the doorway runs clear
+        if (lx==bx && ly==by) return 3;
+    }
+    return 0;
+}
+static void ent_key_pos(int pi, int k, float *wx, float *wy){
+    Buddy *b=&G.bud[pi]; BwSim *S=&BWS[pi];
+    if (S->ent_sub){   // downstairs keys hide on the room's crate, rolled with downstairs salts
+        int dx = 2 + (int)(ent_rnd(b, k, 2210) % (ENT_STRIDE-4)), dy = (ent_rnd(b, k, 2220)&1)? 1 : ENT_ROWS-2;
+        *wx = ((k-1)*ENT_STRIDE + dx)*BW_TILE + 24; *wy = dy*BW_TILE + 10;
+        return;
+    }
+    int nd = 1 + (int)(ent_rnd(b, k, 200) % 2);
+    if (nd>=1){ int dx = 2 + (int)(ent_rnd(b, k, 210) % (ENT_STRIDE-4)), dy = (ent_rnd(b, k, 220)&1)? 1 : ENT_ROWS-2;
+        *wx = ((k-1)*ENT_STRIDE + dx)*BW_TILE + 24; *wy = dy*BW_TILE + 10; }
+    else { *wx = ((k-1)*ENT_STRIDE + 2 + (int)(ent_rnd(b, k, 410) % 7))*BW_TILE + 24; *wy = (ENT_ROWS-2)*BW_TILE + 24; }
+}
+static const int ENT_FUSE_TX[5] = { 2, 12, 7, 2, 12 };
+static const int ENT_FUSE_TY[5] = { 1, 1, 4, 8, 8 };
+static int ent_tile(int pi, int tx, int ty){
+    Buddy *b=&G.bud[pi]; BwSim *S=&BWS[pi];
+    if (tx<0 || ty<0 || ty>=ENT_ROWS) return 1;
+    int k = tx/ENT_STRIDE + 1, lx = tx%ENT_STRIDE, ly = ty;
+    if (!S->ent_sub && k==51 && lx==ENT_STRIDE/2 && ly==ENT_ROWS-1) return 7;
+    if (ly==0 || ly==ENT_ROWS-1) return 1;
+    if (lx==0 || lx==ENT_STRIDE-1){
+        if (lx==0 && k==1 && ly==ENT_DOOR_LY) return 8;   // the stairs home: always the middle of room 1's west wall
+        int door = (lx==ENT_STRIDE-1)? k : k-1;
+        if (door>=1 && ly==ent_door_ly(b, door)){
+            int upto = S->ent_sub? S->ent_door_sub : S->ent_door_upto;
+            if (door <= upto) return 0;
+            if (!S->ent_sub && door==25 && S->ent_libdone) return 0;
+            return 2;
+        }
+        if (!S->ent_sub && lx==ENT_STRIDE-1 && !S->ent_dupe_used && ent_dupe_room(b, k)
+            && (ly==ent_dupe_ly_i(b, k, 0) || (ent_dupe_n(b, k)>1 && ly==ent_dupe_ly_i(b, k, 1)))) return 2;
+        return 1;
+    }
+    if (!S->ent_sub && k==25 && lx==ENT_STRIDE-2 && ly==ENT_ROWS-2) return 9;   // the tall bookcase (the secret is behind it)
+    return ent_furn(pi, tx, ty);
+}
+static int ent_solid(int pi, float x, float y){
+    int t = ent_tile(pi, bw_tileof(x), bw_tileof(y));
+    return t==1 || t==2 || t==4 || t==5 || t==6 || t==7 || t==8 || t==9;
+}
+static int ent_solid_insp(int pi, float x, float y){
+    // the Inspector's version: a real doorway (tile 2 on that door's
+    // own row) is NOT solid to him — he comes through doors (Daniel,
+    // Nov 6). A painted dupe door may share the row set but never the
+    // right column-and-row at once, and stays a wall to him.
+    Buddy *b=&G.bud[pi];
+    int tx = bw_tileof(x), ty = bw_tileof(y);
+    int t = ent_tile(pi, tx, ty);
+    if (t==2){
+        int k = tx/ENT_STRIDE + 1, lx = tx%ENT_STRIDE;
+        int door = (lx==ENT_STRIDE-1)? k : k-1;
+        return !(door>=1 && ty==ent_door_ly(b, door));
+    }
+    return t==1 || t==4 || t==5 || t==6 || t==7 || t==8 || t==9;
+}
+static int ent_room_looted(BwSim *S, int k){
+    for (int i=0;i<S->ent_loot_n;i++) if (S->ent_loot_rooms[i]==k) return 1;
+    return 0;
+}
+static void ent_reset(int pi){
+    BwSim *S=&BWS[pi];
+    S->ent_room = 1; S->ent_door_upto = 0; S->ent_key = 0; S->ent_bits = 0;
+    S->ent_sticks = 0; S->ent_lant = 0; S->ent_ev = 0; S->ent_phase = 0;
+    S->ent_dark = 0; S->ent_dupe_used = 0; S->ent_libdone = 0; S->ent_fuse_mask = 0;
+    S->ent_t = 0; S->ent_grace = 0; S->ent_zpass = 0; S->ent_typs = 0;
+    S->ent_sub = 0; S->ent_door_sub = 0; S->ent_passes = 1; S->ent_tamb = 7; S->ent_zt = 0;
+    S->ent_chase = 0; S->ent_noise = 0; S->ent_loot_n = 0; S->ent_finished = 0;
+    S->ent_ix = 0; S->ent_iy = 0; S->ent_istun = 0; S->ent_bbx = 0; S->ent_bby = 0;
+    S->ent_fn = 0; S->ent_mt = 0; S->ent_mstep = 0;
+    S->ent_rvx = 0; S->ent_rvy = 0;
+}
+static void ent_room_setup(int pi, int k){
+    BwSim *S=&BWS[pi]; Buddy *b=&G.bud[pi];
+    S->ent_dupe_used = 0; S->ent_ev = 0; S->ent_phase = 0; S->ent_noise = 0; S->ent_fn = 0;
+    if (S->ent_sub){   // the service floor has its own, worse manners
+        S->ent_dark = (k%3==1)? 1 : 0;
+        if (k%20==0){ /* a maintenance landing: quiet */ }
+        else if (ent_rnd(b, k, 3300) % 100 < 14){ S->ent_ev = 7; S->ent_phase = 1; S->ent_t = 0.45f; S->ent_passes = 1;
+            scpy(S->note, "THE AIR TEARS. SOMETHING IS COMING THROUGH.", 72); S->note_t = 2.2f; sfx(21); }
+        else if (k%6==4){ S->ent_ev = 2; S->ent_phase = 1; S->ent_t = 3.0f; S->ent_zpass = 0;
+            S->ent_passes = 2 + (int)(ent_rnd(b, k, 3350) % 3);
+            scpy(S->note, "MANY LEGS. MANY FACES. THE MULTIBUG! INTO A VENT!", 72); S->note_t = 2.8f; sfx(20); }
+        else if (S->ent_dark){ S->ent_ev = 3; S->ent_phase = 1; S->ent_twait = 1.3f; S->ent_typs = 3; }
+        return;
+    }
+    S->ent_dark = (k%5==2 && k!=25)? 1 : 0;
+    if (k>=19 && k%30==19 && !S->ent_chase){ S->ent_chase = k; S->ent_ev = 5; S->ent_phase = 0; }
+    else if (S->ent_chase && k>=S->ent_chase && k<=S->ent_chase+4){ S->ent_ev = 5; S->ent_phase = 1; }
+    // phase stays 1 across the segment rooms: he has always spawned by
+    // the time one is entered (the buddy crosses the start room's
+    // middle to leave it), and his position is world-continuous, so he
+    // walks through each doorway in plain sight. Resetting to phase 0
+    // here was the vanish Daniel saw (Nov 6): undrawn and idle until
+    // the buddy crossed the new room's middle, then re-formed at its
+    // west edge as if he'd teleported.
+    else if (S->ent_chase && k>=S->ent_chase+5){ S->ent_chase = 0; S->ent_bits += 10;
+        scpy(S->note, "YOU LOST THE INSPECTOR! +10 BITS", 72); S->note_t = 2.4f; sfx(11); }
+    if (S->ent_ev==5){   // a chase room burns: floor fires to dodge, his idea of decor (Daniel, Nov 6)
+        S->ent_fn = 0;
+        int nf = 2 + (int)(ent_rnd(b, k, 5100) % 2);
+        for (int i=0;i<nf && S->ent_fn<4;i++){
+            int fx = 2 + (int)(ent_rnd(b, k, 5110+i*7) % (ENT_STRIDE-4));
+            int fy = 1 + (int)((ent_rnd(b, k, 5120+i*7)>>3) % (ENT_ROWS-2));
+            if ((fy==ent_door_ly(b, k-1) && fx<=3) || (fy==ent_door_ly(b, k) && fx>=ENT_STRIDE-4)) continue;   // never wall off a doorway
+            if (ent_furn(pi, (k-1)*ENT_STRIDE + fx, fy)) continue;          // not inside the furniture
+            S->ent_fx[S->ent_fn] = ent_room_x0(k) + fx*BW_TILE + 24;
+            S->ent_fy[S->ent_fn] = fy*BW_TILE + 24;
+            S->ent_fn++;
+        }
+    }
+    if (S->ent_ev) return;
+    if (k==25){
+        S->ent_ev = 6;
+        if (!S->ent_libdone) S->ent_fuse_mask = 0;
+        S->ent_bbx = ent_room_x0(25) + (ENT_STRIDE/2)*BW_TILE + 24; S->ent_bby = 1.6f*BW_TILE;
+        S->ent_bbdir = 0; S->ent_bbcharge = 0; S->ent_t = 1.0f;
+    }
+    else if (k%10==0){ /* a landing: quiet, lamplit, safe */ }
+    else if (k>=12 && ent_rnd(b, k, 3300) % 100 < 6){ S->ent_ev = 7; S->ent_phase = 1; S->ent_t = 0.45f; S->ent_passes = 1;
+        scpy(S->note, "THE AIR TEARS. SOMETHING IS COMING THROUGH.", 72); S->note_t = 2.2f; sfx(21); }
+    else if (k%7==3){ S->ent_ev = 1; S->ent_phase = 1; S->ent_t = 3.0f; S->ent_passes = 1;
+        scpy(S->note, "YOU HEAR IT SCREAMING UP THE HALL... HIDE IN A BUSH!", 72); S->note_t = 2.8f; sfx(20); }
+    else if (k%11==6){ S->ent_ev = 2; S->ent_phase = 1; S->ent_t = 3.0f; S->ent_zpass = 0; S->ent_passes = 3;
+        scpy(S->note, "A SCREAM, BOTH WAYS... IT KEEPS COMING BACK. BUSH!", 72); S->note_t = 2.8f; sfx(20); }
+    else if (S->ent_dark){ S->ent_ev = 3; S->ent_phase = 1; S->ent_twait = 1.3f; S->ent_typs = 3; }
+    else if (k%8==5){ S->ent_ev = 4;
+        S->ent_rvx = ent_room_x0(k) + (2 + (int)(ent_rnd(b, k, 700) % (ENT_STRIDE-4)))*BW_TILE + 24;
+        S->ent_rvy = (2 + (int)(ent_rnd(b, k, 710) % (ENT_ROWS-4)))*BW_TILE + 24;
+        scpy(S->note, "THE CODE REVIEWER IS IN. DO NOT MEET ITS EYES.", 72); S->note_t = 2.8f; }
+    else if (ent_bigbug_room(k)){ S->ent_ev = 6;   // a Big Bug keeps this room too: mind your noise (Daniel, Nov 6)
+        S->ent_bbx = ent_room_x0(k) + (3 + (int)(ent_rnd(b, k, 800) % (ENT_STRIDE-6)))*BW_TILE + 24;
+        S->ent_bby = ((ent_rnd(b, k, 810)&1)? 2 : ENT_ROWS-3)*BW_TILE + 24;
+        S->ent_bbdir = 0; S->ent_bbcharge = 0; S->ent_t = 1.0f;
+        scpy(S->note, "SOMETHING ENORMOUS IS SNORING HERE. SOFT FEET.", 72); S->note_t = 2.8f; }
+}
+static void ent_enter_room(int pi, int k){
+    BwSim *S=&BWS[pi]; Buddy *b=&G.bud[pi];
+    S->ent_room = k;
+    ent_room_setup(pi, k);
+    if (S->ent_sub){ if (k > b->ent_sub_best) b->ent_sub_best = k; return; }
+    if (k > b->ent_best) b->ent_best = k;
+    if (k==51 && !S->ent_finished){
+        S->ent_finished = 1; b->ent_done++;
+        scpy(S->note, "YOU MADE IT OUT! EVERY ENTRANCE, CLEARED!", 72); S->note_t = 4.5f;
+        do_save(); sfx(11);
+    }
+    else if (k==25){ scpy(S->note, "ENTRANCE 25: THE LIBRARY. SNEAK. FIND 5 FUSES.", 72); S->note_t = 3.6f; }
+    else if (k==51){ scpy(S->note, "THE EXIT ROOM. GO HOME PROUD, OR KEEP GOING.", 72); S->note_t = 3.4f; }
+    else if (k%10==0){ scpy(S->note, "A SAFE LANDING. THE TENT RESTS AND SAVES.", 72); S->note_t = 3.0f; }
+    else if (S->ent_dark && S->ent_ev!=1 && S->ent_ev!=2){ scpy(S->note, "IT IS DARK IN HERE. LISTEN FOR A PSST.", 72); S->note_t = 2.8f; }
+}
+static void ent_bonk(int pi, float frac, float kx){
+    BwSim *S=&BWS[pi]; Buddy *b=&G.bud[pi];
+    if (S->ent_grace>0) return;
+    b->hp -= b->maxhp * frac; if (b->hp<0) b->hp = 0;
+    b->calm = 0; S->ent_grace = 1.6f;
+    if (kx!=0){ float nx = b->x + kx; if (!bw_solid_b(b, nx, b->y)) b->x = nx; }
+    sfx(4);
+}
+static void ent_neutralize(int pi, int via_ctrlz){
+    BwSim *S=&BWS[pi];
+    if ((S->ent_ev==1 || S->ent_ev==2 || S->ent_ev==7) && S->ent_phase==2){
+        int wasev = S->ent_ev; S->ent_ev = 0; S->ent_phase = 0;
+        scpy(S->note, wasev==7? "BONK! THE GLITCH SPITS IT BACK OUT." : via_ctrlz? "CTRL-Z! THE ZIP BUG UNDOES ITSELF." : "BONK! THE ZIP BUG SPINS AWAY DIZZY.", 72); S->note_t = 2.2f;
+    } else if (S->ent_ev==5 && S->ent_phase==1){
+        if (via_ctrlz){ S->ent_chase = 0; S->ent_ev = 0; S->ent_phase = 0;
+            scpy(S->note, "CTRL-Z! THE INSPECTOR UNDOES HIMSELF.", 72); S->note_t = 2.4f; }
+        else { S->ent_istun = 3.5f; S->ent_ix -= 110;
+            scpy(S->note, "BONK! THE INSPECTOR SEES STARS.", 72); S->note_t = 2.2f; }
+    } else if (S->ent_ev==3 && S->ent_phase==2){
+        S->ent_bits += 2; S->ent_typs--;
+        S->ent_phase = S->ent_typs>0? 1 : 0; if (!S->ent_typs) S->ent_ev = 0; S->ent_twait = 1.5f;
+        scpy(S->note, "BONK! TYPO CORRECTED. +2 BITS", 72); S->note_t = 2.0f;
+    } else if (S->ent_ev==6){
+        S->ent_bbcharge = 0; S->ent_noise = 0;
+        if (S->ent_room==25 && !S->ent_sub){ S->ent_bbx = ent_room_x0(25) + (ENT_STRIDE/2)*BW_TILE + 24; S->ent_bby = 1.6f*BW_TILE; }
+        else { Buddy *b=&G.bud[pi]; int k = S->ent_room;   // a resident Big Bug just shuffles back to its corner
+            S->ent_bbx = ent_room_x0(k) + (3 + (int)(ent_rnd(b, k, 800) % (ENT_STRIDE-6)))*BW_TILE + 24;
+            S->ent_bby = ((ent_rnd(b, k, 810)&1)? 2 : ENT_ROWS-3)*BW_TILE + 24; }
+        scpy(S->note, via_ctrlz? "CTRL-Z! THE BIG BUG BLINKS BACK TO ITS DESK." : "BONK! THE BIG BUG BACKS OFF, HUFFING.", 72); S->note_t = 2.2f;
+    }
+}
+static void ent_update(int pi, float dt, const BwIn *in){
+    BwSim *S=&BWS[pi]; Buddy *b=&G.bud[pi];
+    if (in->exit_){ bw_exit(pi, 0); return; }
+    if (S->ent_grace>0) S->ent_grace -= dt;
+    if (b->atk_cd>0) b->atk_cd -= dt;
+    // movement (the buddy's own BW walk, hotel tiles)
+    float mx=0, my=0; int k2=in->keys;
+    if (k2&K_UP) my-=1; if (k2&K_DOWN) my+=1; if (k2&K_LEFT) mx-=1; if (k2&K_RIGHT) mx+=1;
+    int moving = (mx!=0 || my!=0);
+    if (moving){
+        float d=fsqrt(mx*mx+my*my); mx/=d; my/=d;
+        b->aim = fatan2(my, mx);
+        float sp = BUD_SPD[b->species%BUDN];
+        float nx = b->x + mx*sp*dt, ny = b->y + my*sp*dt;
+        if (!bw_solid_b(b, nx, b->y)) b->x = nx;
+        if (!bw_solid_b(b, b->x, ny)) b->y = ny;
+        b->walk_ph += dt*9;
+        b->mv_t = 0.15f;
+    }
+    if (b->lunge_t>0) b->lunge_t-=dt;
+    if (b->energy<BUD_ENERGY_MAX){ b->energy += BUD_EN_REGEN*dt; if (b->energy>BUD_ENERGY_MAX) b->energy=BUD_ENERGY_MAX; }
+    b->bw_x = b->x; b->bw_y = b->y;
+    // breath regen: the hotel is not as kind as the meadow (Daniel,
+    // Nov 5 — harder) — six calm seconds, and a slower trickle
+    b->calm += dt;
+    if (b->calm>6 && b->hp>0 && b->hp<b->maxhp){ b->hp += 1.4f*dt; if (b->hp>b->maxhp) b->hp=b->maxhp; }
+    // room tracking
+    int rk = ent_room_of(b->x);
+    if (rk != S->ent_room) ent_enter_room(pi, rk);
+    int room = S->ent_room;
+    // ambient dread: now and then the hotel reminds you it is a hotel
+    S->ent_tamb -= dt;
+    if (S->ent_tamb<=0){
+        S->ent_tamb = 9.0f + (float)(ent_rnd(b, room, 2900 + (int)(G.anim_t*3)) % 8);
+        int landing = S->ent_sub? (room%20==0) : (room%10==0);
+        if (!landing && S->note_t<=0){
+            static const char *AMB[4] = { "SOMEWHERE, A DOOR CREAKED.", "THE LAMPS BUZZ. THEN, BRIEFLY, DON'T.",
+                                          "SOMETHING SMALL SCUTTLED AWAY.", "BREATHING, SOMEWHERE. PROBABLY YOURS." };
+            scpy(S->note, AMB[ent_rnd(b, room, 2950 + (int)(G.anim_t*5)) % 4], 72); S->note_t = 2.4f; sfx(6);
+        }
+    }
+    float rx0 = ent_room_x0(room);
+    int hidden = ent_tile(pi, bw_tileof(b->x), bw_tileof(b->y))==3;
+    // --- the room's resident trouble ---
+    if (S->ent_ev==1 || S->ent_ev==2 || S->ent_ev==7){
+        if (S->ent_phase==1){
+            S->ent_t -= dt;
+            if (S->ent_t<=0){
+                S->ent_phase = 2;
+                S->ent_zdir = (S->ent_ev==2 && (S->ent_zpass&1))? -1 : 1;
+                if (S->ent_ev==7) S->ent_zdir = (ent_rnd(b, room, 3400)&1)? -1 : 1;
+                S->ent_zx = S->ent_zdir>0? rx0 + BW_TILE + 10 : rx0 + (ENT_STRIDE-1)*BW_TILE - 10;
+                S->ent_zy = ent_doory(b, room);   // the pass rides the door row: that is the run the moths mark
+                S->ent_zspd = S->ent_ev==7? 470.0f : S->ent_sub? 440.0f : 400.0f;
+                S->ent_zt = 0;
+                if (S->ent_ev!=7) sfx(20);   // the glitch brings its own noise
+            }
+        } else if (S->ent_phase==2){
+            float prevzx = S->ent_zx;
+            S->ent_zx += S->ent_zdir * S->ent_zspd * dt;
+            // the roar (Daniel: LOUDER): a wall of rushing noise that
+            // swells as the thing bears down on you
+            S->ent_zt -= dt;
+            if (S->ent_zt<=0){
+                S->ent_zt = 0.09f;
+                float adx = b->x - S->ent_zx; if (adx<0) adx=-adx;
+                int vel = 92 - (int)(adx*0.07f); if (vel<52) vel=52; if (vel>92) vel=92;
+                qnote(0,3,26,vel,3); qnote(0.02f,3,47,vel-25,1);
+            }
+            // like Rush, it owns the whole room: anywhere not hidden
+            // when it sweeps past your position, it gets you (45% —
+            // Doors does not do love taps)
+            if (!hidden && S->ent_grace<=0 && prevzx != S->ent_zx && (prevzx - b->x)*(S->ent_zx - b->x) <= 0.0f){
+                ent_bonk(pi, 0.45f, -S->ent_zdir*26);
+                scpy(S->note, S->ent_sub? "IT GOT YOU! VENTS ARE FOR HIDING." : "THE ZIP BUG GOT YOU! BUSHES ARE FOR HIDING.", 72); S->note_t = 2.4f;
+            }
+            if (S->ent_zx < rx0 + 10 || S->ent_zx > rx0 + ENT_STRIDE*BW_TILE - 10){
+                S->ent_zpass++;
+                if (S->ent_zpass>=S->ent_passes){ int wasev = S->ent_ev; S->ent_ev = 0; S->ent_phase = 0;
+                    if (wasev==2){ scpy(S->note, S->ent_sub? "THE MULTIBUG PEELS AWAY. FOR NOW." : "THE BOOMERANG BUG GIVES UP AT LAST.", 72); S->note_t = 2.2f; } }
+                else { S->ent_phase = 1; S->ent_t = 2.0f; sfx(20); }   // every return pass gets a real warning too (Daniel, Nov 6)
+            }
+        }
+    }
+    else if (S->ent_ev==3){
+        if (S->ent_phase==1){
+            S->ent_twait -= dt;
+            if (S->ent_twait<=0){
+                u32 h = ent_rnd(b, room, 500 + S->ent_typs*17 + (int)(G.anim_t*7));
+                S->ent_tyx = rx0 + (1 + (int)(h % (ENT_STRIDE-2)))*BW_TILE + 24;
+                S->ent_tyy = (1 + (int)((h>>4) % (ENT_ROWS-2)))*BW_TILE + 24;
+                S->ent_tt = 2.4f; S->ent_phase = 2; sfx(6);
+                scpy(S->note, "psst... GO SAY HI BEFORE IT NIBBLES.", 72); S->note_t = 1.8f;
+            }
+        } else if (S->ent_phase==2){
+            S->ent_tt -= dt;
+            float dx=b->x-S->ent_tyx, dy=b->y-S->ent_tyy;
+            if (dx*dx+dy*dy < 24*24){
+                S->ent_bits += 2; S->ent_typs--; sfx(19);
+                scpy(S->note, "YOU FOUND THE TYPO! +2 BITS", 72); S->note_t = 1.8f;
+                S->ent_phase = S->ent_typs>0? 1 : 0; if (!S->ent_typs) S->ent_ev = 0; S->ent_twait = 1.5f;
+            } else if (S->ent_tt<=0){
+                ent_bonk(pi, 0.10f, 0);
+                scpy(S->note, "THE TYPO NIBBLED YOU. TOO SLOW!", 72); S->note_t = 2.0f;
+                S->ent_typs--;
+                S->ent_phase = S->ent_typs>0? 1 : 0; if (!S->ent_typs) S->ent_ev = 0; S->ent_twait = 1.5f;
+            }
+        }
+    }
+    else if (S->ent_ev==4){
+        float dx=S->ent_rvx-b->x, dy=S->ent_rvy-b->y; float d2=dx*dx+dy*dy;
+        if (d2 < 180*180 && d2 > 1){
+            float dl = fsqrt(d2);
+            if ((fcos(b->aim)*dx + fsin(b->aim)*dy)/dl > 0.55f){
+                b->hp -= b->maxhp * 0.16f * dt; if (b->hp<0) b->hp = 0; b->calm = 0;
+            }
+        }
+    }
+    else if (S->ent_ev==5 && S->ent_chase){
+        if (S->ent_phase==0){
+            if (b->x > rx0 + (ENT_STRIDE/2)*BW_TILE){
+                S->ent_phase = 1;
+                S->ent_ix = rx0 + BW_TILE + 14; S->ent_iy = ent_doory(b, S->ent_chase - 1);
+                scpy(S->note, "THE INSPECTOR! RUN!", 72); S->note_t = 2.2f; sfx(16);
+            }
+        } else {
+            // doors in a chase just fly open — no stopping for keys
+            float ddx = (rx0 + (ENT_STRIDE-1)*BW_TILE + 24) - b->x, ddy = ent_doory(b, room) - b->y;
+            if (ddx*ddx+ddy*ddy < 52*52 && room > S->ent_door_upto){ S->ent_door_upto = room; sfx(19); }
+            if (room >= S->ent_chase+5){
+                S->ent_chase = 0; S->ent_ev = 0; S->ent_phase = 0; S->ent_bits += 10;
+                scpy(S->note, "YOU LOST THE INSPECTOR! +10 BITS", 72); S->note_t = 2.4f; sfx(11);
+            } else {
+                // the chase has a sound: a low pulse that keeps
+                // missing the beat, and something far off screaming
+                // about it (Daniel, Nov 6: scary music)
+                S->ent_mt -= dt;
+                if (S->ent_mt<=0){
+                    S->ent_mt = 0.21f;
+                    static const int CHN[8] = { 38, 38, 39, 38, 38, 41, 39, 36 };
+                    int cn = CHN[S->ent_mstep & 7]; S->ent_mstep++;
+                    qnote(0, 3, cn, 68, 2); qnote(0, 3, cn-12, 42, 3);
+                    if ((S->ent_mstep & 7)==5) qnote(0.03f, 3, 87, 24, 0);
+                }
+                // floor fires: his rooms, his rules — step wide
+                for (int i=0;i<S->ent_fn;i++){
+                    float fdx=b->x-S->ent_fx[i], fdy=b->y-S->ent_fy[i];
+                    if (fdx*fdx+fdy*fdy < 17*17 && S->ent_grace<=0){
+                        ent_bonk(pi, 0.12f, 0);
+                        scpy(S->note, "FIRE ON THE FLOOR! STEP WIDE!", 72); S->note_t = 2.0f;
+                    }
+                }
+                if (S->ent_istun>0) S->ent_istun -= dt;
+                else {
+                    // he comes THROUGH the doorways (Daniel, Nov 6):
+                    // in another room, he makes for the door tile
+                    // between you first. His position lives in the
+                    // world, never in a room setup, so crossing a
+                    // threshold no longer vanishes and re-forms him —
+                    // he walks through, in plain sight. A smidge
+                    // faster than the buddy (1.10x), and quicker
+                    // still while he is a room behind (1.18x more),
+                    // so the pressure never lets up. Run.
+                    float tx2 = b->x, ty2 = b->y;
+                    int ik = ent_room_of(S->ent_ix), bk2 = ent_room_of(b->x);
+                    if (ik < bk2){ tx2 = ent_room_x0(ik) + (ENT_STRIDE-1)*BW_TILE + 24; ty2 = ent_doory(b, ik); }
+                    else if (ik > bk2){ tx2 = ent_room_x0(ik) + 24; ty2 = ent_doory(b, ik-1); }
+                    float isp = BUD_SPD[b->species%BUDN] * 1.10f;
+                    if (ik!=bk2) isp *= 1.18f;
+                    float dx=tx2-S->ent_ix, dy=ty2-S->ent_iy; float dl=fsqrt(dx*dx+dy*dy);
+                    if (dl>1){
+                        float nx = S->ent_ix + dx/dl*isp*dt, ny = S->ent_iy + dy/dl*isp*dt;
+                        if (!ent_solid_insp(pi, nx, S->ent_iy)) S->ent_ix = nx;
+                        if (!ent_solid_insp(pi, S->ent_ix, ny)) S->ent_iy = ny;
+                    }
+                    float cx=b->x-S->ent_ix, cy=b->y-S->ent_iy;
+                    if (cx*cx+cy*cy < 22*22 && S->ent_grace<=0){
+                        ent_bonk(pi, 0.40f, 20);
+                        scpy(S->note, "CAUGHT! THE INSPECTOR CONFISCATES SOME HP.", 72); S->note_t = 2.2f;
+                        int back = room-1; if (back < S->ent_chase) back = S->ent_chase;
+                        S->ent_ix = ent_room_x0(back) + BW_TILE + 14; S->ent_iy = ent_doory(b, back-1);
+                        S->ent_istun = 2.2f;
+                    }
+                }
+            }
+        }
+    }
+    else if (S->ent_ev==6){
+        // fuses first: walk over one to pocket it (the Library only —
+        // a resident Big Bug elsewhere has no fuses to guard)
+        if (room==25 && !S->ent_libdone){
+            for (int i=0;i<5;i++){
+                if (S->ent_fuse_mask>>i & 1) continue;
+                float fx = ent_room_x0(25) + ENT_FUSE_TX[i]*BW_TILE + 24, fy = ENT_FUSE_TY[i]*BW_TILE + 24;
+                float dx=b->x-fx, dy=b->y-fy;
+                if (dx*dx+dy*dy < 24*24){
+                    S->ent_fuse_mask |= 1<<i;
+                    int n=0; for (int j=0;j<5;j++) if (S->ent_fuse_mask>>j & 1) n++;
+                    if (n>=5){ S->ent_libdone = 1; scpy(S->note, "ALL 5 FUSES! THE LIBRARY DOOR CLICKS OPEN.", 72); S->note_t = 3.2f; sfx(11); }
+                    else { char *q=S->note; q=sappend(q, "FUSE "); q=sapp_int(q, n); q=sappend(q, " OF 5."); *q=0; S->note_t = 1.8f; sfx(19); }
+                }
+            }
+        }
+        // the Big Bug: blind, but it hears footsteps
+        float bdx = b->x - S->ent_bbx, bdy = b->y - S->ent_bby; float bd = fsqrt(bdx*bdx + bdy*bdy);
+        if (S->ent_bbcharge>0){
+            S->ent_bbcharge -= dt;
+            float nx = S->ent_bbx + fcos(S->ent_bbdir)*235*dt, ny = S->ent_bby + fsin(S->ent_bbdir)*235*dt;
+            if (!bw_solid_b(b, nx, S->ent_bby)) S->ent_bbx = nx;
+            if (!bw_solid_b(b, S->ent_bbx, ny)) S->ent_bby = ny;
+            if (bd < 27 && S->ent_grace<=0){
+                ent_bonk(pi, 0.40f, 0);
+                scpy(S->note, "THE BIG BUG SAT ON YOU. MOVE QUIETLY!", 72); S->note_t = 2.2f;
+                S->ent_bbcharge = 0; S->ent_noise = 0;
+            }
+        } else {
+            S->ent_t -= dt;
+            if (S->ent_t<=0){ S->ent_t = 1.3f + (float)(ent_rnd(b, room, 800 + (int)(G.anim_t*3)) % 10) * 0.13f;
+                S->ent_bbdir = (float)(ent_rnd(b, room, 810 + (int)(G.anim_t*5)) % 628) * 0.01f; }
+            float nx = S->ent_bbx + fcos(S->ent_bbdir)*27*dt, ny = S->ent_bby + fsin(S->ent_bbdir)*27*dt;
+            if (!bw_solid_b(b, nx, S->ent_bby)) S->ent_bbx = nx; else S->ent_bbdir += 1.7f;
+            if (!bw_solid_b(b, S->ent_bbx, ny)) S->ent_bby = ny; else S->ent_bbdir += 1.7f;
+            if (bd < 27 && S->ent_grace<=0){   // like Figure, it does not need to be charging to end you
+                ent_bonk(pi, 0.40f, 0);
+                scpy(S->note, "YOU BUMPED INTO THE BIG BUG. IT NOTICED.", 72); S->note_t = 2.2f;
+                S->ent_noise = 0;
+            }
+            if (moving && bd < 160) S->ent_noise += 58*dt; else S->ent_noise -= 26*dt;
+            if (S->ent_noise<0) S->ent_noise = 0;
+            if (S->ent_noise>=100){
+                S->ent_noise = 0; S->ent_bbcharge = 0.8f; S->ent_bbdir = fatan2(bdy, bdx);
+                scpy(S->note, "IT HEARD YOU!", 72); S->note_t = 1.6f; sfx(16);
+            }
+        }
+    }
+    // --- hands: swing, patch, open, search ---
+    if (in->sel && b->atk_cd<=0){
+        b->atk_cd = 0.5f;
+        int intarget = 0;
+        if ((S->ent_ev==1 || S->ent_ev==2 || S->ent_ev==7) && S->ent_phase==2){ float dx=b->x-S->ent_zx, dy=b->y-S->ent_zy; intarget = dx*dx+dy*dy < 58*58; }
+        else if (S->ent_ev==5 && S->ent_phase==1){ float dx=b->x-S->ent_ix, dy=b->y-S->ent_iy; intarget = dx*dx+dy*dy < 58*58; }
+        else if (S->ent_ev==3 && S->ent_phase==2){ float dx=b->x-S->ent_tyx, dy=b->y-S->ent_tyy; intarget = dx*dx+dy*dy < 58*58; }
+        else if (S->ent_ev==6){ float dx=b->x-S->ent_bbx, dy=b->y-S->ent_bby; intarget = dx*dx+dy*dy < 58*58; }
+        if (intarget){
+            if (S->ent_sticks>0){ S->ent_sticks--; sfx(4); ent_neutralize(pi, 0); }
+            else if (b->items[3]>0){ b->items[3]--; sfx(11); ent_neutralize(pi, 1); }
+            else { scpy(S->note, "NOTHING TO SWING. FIND A STICK IN A DRAWER!", 72); S->note_t = 2.0f; sfx(16); }
+        }
+    }
+    if (in->wall && b->atk_cd<=0){
+        b->atk_cd = 0.5f;
+        if (b->items[0]>0 && b->hp < b->maxhp){ b->items[0]--; b->hp += b->maxhp*0.4f; if (b->hp>b->maxhp) b->hp=b->maxhp;
+            scpy(S->note, "PATCH NOTES. MUCH BETTER.", 72); S->note_t = 1.8f; sfx(11); }
+        else if (b->items[1]>0 && b->energy < BUD_ENERGY_MAX){ b->items[1]--; b->energy = BUD_ENERGY_MAX;
+            scpy(S->note, "ENERGY DRINK! ZOOM.", 72); S->note_t = 1.8f; sfx(11); }
+        else if (b->items[0]>0 || b->items[1]>0){ scpy(S->note, "ALL TOPPED UP ALREADY.", 72); S->note_t = 1.6f; }
+        else { scpy(S->note, "NO SUPPLIES. CHECK THE DRAWERS.", 72); S->note_t = 1.8f; sfx(16); }
+    }
+    if (in->interact){
+        float doorx = rx0 + (ENT_STRIDE-1)*BW_TILE + 24, doory = ent_doory(b, room);
+        float dx=b->x-doorx, dy=b->y-doory;
+        int upto = S->ent_sub? S->ent_door_sub : S->ent_door_upto;
+        if (dx*dx+dy*dy < 54*54 && room > upto){
+            if (!S->ent_sub && room==25 && !S->ent_libdone){ scpy(S->note, "IT NEEDS 5 FUSES BEFORE IT BUDGES. SHHH.", 72); S->note_t = 2.4f; sfx(16); return; }
+            if (ent_door_locked(pi, room)){
+                if (S->ent_key){ S->ent_key = 0; if (S->ent_sub) S->ent_door_sub = room; else S->ent_door_upto = room; scpy(S->note, "UNLOCKED!", 72); S->note_t = 1.6f; sfx(19); }
+                else { scpy(S->note, "LOCKED. THE KEY IS HIDING IN THIS ROOM.", 72); S->note_t = 2.4f; sfx(16); }
+                return;
+            }
+            if (S->ent_sub) S->ent_door_sub = room; else S->ent_door_upto = room; sfx(19); return;
+        }
+        if (!S->ent_sub && !S->ent_dupe_used && ent_dupe_room(b, room)){
+            for (int di=0; di<ent_dupe_n(b, room); di++){
+                float fx = doorx, fy = ent_dupe_ly_i(b, room, di)*BW_TILE + 24;
+                float ddx=b->x-fx, ddy=b->y-fy;
+                if (ddx*ddx+ddy*ddy < 54*54){
+                    S->ent_dupe_used = 1; S->ent_grace = 0;
+                    ent_bonk(pi, 0.12f, -20);
+                    scpy(S->note, "DUPE! THAT DOOR WAS PAINTED ON. RUDE.", 72); S->note_t = 2.6f; sfx(16);
+                    return;
+                }
+            }
+        }
+        if (room==1){
+            // the west door of room 1 (the stairs home, or B-1's
+            // stairwell) sits on its own fixed middle row (tile 8,
+            // ENT_DOOR_LY) — NOT on room 1's east door row, which
+            // wanders per room since batch C. Measuring from the east
+            // row stranded the climb in B-1 whenever the east row was
+            // off-centre (Nov 6: the buddy could press himself against
+            // the stairs forever and never come up).
+            float mdx=b->x-24, mdy=b->y-ENT_DOORY;
+            if (mdx*mdx+mdy*mdy < 54*54){
+                if (S->ent_sub){   // B-1's west door is a stairwell, not the mall
+                    S->ent_sub = 0; S->ent_key = 0;
+                    b->x = ent_room_x0(25) + (ENT_STRIDE-3)*BW_TILE + 24; b->y = (ENT_ROWS-2)*BW_TILE + 24; b->bw_x = b->x; b->bw_y = b->y;
+                    scpy(S->note, "UP THE STAIRS. THE LIBRARY AGAIN. IT MISSED YOU.", 72); S->note_t = 2.8f; sfx(12);
+                    return;
+                }
+                bw_exit(pi, 0); return;
+            }
+        }
+        if (!S->ent_sub && room==51){
+            float ex = ent_room_x0(51) + (ENT_STRIDE/2)*BW_TILE + 24, ey = (ENT_ROWS-1)*BW_TILE + 24;
+            float edx=b->x-ex, edy=b->y-ey;
+            if (edx*edx+edy*edy < 58*58){ bw_exit(pi, 0); return; }
+        }
+        if (!S->ent_sub && room==25){   // the tall bookcase, and what is behind it
+            float bx2 = ent_room_x0(25) + (ENT_STRIDE-2)*BW_TILE + 24, by2 = (ENT_ROWS-2)*BW_TILE + 24;
+            float ddx=b->x-bx2, ddy=b->y-by2;
+            if (ddx*ddx+ddy*ddy < 58*58){
+                if (!S->ent_libdone){ scpy(S->note, "A TALL BOOKCASE. IT WILL NOT BUDGE. THE ROOM FEELS UNFINISHED.", 72); S->note_t = 2.4f; sfx(16); return; }
+                S->ent_sub = 1; S->ent_door_sub = 0; S->ent_key = 0;
+                b->x = 2*BW_TILE + 24; b->y = ENT_DOORY; b->bw_x = b->x; b->bw_y = b->y;
+                scpy(S->note, "THE BOOKCASE SLIDES! A STAIRWELL. DOWN YOU GO.", 72); S->note_t = 3.2f; sfx(12);
+                return;
+            }
+        }
+        // drawers: search the room's furniture for one in reach
+        int done_int = 0;
+        for (int lyy=1; lyy<=ENT_ROWS-2 && !done_int; lyy++) for (int lxx=1; lxx<=ENT_STRIDE-2 && !done_int; lxx++){
+            int tx = (room-1)*ENT_STRIDE + lxx, ty = lyy;
+            if (ent_furn(pi, tx, ty)==6){
+                float txx = tx*BW_TILE + 24, tyy = ty*BW_TILE + 24;
+                float ddx=b->x-txx, ddy=b->y-tyy;
+                if (ddx*ddx+ddy*ddy < 50*50){ S->sleep_t = 1.4f; S->slept = 0; sfx(11); done_int = 1; }
+            } else if (ent_tile(pi, tx, ty)==4){
+                float txx = tx*BW_TILE + 24, tyy = ty*BW_TILE + 24;
+                float ddx=b->x-txx, ddy=b->y-tyy;
+                if (ddx*ddx+ddy*ddy < 48*48){
+                    done_int = 1;
+                    int lk = S->ent_sub? room+1000 : room;   // downstairs loot is its own ledger
+                    if (ent_room_looted(S, lk)){ scpy(S->note, "JUST DUST. AND A BUTTON.", 72); S->note_t = 1.6f; }
+                    else {
+                        if (S->ent_loot_n < 96) S->ent_loot_rooms[S->ent_loot_n++] = lk;
+                        int roll = (int)(ent_rnd(b, room, 600 + S->ent_loot_n) % 100);
+                        if (roll < 55){ int nb2 = 3 + (int)(ent_rnd(b, room, 610) % 6); S->ent_bits += nb2;
+                            char *q=S->note; q=sappend(q, "BITS IN THE DRAWER! +"); q=sapp_int(q, nb2); *q=0; S->note_t = 1.8f; }
+                        else if (roll < 75){ S->ent_sticks++; { char *q=S->note; q=sappend(q, "A GOOD STICK! "); q=sappend(q, lbl_fire()); q=sappend(q, " SWINGS IT."); *q=0; } S->note_t = 2.0f; }
+                        else if (roll < 88){ b->items[0]++; scpy(S->note, "PATCH NOTES IN THE DRAWER!", 72); S->note_t = 1.8f; }
+                        else if (roll < 95){ b->items[1]++; scpy(S->note, "AN ENERGY DRINK, STILL FIZZY!", 72); S->note_t = 1.8f; }
+                        else if (S->ent_lant < 2){ S->ent_lant++; scpy(S->note, "A BRIGHTER LANTERN!", 72); S->note_t = 2.0f; }
+                        else { S->ent_bits += 5; scpy(S->note, "A VERY SHINY BUTTON. +5 BITS", 72); S->note_t = 1.8f; }
+                        sfx(11);
+                    }
+                }
+            }
+        }
+        if (done_int) return;
+    }
+    // the brass key just sits there waiting to be pocketed
+    if (!S->ent_key && room > (S->ent_sub? S->ent_door_sub : S->ent_door_upto) && ent_door_locked(pi, room)){
+        float kx, ky; ent_key_pos(pi, room, &kx, &ky);
+        float dx=b->x-kx, dy=b->y-ky;
+        if (dx*dx+dy*dy < 26*26){ S->ent_key = 1; scpy(S->note, "GOT THE BRASS KEY!", 72); S->note_t = 2.0f; sfx(19); }
+    }
+    if (b->hp<=0){ b->hp = 0; b->fainted = 1; bw_exit(pi, 1); return; }
+}
+
+
+// --- ENTRANCES drawing ---
+static void ent_draw_door(int x, int y, const char *plate, int fake){
+    rect_fill(x+6, y+2, BW_TILE-12, BW_TILE-2, COL(104,72,40));
+    rect_line(x+6, y+2, BW_TILE-12, BW_TILE-2, COL(56,36,20));
+    rect_fill(x+10, y+20, BW_TILE-20, 3, COL(84,56,30));
+    disc_fill(x+BW_TILE-13, y+26, 2, COL(230,196,90));
+    rect_fill(x+13, y+6, BW_TILE-26, 11, COL(198,164,84));
+    draw_text_center(x+BW_TILE/2, y+8, plate, 1, COL(40,30,10));
+    // painted doors used to wear a red plate and a crack — a free
+    // tell. Now a dupe is drawn exactly like the real thing (Daniel,
+    // Nov 6: less obvious); only walking into it gives it away.
+    (void)fake;
+}
+static void bw_render_ent(int pi){
+    BwSim *S=&BWS[pi]; Buddy *b=&G.bud[pi];
+    G.camx=b->x; G.camy=b->y;
+    int vx=G.view_x0, vy=G.view_y0, vw2=G.view_w>0? G.view_w : VW, vh2=G.view_h>0? G.view_h : VH;
+    rect_fill(vx, vy, vw2, vh2, COL(16,12,20));
+    int tx0=bw_tileof(b->x - vw2/2 - BW_TILE), tx1=bw_tileof(b->x + vw2/2 + BW_TILE);
+    int ty0=bw_tileof(b->y - vh2/2 - BW_TILE), ty1=bw_tileof(b->y + vh2/2 + BW_TILE);
+    // tiles + floor-level dressing
+    for (int ty=ty0; ty<=ty1; ty++) for (int tx=tx0; tx<=tx1; tx++){
+        int x=SX(tx*BW_TILE), y=SY(ty*BW_TILE);
+        if (x+ BW_TILE<vx || x>vx+vw2 || y+BW_TILE<vy || y>vy+vh2) continue;
+        int t = ent_tile(pi, tx, ty);
+        int k = tx>=0? tx/ENT_STRIDE + 1 : 1, lx = tx>=0? tx%ENT_STRIDE : 0;
+        u32 h = hash2(tx, ty, (u32)b->bw_seed ^ 0x7A55u);
+        if (t==1){ if (S->ent_sub){ rect_fill(x, y, BW_TILE+1, BW_TILE+1, COL(50,50,56)); rect_fill(x, y, BW_TILE+1, 7, COL(72,72,78)); rect_fill(x, y+BW_TILE-5, BW_TILE+1, 5, COL(36,36,40)); }
+                   else { rect_fill(x, y, BW_TILE+1, BW_TILE+1, COL(47,37,54)); rect_fill(x, y, BW_TILE+1, 7, COL(68,54,72)); rect_fill(x, y+BW_TILE-5, BW_TILE+1, 5, COL(33,26,39)); }
+                   // a panel seam, wandering per tile (glow-up)
+                   rect_fill(x + 6 + (int)((h>>8)%28), y+8, 1, BW_TILE-14, S->ent_sub? COL(41,41,45) : COL(37,28,43));
+                   continue; }
+        // floor: lamplit wood, a warmer checker on landings, confetti past the end
+        { u32 base = S->ent_sub? (((tx+ty)&1)==0? COL(72,72,68) : COL(65,65,62))
+                              : (k%10==0)? (((tx+ty)&1)==0? COL(100,76,47) : COL(92,70,42))
+                              : (((tx+ty)&1)==0? COL(84,62,41) : COL(77,57,37));
+          if (!S->ent_sub && k==25) base = ((tx+ty)&1)==0? COL(80,55,45) : COL(74,50,42);
+          rect_fill(x, y, BW_TILE+1, BW_TILE+1, col_shade(base, 0.94f + (float)((h>>20)%12)*0.01f));
+          rect_fill(x, y+BW_TILE-2, BW_TILE+1, 2, COL(70,52,36));
+          // a welcome mat in front of every door (glow-up): the hotel
+          // is spooky, not rude
+          if (t==0 && !S->ent_sub){
+              int nd = ent_tile(pi, tx+1, ty)==2 || ent_tile(pi, tx-1, ty)==2 || ent_tile(pi, tx, ty+1)==2 || ent_tile(pi, tx, ty-1)==2
+                    || ent_tile(pi, tx+1, ty)==7 || ent_tile(pi, tx-1, ty)==7 || ent_tile(pi, tx, ty+1)==8 || ent_tile(pi, tx, ty-1)==8;
+              if (nd){ rect_fill(x+11, y+31, 26, 11, COL(112,44,44)); rect_line(x+11, y+31, 26, 11, COL(84,32,32)); }
+          } }
+        if (k==51){ static const u32 CONFC[4] = { COL(255,120,150), COL(120,220,255), COL(255,214,64), COL(150,255,150) };
+            for (int c2=0;c2<3;c2++){ u32 hh = hash2(tx*3+c2, ty*5-c2, 0xC04Fu); pset(x + (int)(hh%40) + 4, y + (int)((hh>>6)%40) + 4, CONFC[hh%4]); } }
+        if (t==2 || t==7 || t==8){
+            int door = (lx==ENT_STRIDE-1)? k : k-1;
+            char plate[8];
+            if (t==8) scpy(plate, S->ent_sub? "UP" : "OUT", 8);
+            else if (t==7) scpy(plate, "EXIT", 8);
+            else if (!S->ent_sub && door+1==51) scpy(plate, "EXIT", 8);
+            else if (S->ent_sub){ char *q=plate; q=sappend(q, "B"); q=sapp_int(q, door+1); *q=0; }
+            else { char *q=plate; q=sapp_int(q, door+1); *q=0; }
+            int fake = (t==2 && lx==ENT_STRIDE-1 && !S->ent_sub && ent_dupe_room(b, k) && (ty==ent_dupe_ly_i(b, k, 0) || (ent_dupe_n(b, k)>1 && ty==ent_dupe_ly_i(b, k, 1))));
+            ent_draw_door(x, y, plate, fake);
+            if (t==2 && lx==ENT_STRIDE-1 && door>=1 && ty==ent_door_ly(b, door) && !S->ent_dupe_used){
+                // the guiding moths hover at the REAL door — the hotel
+                // is a kind place, if you look
+                for (int m2=0;m2<2;m2++){ float ph = G.anim_t*2.2f + m2*2.4f;
+                    int mx2 = x + 24 + (int)(fsin(ph)*13), my2 = y + 8 + (int)(fcos(ph*1.3f)*4);
+                    disc_fill(mx2, my2, 2, COL(255,246,190)); }
+            }
+            continue;
+        }
+        if (t==3){ if (S->ent_sub){ rect_fill(x+6, y+10, BW_TILE-12, 28, COL(38,40,44)); rect_line(x+6, y+10, BW_TILE-12, 28, COL(90,94,100));
+                for (int s2=0;s2<4;s2++) rect_fill(x+9, y+14+s2*6, BW_TILE-18, 3, COL(16,17,20)); continue; }
+            int bx2 = x+24, by2 = y+26;
+            disc_fill(bx2-6, by2+3, 6, COL(44,102,42)); disc_fill(bx2+6, by2+3, 6, COL(44,102,42));
+            disc_fill(bx2, by2-2, 7, COL(52,116,48)); disc_fill(bx2-2, by2-5, 3, COL(86,150,70)); continue; }
+        if (t==4){ int looted = ent_room_looted(S, S->ent_sub? k+1000 : k);
+            rect_fill(x+7, y+12, BW_TILE-14, 24, S->ent_sub? COL(96,92,86) : COL(122,88,52)); rect_line(x+7, y+12, BW_TILE-14, 24, S->ent_sub? COL(52,50,46) : COL(70,48,26));
+            rect_fill(x+10, y+ (looted? 10 : 15), BW_TILE-20, 4, S->ent_sub? COL(70,68,64) : COL(96,66,36));
+            disc_fill(x+24, y+26, 2, COL(230,196,90)); continue; }
+        if (t==5){ if (S->ent_sub){ rect_fill(x+4, y+2, BW_TILE-8, BW_TILE-2, COL(52,54,58));
+                for (int p2=0;p2<3;p2++){ rect_fill(x+10+p2*12, y+4, 5, BW_TILE-8, COL(96,100,106)); rect_fill(x+10+p2*12, y+16, 5, 3, COL(60,62,66)); } continue; }
+            rect_fill(x+3, y+2, BW_TILE-6, BW_TILE-2, COL(96,64,40)); rect_line(x+3, y+2, BW_TILE-6, BW_TILE-2, COL(56,36,20));
+            for (int bk=0;bk<4;bk++){ u32 hh = hash2(tx*9+bk, ty*7, 0xB00Cu);
+                rect_fill(x+8+bk*9, y+8 + (int)(hh%12), 5, 16, (hh&1)? COL(150,70,60) : COL(70,110,150)); } continue; }
+        if (t==6){ bw_draw_tent(tx*BW_TILE + 24, ty*BW_TILE + 24); continue; }
+        if (t==9){ rect_fill(x+3, y+1, BW_TILE-6, BW_TILE-1, COL(74,50,30)); rect_line(x+3, y+1, BW_TILE-6, BW_TILE-1, COL(40,26,14));
+            for (int bk=0;bk<5;bk++){ u32 hh = hash2(tx*7+bk, ty*3, 0xB00Cu);
+                rect_fill(x+7+bk*7, y+6 + (int)(hh%8), 4, 18, (hh&1)? COL(150,70,60) : COL(70,110,150)); }
+            for (int bk=0;bk<5;bk++){ u32 hh = hash2(tx*11+bk, ty*5, 0xB00Du);
+                rect_fill(x+7+bk*7, y+28 + (int)(hh%6), 4, 15, (hh&1)? COL(90,130,80) : COL(160,120,60)); } continue; }
+    }
+    int room = S->ent_room;
+    // the key, waiting on its drawer
+    if (!S->ent_key && room > (S->ent_sub? S->ent_door_sub : S->ent_door_upto) && ent_door_locked(pi, room)){
+        float kx, ky; ent_key_pos(pi, room, &kx, &ky);
+        int x=SX(kx), y=SY(ky) + (int)(fsin(G.anim_t*3)*2);
+        disc_fill(x, y, 4, COL(255,214,64)); disc_fill(x, y, 2, COL(255,240,170));
+        rect_fill(x+3, y-1, 7, 2, COL(255,214,64));
+    }
+    // library fuses
+    if (room==25 && S->ent_ev==6){
+        for (int i=0;i<5;i++){
+            if (S->ent_fuse_mask>>i & 1) continue;
+            int x=SX(ent_room_x0(25) + ENT_FUSE_TX[i]*BW_TILE + 24), y=SY(ENT_FUSE_TY[i]*BW_TILE + 24);
+            disc_fill(x, y, 6, COL(60,120,60)); rect_fill(x-3, y-6, 6, 12, COL(120,255,140)); disc_fill(x, y-8, 2, COL(220,255,220));
+        }
+    }
+    // chase fires, licking at the carpet (only ever in Inspector rooms)
+    if (S->ent_ev==5){
+        for (int i=0;i<S->ent_fn;i++){
+            int x=SX(S->ent_fx[i]), y=SY(S->ent_fy[i]);
+            int fl = (int)(fsin(G.anim_t*11 + i*1.7f)*2);
+            glow_ellipse(x, y+2, 21, 13, COL(255,120,40), 44);
+            ellipse_fill(x, y+4, 13, 6, COL(110,38,14));
+            line_thick(x-6, y+5, x-1, y-9-fl, 3, COL(255,110,30));
+            line_thick(x-1, y-9-fl, x+3, y+5, 3, COL(255,110,30));
+            line_thick(x+3, y+5, x+6, y-5+fl, 3, COL(255,165,55));
+            disc_fill(x, y-1, 3, COL(255,224,130));
+        }
+    }
+    // residents, split around the buddy by depth
+    for (int pass=0; pass<2; pass++){
+        if (pass==0){
+            // (props already sit in the tile pass; entities sort by y)
+        }
+        // the Zip Bug: a hacker at full sprint, with speed lines
+        if ((S->ent_ev==1 || S->ent_ev==2 || S->ent_ev==7) && S->ent_phase==2 && ((S->ent_zy < b->y) == (pass==0))){
+            bw_draw_hacker(S->ent_zx, S->ent_zy, 3, 0, 0);
+            if (S->ent_sub && S->ent_ev==2){   // the Multibug is a crowd pretending to be one bug
+                bw_draw_hacker(S->ent_zx - S->ent_zdir*26, S->ent_zy - 15, 4, 0, 0);
+                bw_draw_hacker(S->ent_zx - S->ent_zdir*20, S->ent_zy + 13, 2, 0, 0);
+            }
+            int zx=SX(S->ent_zx), zy=SY(S->ent_zy);
+            for (int l2=1;l2<4;l2++) line_thick(zx - (int)S->ent_zdir*(14+l2*7), zy-4+l2*3, zx - (int)S->ent_zdir*(20+l2*7), zy-4+l2*3, 1, COL(220,230,240));
+        }
+        if (S->ent_ev==3 && S->ent_phase==2 && ((S->ent_tyy < b->y) == (pass==0))){
+            int x=SX(S->ent_tyx), y=SY(S->ent_tyy);
+            disc_fill(x, y, 6, COL(196,120,210));
+            glow_ellipse(x, y-2, 8, 5, COL(80,160,255), 70);
+            disc_fill(x-2, y-2, 2, COL(150,220,255)); disc_fill(x+2, y-2, 2, COL(150,220,255));
+            draw_text_center(x, y-20, "psst", 1, COL(240,220,255));
+        }
+        if (S->ent_ev==4 && ((S->ent_rvy < b->y) == (pass==0))){
+            int x=SX(S->ent_rvx), y=SY(S->ent_rvy) + (int)(fsin(G.anim_t*2)*2);
+            disc_fill(x, y, 9, COL(240,240,235)); disc_fill(x-8, y-6, 5, COL(240,240,235)); disc_fill(x+8, y-6, 5, COL(240,240,235));
+            disc_fill(x, y, 4, COL(90,170,255)); disc_fill(x-8, y-6, 3, COL(90,170,255)); disc_fill(x+8, y-6, 3, COL(90,170,255));
+            disc_fill(x, y, 3, COL(30,30,60)); disc_fill(x-8, y-6, 2, COL(30,30,60)); disc_fill(x+8, y-6, 2, COL(30,30,60));
+        }
+        if (S->ent_ev==5 && S->ent_phase==1 && ((S->ent_iy < b->y) == (pass==0))){
+            bw_draw_big_hacker(S->ent_ix, S->ent_iy, 0, 0);
+            if (S->ent_istun>0) draw_text_center(SX(S->ent_ix), SY(S->ent_iy)-40, "* * *", 1, COL(255,230,120));
+            // guiding moths light the way to the next door
+            for (int m2=0;m2<3;m2++){ float fx2 = b->x + 60 + m2*46 + fsin(G.anim_t*3 + m2)*6;
+                disc_fill(SX(fx2), SY(ent_doory(b, room)) - 14 + (int)(fsin(G.anim_t*4 + m2*2)*3), 2, COL(255,246,190)); }
+        }
+        if (S->ent_ev==6 && ((S->ent_bby < b->y) == (pass==0))){
+            bw_draw_big_hacker(S->ent_bbx, S->ent_bby, 3, 0);
+            if (S->ent_bbcharge>0) draw_text_center(SX(S->ent_bbx), SY(S->ent_bby)-40, "!!", 2, COL(255,92,80));
+        }
+        if (pass==0) draw_buddy(b);
+    }
+    ui_vignette(vx, vy, vw2, vh2);
+    // the Zip Bug warning: the lamps flicker
+    if ((S->ent_ev==1 || S->ent_ev==2) && S->ent_phase==1 && ((int)(G.anim_t*9)%2))
+        blend_rect(vx, vy, vw2, vh2, COL(255,236,170), 22);
+    // the whole hotel is dim now (Daniel, Nov 5 — darker); Typo rooms
+    // and the Library are properly DARK, landings keep their lamplight,
+    // and every lamp breathes a little — worse when something screams
+    {
+        int bx=SX(b->x), by=SY(b->y);
+        int dark = S->ent_dark || (!S->ent_sub && room==25);
+        int landing = S->ent_sub? (room%20==0) : (room%10==0);
+        float fl = 1.0f + 0.045f*fsin(G.anim_t*13.7f)*fsin(G.anim_t*7.9f+1.3f);
+        if ((S->ent_ev==1 || S->ent_ev==2 || S->ent_ev==7) && S->ent_phase==1) fl *= ((int)(G.anim_t*11)%2)? 0.70f : 1.12f;
+        int rin, amax;
+        if (landing){ rin = 148; amax = 92; }
+        else if (dark){ rin = 56; amax = 208; }
+        else if (S->ent_sub){ rin = 102; amax = 152; }
+        else { rin = 118; amax = 130; }
+        rin = (int)((rin + S->ent_lant*36) * fl); if (rin<28) rin=28;
+        int rout = rin + (dark? 74 : 96);
+        for (int cy=vy; cy<vy+vh2; cy+=16) for (int cx=vx; cx<vx+vw2; cx+=16){
+            int ddx = cx+8-bx, ddy = cy+8-by; int d = (int)fsqrt((float)(ddx*ddx + ddy*ddy));
+            int a = d<=rin? 0 : d>=rout? amax : (d-rin)*amax/(rout-rin);
+            if (a>0) blend_rect(cx, cy, 16, 16, COL(8,8,18), a);
+        }
+    }
+    // dust motes drifting through the lamplight (glow-up): slow and
+    // warm, and only inside the lamp's reach — the dark stays clean
+    { int bx=SX(b->x), by=SY(b->y);
+      for (int m2=0;m2<12;m2++){
+          u32 hh = hash2(m2*17+3, 7, 0xD057u);
+          float ph = G.anim_t*(0.11f + (float)(hh%5)*0.02f) + (float)(hh>>8);
+          int mx2 = bx + (int)(fsin(ph + (float)(hh%9))*70.0f) + (int)((hh>>4)%40) - 20;
+          int my2 = by + (int)(fcos(ph*0.8f + (float)(hh%7))*44.0f);
+          int ddx = mx2-bx, ddy = my2-by;
+          if (ddx*ddx + ddy*ddy < 110*110 && mx2>=vx && mx2<vx+vw2 && my2>=vy && my2<vy+vh2)
+              pset(mx2, my2, COL(255,236,190));
+      } }
+    // a glitch tears the picture while it tears the air
+    if (S->ent_ev==7){
+        for (int s2=0;s2<7;s2++){
+            u32 hh = hash2(s2*31, (int)(G.anim_t*24), 0x6C17u);
+            int gy = vy + (int)(hh % (vh2-14));
+            int gx = vx + (int)((hh>>7) % 40) - 20;
+            blend_rect(gx, gy, vw2, 3, (s2&1)? COL(255,40,90) : COL(60,240,255), 46 + (int)(hh>>11)%40);
+            for (int n2=0;n2<8;n2++){ u32 hn = hash2(s2*57+n2*13, (int)(G.anim_t*31), 0x57A7u);
+                pset(vx + (int)(hn % vw2), vy + (int)((hn>>8) % vh2), (hn&1)? COL(255,255,255) : COL(20,20,30)); }
+        }
+    }
+    // the buddy card + the run card
+    rect_fill(vx+8, vy+8, 168, 46, COL(20,26,20)); rect_line(vx+8, vy+8, 168, 46, COL(198,164,84));
+    { char buf[64]; char *q=buf; q=sappend(q, BUD_ELF[b->name_idx%BUD_NAMES_N]); q=sappend(q, " THE "); q=sappend(q, BUD_NAME[b->species%BUDN]); *q=0;
+      draw_text(vx+14, vy+13, buf, 1, COL(255,244,210)); }
+    { float f = b->maxhp>0? b->hp/b->maxhp : 0; if (f<0) f=0;
+      rect_fill(vx+14, vy+26, 120, 5, COL(40,30,40)); rect_fill(vx+14, vy+26, (int)(120*f), 5, f>0.35f? COL(120,230,90) : COL(255,170,60));
+      char hb[24]; char *q=hb; q=sapp_int(q, (int)b->hp); q=sappend(q, "/"); q=sapp_int(q, (int)b->maxhp); *q=0;
+      draw_text(vx+138, vy+25, hb, 1, COL(230,240,230)); }
+    { float f = b->energy/BUD_ENERGY_MAX; if (f<0) f=0;
+      rect_fill(vx+14, vy+36, 120, 4, COL(40,30,40)); rect_fill(vx+14, vy+36, (int)(120*f), 4, COL(120,200,255));
+      draw_text(vx+138, vy+35, "ENERGY", 1, COL(170,220,255)); }
+    { char buf[72]; char *q=buf; if (S->ent_sub){ q=sappend(q, "FLOOR B-"); q=sapp_int(q, room); } else { q=sappend(q, "ENTRANCE "); q=sapp_int(q, room); }
+      rect_fill(vx+vw2-158, vy+8, 150, 46, COL(20,26,20)); rect_line(vx+vw2-158, vy+8, 150, 46, COL(198,164,84));
+      draw_text(vx+vw2-150, vy+13, buf, 1, COL(255,244,210));
+      q=buf; q=sappend(q, "BITS "); q=sapp_int(q, S->ent_bits); q=sappend(q, " - STICKS "); q=sapp_int(q, S->ent_sticks); *q=0;
+      draw_text(vx+vw2-150, vy+25, buf, 1, COL(230,240,230));
+      q=buf; if (S->ent_sub){ q=sappend(q, "BEST B-"); q=sapp_int(q, b->ent_sub_best); } else { q=sappend(q, "BEST ROOM "); q=sapp_int(q, b->ent_best); }
+      if (S->ent_key) q=sappend(q, " - KEY!");
+      if (!S->ent_sub && b->ent_done>0){ q=sappend(q, " - OUT x"); q=sapp_int(q, b->ent_done); }
+      *q=0;
+      draw_text(vx+vw2-150, vy+37, buf, 1, S->ent_key? COL(255,214,64) : COL(170,200,170)); }
+    if (S->ent_ev==6){
+        int n=0; for (int j=0;j<5;j++) if (S->ent_fuse_mask>>j & 1) n++;
+        char buf[40]; char *q=buf; q=sappend(q, "FUSES "); q=sapp_int(q, n); q=sappend(q, "/5   NOISE"); *q=0;
+        draw_text(vx+14, vy+62, buf, 1, COL(255,244,210));
+        rect_fill(vx+14, vy+74, 120, 4, COL(40,30,40));
+        rect_fill(vx+14, vy+74, (int)(120 * S->ent_noise/100.0f), 4, S->ent_noise>66? COL(255,92,80) : COL(255,200,110)); }
+    // context hint — dynamic situations only; the standing controls
+    // line is gone (controls live in the Start-menu's CONTROLS panel),
+    // and the prompts name the actual key/button for the device in
+    // hand (Daniel, Nov 6)
+    { const char *hint = 0; char ehb[72];
+      float doorx = ent_room_x0(room) + (ENT_STRIDE-1)*BW_TILE + 24, doory = ent_doory(b, room);
+      float dx=b->x-doorx, dy=b->y-doory;
+      int hidden = ent_tile(pi, bw_tileof(b->x), bw_tileof(b->y))==3;
+      if (S->ent_ev==5 && S->ent_phase==1) hint = "RUN! FOLLOW THE MOTHS!";
+      else if (hidden) hint = S->ent_sub? "HIDING IN THE VENT. VERY SNEAKY." : "HIDING IN THE BUSH. VERY SNEAKY.";
+      else if (S->ent_ev==6) hint = (room==25 && !S->ent_libdone)? "STAND STILL TO BE QUIET. FUSES GLOW GREEN." : (room==25? "THE LIBRARY DOOR IS OPEN." : "IT HEARS FOOTSTEPS. STAND STILL TO BE QUIET.");
+      else if (!S->ent_sub && room==25 && (b->x-(ent_room_x0(25)+(ENT_STRIDE-2)*BW_TILE+24))*(b->x-(ent_room_x0(25)+(ENT_STRIDE-2)*BW_TILE+24)) + (b->y-((ENT_ROWS-2)*BW_TILE+24))*(b->y-((ENT_ROWS-2)*BW_TILE+24)) < 58*58)
+          hint = S->ent_libdone? key_prompt(ehb, lbl_int(), "BEHIND THE BOOKCASE...") : "A TALL BOOKCASE. IT WILL NOT BUDGE... YET.";
+      else if (ent_door_locked(pi, room) && dx*dx+dy*dy < 54*54) hint = S->ent_key? key_prompt(ehb, lbl_int(), "UNLOCK IT!") : "LOCKED - THE KEY IS IN THIS ROOM";
+      else if (dx*dx+dy*dy < 54*54 && room > (S->ent_sub? S->ent_door_sub : S->ent_door_upto)) hint = key_prompt(ehb, lbl_int(), "OPEN THE DOOR");
+      else if (!S->ent_sub && room==51) hint = "THE EXIT DOOR IS IN THE SOUTH WALL";
+      else if (room==1 && b->x < 90) hint = key_prompt(ehb, lbl_int(), S->ent_sub? "UP THE STAIRS" : "BACK TO THE MALL");
+      if (hint){ int hw2 = text_w(hint, 1);
+      rect_fill(vx + vw2/2 - hw2/2 - 6, vy + vh2-22, hw2+12, 14, COL(20,26,20));
+      draw_text_center(vx + vw2/2, vy + vh2-19, hint, 1, COL(240,248,240)); } }
+    if (S->sleep_t>0) draw_text_center(vx + vw2/2, vy + vh2/2-4, "Z Z Z", 2, COL(200,210,255));
+    bw_draw_note(pi);
+}
+
+// --- drawing -------------------------------------------------------------------
+static void bw_draw_big_hacker(float wx, float wy, int boss, int named){
+    int x=SX(wx), y=SY(wy); if (x<-70||x>clip_x1+70||y<-90||y>clip_y1+70) return;
+    int raid = boss==1, hoard = boss==3;
+    shadow_ellipse(x, y+14, 24, 5);
+    circle_fill(x, y, 21, OUTLINE); circle_fill(x, y, 19, raid? COL(44,52,92) : hoard? COL(66,52,26) : COL(30,30,38));
+    rect_fill(x-13, y-8, 26, 15, COL(16,20,30)); rect_line(x-13, y-8, 26, 15, OUTLINE);
+    glow_ellipse(x, y-3, 13, 6, COL(80,160,255), 60);   // eyes burn blue in the dark, halo and all (Daniel, Nov 5)
+    u32 eyec = raid? COL(140,220,255) : hoard? COL(255,204,80) : COL(150,220,255);
+    pset(x-6, y-3, eyec); pset(x-5, y-3, eyec);
+    pset(x+5, y-3, eyec); pset(x+6, y-3, eyec);
+    line_thick(x-12, y-16, x-16, y-24, 2, OUTLINE); circle_fill(x-16, y-25, 3, raid? COL(90,200,255) : hoard? COL(255,214,64) : COL(255,160,60));
+    line_thick(x+12, y-16, x+16, y-24, 2, OUTLINE); circle_fill(x+16, y-25, 3, raid? COL(90,200,255) : hoard? COL(255,214,64) : COL(255,160,60));
+    if (!raid && !hoard){ for (int cw=-2; cw<=2; cw++) line_thick(x+cw*5, y-19, x+cw*5, y-26, 1, COL(70,70,80)); }
+    if (hoard){ // the sack it sits on: everything it ever cached
+        circle_fill(x+21, y+9, 10, OUTLINE); circle_fill(x+21, y+9, 8, COL(122,94,52));
+        line_thick(x+18, y+1, x+24, y+1, 1, OUTLINE); pset(x+19, y+7, COL(255,224,130)); }
+    if (named) draw_text_center(x, y+22, raid? "BROKEN RAID" : hoard? "CACHE HOARDER" : "ZERO-DAY ZED", 1, COL(255,190,170));
+}
+static void bw_draw_hacker(float wx, float wy, int lvl, float lunge, int named){
+    int x=SX(wx), y=SY(wy);
+    if (x<clip_x0-40||x>clip_x1+40||y<clip_y0-50||y>clip_y1+50) return;
+    int bob = (int)(fsin(G.anim_t*3.2f + wx*0.1f)*1.0f);
+    int lx = (int)(lunge*22);
+    shadow_ellipse(x, y+11, 11, 3);
+    rect_fill(x-8+lx, y-6+bob, 16, 15, COL(38,36,48)); rect_line(x-8+lx, y-6+bob, 16, 15, OUTLINE);   // hoodie body
+    circle_fill(x+lx, y-12+bob, 8, COL(38,36,48)); circle_fill(x+lx, y-12+bob, 8, OUTLINE);
+    circle_fill(x+lx, y-12+bob, 7, COL(24,22,34));                                                     // hood
+    ellipse_fill(x+lx, y-11+bob, 5, 4, COL(16,14,24));                                                 // shadowed face
+    glow_ellipse(x+lx, y-11+bob, 8, 5, COL(80,160,255), 65);
+    disc_fill(x-2+lx, y-11+bob, 1, COL(160,225,255)); disc_fill(x+2+lx, y-11+bob, 1, COL(160,225,255)); // eyes in the dark, burning blue
+    rect_fill(x-6+lx, y+2+bob, 13, 8, COL(70,74,84)); rect_line(x-6+lx, y+2+bob, 13, 8, OUTLINE);      // laptop
+    rect_fill(x-4+lx, y+4+bob, 9, 4, COL(90,255,140));
+    if (named) draw_text_center(x, y-26+bob, bw_hacker_name(lvl), 1, COL(200,255,200));
+}
+static void bw_draw_tree(int x, int y, int pine){
+    rect_fill(x-2, y-2, 4, 9, COL(110,76,44)); rect_line(x-2, y-2, 4, 9, OUTLINE);
+    if (pine){   // the pointed kind: three stacked skirts of deep green
+        tri_fill(x-13, y-6, x, y-20, x+13, y-6, COL(30,92,40));
+        tri_fill(x-11, y-13, x, y-26, x+11, y-13, COL(36,104,44));
+        tri_fill(x-8, y-20, x, y-31, x+8, y-20, COL(48,122,52));
+        line_thick(x-13, y-6, x, y-20, 1, OUTLINE); line_thick(x, y-20, x+13, y-6, 1, OUTLINE);
+        disc_fill(x-3, y-16, 1, COL(120,205,100));
+        return;
+    }
+    circle_fill(x, y-10, 13, OUTLINE); circle_fill(x, y-10, 12, COL(36,104,44));
+    circle_fill(x-5, y-14, 7, COL(56,136,56)); circle_fill(x+4, y-7, 5, COL(56,136,56));
+    disc_fill(x-3, y-13, 2, COL(94,186,82)); disc_fill(x+3, y-15, 1, COL(120,205,100));
+}
+static void bw_draw_rock(int x, int y){
+    // a crag, not a cup: the old smooth dome on its saucer base read as
+    // a random teacup in the land (Daniel, Nov 3). Angular faces + a crack.
+    shadow_ellipse(x, y+7, 14, 3);
+    tri_fill(x-14, y+7, x-10, y-4, x+14, y+7, OUTLINE);
+    tri_fill(x-10, y-4, x-2, y-9, x+14, y+7, OUTLINE);
+    tri_fill(x-12, y+6, x-9, y-3, x-1, y+6, COL(102,110,128));
+    tri_fill(x-9, y-3, x-2, y-8, x-1, y+6, COL(126,136,156));
+    tri_fill(x-2, y-8, x+8, y-4, x+12, y+6, COL(110,118,138));
+    tri_fill(x-2, y-8, x+12, y+6, x-1, y+6, COL(96,104,122));
+    line_thick(x+1, y-6, x-1, y+1, 1, OUTLINE); line_thick(x-1, y+1, x+2, y+5, 1, OUTLINE);
+}
+static void bw_draw_tent(float wx, float wy){
+    int x=SX(wx), y=SY(wy);
+    shadow_ellipse(x, y+8, 16, 3);
+    tri_fill(x-16, y+8, x, y-14, x+16, y+8, COL(226,126,44));
+    tri_fill(x, y-14, x+16, y+8, x, y+8, COL(240,142,54));        // sunlit east face (glow-up)
+    tri_fill(x-16, y+8, x, y-14, x+16, y+8, OUTLINE);
+    tri_fill(x-5, y+8, x, y-4, x+5, y+8, COL(60,36,24));
+    line_thick(x, y-14, x, y-19, 1, OUTLINE);
+    { int wv = (int)(fsin(G.anim_t*3.1f + wx*0.05f)*1.5f);        // a little pennant, waving
+      tri_fill(x, y-19, x+7, y-17+wv, x, y-15, COL(216,52,52)); }
+    draw_text_center(x, y-28, "CAMP", 1, COL(255,240,210));
+}
+static void bw_draw_gate(void){
+    int x0=SX(0), y0=SY(-30);
+    disc_fill(x0, y0+18, 30, COL(140,190,110));
+    int px1=SX(-26), px2=SX(26), py0=SY(-58), py1=SY(-6);
+    rect_fill(px1-3, py0, 6, py1-py0, COL(196,64,44)); rect_line(px1-3, py0, 6, py1-py0, OUTLINE);
+    rect_fill(px2-3, py0, 6, py1-py0, COL(196,64,44)); rect_line(px2-3, py0, 6, py1-py0, OUTLINE);
+    rect_fill(px1-10, py0-4, (px2-px1)+20, 6, COL(196,64,44)); rect_line(px1-10, py0-4, (px2-px1)+20, 6, OUTLINE);
+    rect_fill(px1-10, py0-4, (px2-px1)+20, 2, COL(226,110,84));   // sunlit top edge (glow-up)
+    rect_fill(px1-2, py0, 1, py1-py0, COL(226,110,84));
+    rect_fill(px2-2, py0, 1, py1-py0, COL(226,110,84));
+    rect_fill(px1-6, py0+8, (px2-px1)+12, 4, COL(170,52,38));
+    draw_text_center(x0, py0-16, "BUG MALL", 1, COL(255,255,240));
+}
+static void bw_draw_objects(int pi, int pass){
+    BwSim *S = &BWS[pi];
+    Buddy *b=&G.bud[pi]; u32 seed=(u32)b->bw_seed;
+    int tx0=bw_tileof(b->x - VW/2 - BW_TILE), tx1=bw_tileof(b->x + VW/2 + BW_TILE);
+    int ty0=bw_tileof(b->y - VH/2 - BW_TILE), ty1=bw_tileof(b->y + VH/2 + BW_TILE);
+    for (int ty=ty0; ty<=ty1; ty++) for (int tx=tx0; tx<=tx1; tx++){
+        int t = bw_tile_at(tx, ty, seed); if (!t) continue;
+        if (bw_outside_world(tx*BW_TILE + BW_TILE/2, ty*BW_TILE + BW_TILE/2)) continue;   // nothing grows at sea
+        if (b->bw_mode==1 && bw_ridge_pass_zone(tx*BW_TILE + BW_TILE/2, ty*BW_TILE + BW_TILE/2)) continue;   // the pass is kept clear
+        float wy = ty*BW_TILE + BW_TILE/2;
+        if ((wy < b->y) != (pass==0)) continue;
+        int x=SX(tx*BW_TILE + BW_TILE/2), y=SY(wy);
+        if (t==1) bw_draw_tree(x, y, (int)(hash2(tx, ty, seed ^ 0x7E33u) % 3 == 0)); else bw_draw_rock(x, y);
+    }
+    int cx0=bw_cellof(b->x)-3, cy0=bw_cellof(b->y)-3;
+    for (int cx=cx0; cx<=cx0+6; cx++) for (int cy=cy0; cy<=cy0+6; cy++){
+        float ox, oy; if (bw_cell_feat(cx, cy, seed, &ox, &oy, b->bw_mode==1)!=1) continue;
+        float wx=cx*BW_CELL+ox, wy=cy*BW_CELL+oy;
+        float dx=wx-b->x, dy=wy-b->y; if (dx*dx+dy*dy > 700*700) continue;
+        if ((wy < b->y) != (pass==0)) continue;
+        bw_draw_tent(wx, wy);
+    }
+    for (int i=0;i<BW_ROAMN;i++){
+        BWHack *h=&S->roam[i];
+        if (h->cell==0 && h->x==0 && h->y==0) continue;
+        if ((h->y < b->y) != (pass==0)) continue;
+        bw_draw_hacker(h->x, h->y, h->lvl, 0, 1);
+        if (h->alert > 0.4f) draw_text_center(SX(h->x), SY(h->y)-36, "!", 2, COL(255,92,80));
+    }
+    if (b->bw_mode==1){   // the hill ridges: grassy mounds where the wall runs
+        for (int ty=ty0; ty<=ty1; ty++) for (int tx=tx0; tx<=tx1; tx++){
+            float wx = tx*BW_TILE + BW_TILE/2, wy = ty*BW_TILE + BW_TILE/2;
+            int on = 0;
+            for (int ri=0; ri<4 && !on; ri++){
+                float along; float d = bw_ridge_dist(wx, wy, BW_RIDGES[ri], &along);
+                if (d >= 30) continue;
+                float g = along - BW_RIDGES[ri][4]; if (g<0) g=-g;
+                if (g <= BW_RIDGES[ri][5] + 26) continue;   // the pass stays visibly open
+                on = 1;
+            }
+            if (!on) continue;
+            if ((wy < b->y) != (pass==0)) continue;
+            int x=SX(wx), y=SY(wy);
+            u32 hh = hash2(tx, ty, seed ^ 0x4117u);
+            int jx = (int)(hh % 13) - 6, jy = (int)((hh>>6) % 9) - 4;
+            ellipse_fill(x+jx, y+8+jy, 23, 9, COL(88,116,54));
+            ellipse_fill(x-3+jx, y+3+jy, 16, 8, COL(102,132,60));
+            ellipse_fill(x+2+jx, y-1+jy, 9, 5, COL(122,152,74));
+            disc_fill(x-6+jx, y+2+jy, 1, COL(150,178,102)); disc_fill(x+7+jx, y+5+jy, 1, COL(150,178,102));
+        }
+    }
+    // --- story props: huts, racks, the fence, and people ---------------------
+    if (b->bw_mode==1){
+        static const float HUT[3][2] = { { -2700, -1480 }, { -2500, -1480 }, { -2600, -1300 } };
+        for (int i=0;i<3;i++){
+            float wx=HUT[i][0], wy=HUT[i][1]+10;
+            if ((wy < b->y) != (pass==0)) continue;
+            int x=SX(wx), y=SY(wy); if (x<-70||x>clip_x1+70||y<-70||y>clip_y1+70) continue;
+            shadow_ellipse(x, y+12, 30, 5);
+            rect_fill(x-28, y-16, 56, 28, COL(158,116,74)); rect_line(x-28, y-16, 56, 28, OUTLINE);
+            tri_fill(x-34, y-16, x, y-38, x+34, y-16, COL(128,66,44));
+            line_thick(x-34, y-16, x, y-38, 1, OUTLINE); line_thick(x, y-38, x+34, y-16, 1, OUTLINE);
+            rect_fill(x-6, y-2, 12, 14, COL(70,44,26)); rect_line(x-6, y-2, 12, 14, OUTLINE);
+            rect_fill(x+14, y-10, 9, 9, COL(255,214,110)); rect_line(x+14, y-10, 9, 9, OUTLINE);
+        }
+        for (int gx=-2; gx<=2; gx++) for (int gy=-1; gy<=1; gy++){
+            float wx = BW_SITE_XY[1][0] + gx*92, wy = BW_SITE_XY[1][1] + gy*112 + 16;
+            { float cdx = wx-BW_SITE_XY[1][0], cdy = wy-16-BW_SITE_XY[1][1];
+              if (cdx*cdx+cdy*cdy < 105*105) continue; }
+            if ((wy < b->y) != (pass==0)) continue;
+            int x=SX(wx), y=SY(wy); if (x<-70||x>clip_x1+70||y<-70||y>clip_y1+70) continue;
+            shadow_ellipse(x, y+2, 28, 4);
+            rect_fill(x-27, y-34, 54, 36, COL(40,44,56)); rect_line(x-27, y-34, 54, 36, OUTLINE);
+            rect_fill(x-27, y-34, 54, 6, COL(58,64,78));
+            for (int d2=0; d2<4; d2++){
+                int on = (int)(G.anim_t*2 + gx*3 + gy*7 + d2*2) % 5 != 0;
+                pset(x-18 + d2*11, y-18, on? COL(96,255,150) : COL(40,80,50));
+                pset(x-18 + d2*11, y-10, COL(90,100,120));
+            }
+        }
+        // the ring around the inner aisle (south rack sealed until solved)
+        for (int k=0;k<8;k++){
+            float a = k*0.7854f;
+            float wx = BW_SITE_XY[1][0] + fcos(a)*108, wy = BW_SITE_XY[1][1] + fsin(a)*108 + 14;
+            int sealed = (k==2 && !bw_puz_done(b));
+            if (k==2 && bw_puz_done(b)){
+                if (pass==0){ int x=SX(wx), y=SY(wy);   // the open gate: a worn plate
+                    if (x>-40 && x<clip_x1+40 && y>-30 && y<clip_y1+30){ rect_fill(x-22, y-8, 44, 12, COL(96,88,60)); rect_line(x-22, y-8, 44, 12, OUTLINE); } }
+                continue;
+            }
+            if ((wy < b->y) != (pass==0)) continue;
+            int x=SX(wx), y=SY(wy); if (x<-70||x>clip_x1+70||y<-70||y>clip_y1+70) continue;
+            shadow_ellipse(x, y+2, 24, 4);
+            rect_fill(x-23, y-28, 46, 30, sealed? COL(52,40,44) : COL(40,44,56)); rect_line(x-23, y-28, 46, 30, OUTLINE);
+            if (sealed){ int on = (int)(G.anim_t*2.4f)%2==0; circle_fill(x, y-14, 3, on? COL(255,70,60) : COL(120,30,26)); }
+            else { pset(x-12, y-18, COL(96,255,150)); pset(x+2, y-18, COL(90,100,120)); pset(x+12, y-10, COL(96,255,150)); }
+        }
+        // the three terminals, wearing their colors (lit once pressed in order)
+        { int ord[3]; bw_term_order(b, ord);
+          int prog = bw_puz_prog(b);
+          for (int i=0;i<3;i++){
+              float wx=BW_TERM_XY[i][0], wy=BW_TERM_XY[i][1]+8;
+              if ((wy < b->y) != (pass==0)) continue;
+              int x=SX(wx), y=SY(wy); if (x<-40||x>clip_x1+40||y<-50||y>clip_y1+40) continue;
+              shadow_ellipse(x, y+4, 10, 3);
+              rect_fill(x-3, y-4, 6, 8, COL(90,84,80));
+              rect_fill(x-9, y-16, 18, 13, COL(30,34,44)); rect_line(x-9, y-16, 18, 13, OUTLINE);
+              int posn = ord[0]==i? 0 : ord[1]==i? 1 : 2;
+              int lit = bw_puz_done(b) || posn < prog;
+              circle_fill(x, y-10, 4, lit? BW_TERM_COL[i] : col_shade(BW_TERM_COL[i], 0.4f));
+              if (lit) pset(x, y-10, COL(255,255,255));
+          }
+          // the scratched sign by the south entrance
+          { float wx=3400, wy=-2100+8;
+            if ((wy < b->y) == (pass==0)){
+                int x=SX(wx), y=SY(wy);
+                if (x>-40 && x<clip_x1+40 && y>-50 && y<clip_y1+40){
+                    rect_fill(x-2, y-2, 4, 10, COL(90,84,80));
+                    rect_fill(x-11, y-14, 22, 13, COL(64,58,50)); rect_line(x-11, y-14, 22, 13, OUTLINE);
+                    line_thick(x-7, y-10, x+6, y-10, 1, COL(200,190,170));
+                    line_thick(x-7, y-6, x+2, y-6, 1, COL(200,190,170));
+                }
+            }
+          }
+        }
+        // Zed's fence: posts and wire all the way around
+        { float cx=BW_SITE_XY[3][0], cy=BW_SITE_XY[3][1], r=BW_SITE_XY[3][2];
+          for (int k=0;k<48;k++){
+              float a = k*0.1309f, wx = cx + fcos(a)*r, wy = cy + fsin(a)*r;
+              if ((wy < b->y) != (pass==0)) continue;
+              int x=SX(wx), y=SY(wy); if (x<-30||x>clip_x1+30||y<-40||y>clip_y1+30) continue;
+              rect_fill(x-2, y-16, 4, 20, COL(70,60,66)); rect_line(x-2, y-16, 4, 20, OUTLINE);
+              float a2 = (k+1)*0.1309f;
+              int x2=SX(cx + fcos(a2)*r), y2=SY(cy + fsin(a2)*r);
+              line_thick(x, y-13, x2, y2-13, 1, COL(150,140,150));
+              line_thick(x, y-6, x2, y2-6, 1, COL(120,112,120));
+          }
+          if (pass==1){
+              int x=SX(cx), y=SY(cy + r + 20);
+              if (x>-90 && x<clip_x1+90 && y>-30 && y<clip_y1+30)
+                  draw_text_center(x, y, "ZED'S PLACE. KNOCK IF YOU MUST.", 1, COL(255,190,150));
+          }
+        }
+        // the Overgrown Ruins: a ring of standing stones and the cache itself
+        for (int k=0;k<7;k++){
+            float a = k*0.8976f, wx = BW_SITE_XY[4][0] + fcos(a)*120, wy = BW_SITE_XY[4][1] + fsin(a)*120 + 8;
+            if ((wy < b->y) != (pass==0)) continue;
+            int x=SX(wx), y=SY(wy); if (x<-40||x>clip_x1+40||y<-60||y>clip_y1+40) continue;
+            int hh = 22 + (int)(hash2(k, 7, 99)%8);
+            shadow_ellipse(x, y+10, 10, 3);
+            rect_fill(x-5, y+10-hh, 10, hh, COL(122,126,118)); rect_line(x-5, y+10-hh, 10, hh, OUTLINE);
+            rect_fill(x-5, y+10-hh, 4, hh, COL(140,144,134));
+            pset(x-2, y+2-hh/2, COL(96,120,72)); pset(x+2, y+6-hh/2, COL(96,120,72));   // moss
+        }
+        { float wx=BW_SITE_XY[4][0], wy=BW_SITE_XY[4][1]+26;   // the sunken cache, under the Hoarder
+          if ((wy < b->y) == (pass==0)){
+              int x=SX(wx), y=SY(wy);
+              if (x>-50 && x<clip_x1+50 && y>-40 && y<clip_y1+40){
+                  int open = (b->story_bits>>22)&1;
+                  shadow_ellipse(x, y+8, 17, 4);
+                  rect_fill(x-15, y-4, 30, 13, COL(104,74,40)); rect_line(x-15, y-4, 30, 13, OUTLINE);
+                  rect_fill(x-15, y-4, 30, 4, COL(255,196,64));
+                  if (open){ rect_fill(x-15, y-12, 30, 7, COL(84,58,30)); rect_line(x-15, y-12, 30, 7, OUTLINE);
+                      pset(x-6, y+2, COL(255,224,130)); pset(x+4, y+3, COL(255,224,130)); }
+                  else { rect_fill(x-15, y-9, 30, 6, COL(122,88,48)); rect_line(x-15, y-9, 30, 6, OUTLINE); }
+              } } }
+        // Mop's lost tools, glinting where the meadow dropped them
+        for (int t2=0;t2<3;t2++){
+            if ((b->story_bits>>(24+t2))&1) continue;
+            float wx=BW_TOOL_XY[t2][0], wy=BW_TOOL_XY[t2][1];
+            if ((wy < b->y) != (pass==0)) continue;
+            int x=SX(wx), y=SY(wy); if (x<-30||x>clip_x1+30||y<-30||y>clip_y1+30) continue;
+            int bob = (int)(fsin(G.anim_t*3 + t2*2.1f)*1.5f);
+            disc_fill(x, y+bob, 4, COL(255,214,64)); disc_fill(x, y+bob, 2, COL(255,244,190));
+            line_thick(x-4, y+5+bob, x+4, y+5+bob, 1, OUTLINE);
+            if ((int)(G.anim_t*2 + t2)%3==0) pset(x+5, y-5+bob, COL(255,255,255));
+        }
+        // the big residents, at home
+        for (int bs=0; bs<3; bs++){
+            int alive = bs==0? (bw_puz_done(b) && !((b->story_bits>>16)&1)) : bs==1? !((b->story_bits>>17)&1) : !((b->story_bits>>22)&1);
+            if (!alive) continue;
+            float wx = BW_SITE_XY[bs==0? 1 : bs==1? 3 : 4][0];
+            float wy = BW_SITE_XY[bs==0? 1 : bs==1? 3 : 4][1] + 10;
+            if ((wy < b->y) != (pass==0)) continue;
+            bw_draw_big_hacker(wx, wy, bs==0? 1 : bs==1? 2 : 3, 1);
+        }
+        // help signs: a post, a board, and something scratched on it
+        for (int i=0;i<6;i++){
+            float wx=BW_HSIGN_XY[i][0], wy=BW_HSIGN_XY[i][1];
+            if ((wy < b->y) != (pass==0)) continue;
+            int x=SX(wx), y=SY(wy); if (x<-40||x>clip_x1+40||y<-50||y>clip_y1+40) continue;
+            shadow_ellipse(x, y+10, 10, 3);
+            rect_fill(x-2, y-2, 4, 12, COL(110,76,44)); rect_line(x-2, y-2, 4, 12, OUTLINE);
+            rect_fill(x-13, y-14, 26, 13, COL(196,158,102)); rect_line(x-13, y-14, 26, 13, OUTLINE);
+            line_thick(x-9, y-10, x+6, y-10, 1, COL(120,86,48)); line_thick(x-9, y-6, x+2, y-6, 1, COL(120,86,48));
+        }
+        // Bitling, the stray process, on its slow happy drift
+        { float wx, wy; bw_bitling_pos(&wx, &wy);
+          if ((wy < b->y) == (pass==0)){
+            int x=SX(wx), y=SY(wy);
+            if (x>-40 && x<clip_x1+40 && y>-50 && y<clip_y1+40){
+                int bob = (int)(fsin(G.anim_t*5.0f)*1.5f);
+                shadow_ellipse(x, y+9, 9, 3);
+                rect_fill(x-7, y-4+bob, 14, 12, COL(70,160,170)); rect_line(x-7, y-4+bob, 14, 12, OUTLINE);
+                circle_fill(x, y-8+bob, 6, COL(70,160,170)); circle_fill(x, y-8+bob, 6, OUTLINE);
+                disc_fill(x-2, y-8+bob, 1, COL(255,250,220)); disc_fill(x+2, y-8+bob, 1, COL(255,250,220));
+                line_thick(x, y-14+bob, x+4, y-19+bob, 1, OUTLINE);
+                disc_fill(x+4, y-19+bob, 2, COL(255,120,160));
+            }
+          } }
+        // people
+        static const char *NPC_NAME[3] = { "PATCHINA", "MOP", "GLITCH" };
+        for (int i=0;i<3;i++){
+            float wx=BW_NPC_XY[i][0], wy=BW_NPC_XY[i][1];
+            if ((wy < b->y) != (pass==0)) continue;
+            int x=SX(wx), y=SY(wy); if (x<-40||x>clip_x1+40||y<-60||y>clip_y1+40) continue;
+            shadow_ellipse(x, y+10, 11, 3);
+            tri_fill(x-9, y+10, x, y-12, x+9, y+10, BW_NPC_ROBE[i]);
+            line_thick(x-9, y+10, x, y-12, 1, OUTLINE); line_thick(x, y-12, x+9, y+10, 1, OUTLINE);
+            circle_fill(x, y-15, 6, OUTLINE); circle_fill(x, y-15, 5, COL(242,204,164));
+            if (i!=1){ tri_fill(x-4, y-11, x, y-4, x+4, y-11, COL(238,238,240)); }   // the beard (Mop is beardless, the scandal)
+            pset(x-2, y-16, OUTLINE); pset(x+2, y-16, OUTLINE);
+            int questy = (i==0 && (bw_qstate(b,0)==1 || (bw_qstate(b,1)==2 && bw_qstate2(b,8)==0)))
+                      || (i==1 && ((bw_qstate_x(b,4)==1 && bw_tools_found(b)>=3) || (bw_qstate_x(b,4)==2 && bw_qstate2(b,7)==0)))
+                      || (i==2 && (bw_qstate(b,2)==1 || (bw_qstate2(b,7)==1 && ((b->story_bits2>>10)&1)) || (bw_qstate2(b,6)==1 && bw_lakekills(b)>=2) || (bw_qstate(b,2)==2 && bw_qstate2(b,6)==0)));
+            if (questy) draw_text_center(x, y-34 - (int)(fsin(G.anim_t*4)*1.5f), "!", 2, COL(255,214,64));
+            draw_text_center(x, y+16, NPC_NAME[i], 1, COL(255,246,220));
+        }
+    }
+}
+// ---- minimap (Nov 3, Daniel: "desperately need a minimap in the
+// story mode." A quest compass arrow shipped alongside and was cut the
+// same day at his word — "too much of a gimme"; minimap only.)
+// The current story objective, if any: main quests first, the hermit
+// errand last; after the farm falls, Patchina hands out the funeral.
+static int bw_quest_target(Buddy *b, float *tx, float *ty){
+    if (b->bw_mode!=1 || !b->story_started) return 0;
+    if (bw_qstate(b,0)==1){ *tx=BW_NPC_XY[0][0]; *ty=BW_NPC_XY[0][1]; return 1; }
+    if (bw_qstate(b,1)==1){ *tx=BW_SITE_XY[1][0]; *ty=BW_SITE_XY[1][1]; return 1; }
+    if (bw_qstate(b,1)==2 && bw_qstate(b,3)==0){ *tx=BW_NPC_XY[0][0]; *ty=BW_NPC_XY[0][1]; return 1; }
+    if (bw_qstate_x(b,5)==1){ *tx=BW_SITE_XY[4][0]; *ty=BW_SITE_XY[4][1]; return 1; }
+    if (bw_qstate(b,3)==1){ *tx=BW_SITE_XY[3][0]; *ty=BW_SITE_XY[3][1]; return 1; }
+    if (bw_qstate_x(b,4)==1){
+        int best=-1; float bd=1e18f;
+        for (int i=0;i<3;i++){ if ((b->story_bits>>(24+i))&1) continue;
+            float dx=BW_TOOL_XY[i][0]-b->x, dy=BW_TOOL_XY[i][1]-b->y, d=dx*dx+dy*dy;
+            if (d<bd){ bd=d; best=i; } }
+        if (best>=0){ *tx=BW_TOOL_XY[best][0]; *ty=BW_TOOL_XY[best][1]; return 1; }
+        *tx=BW_NPC_XY[1][0]; *ty=BW_NPC_XY[1][1]; return 1;   // all found: back to Mop
+    }
+    if (bw_qstate2(b,7)==1){ *tx=BW_NPC_XY[2][0]; *ty=BW_NPC_XY[2][1]; return 1; }   // the parcel goes to Glitch
+    if (bw_qstate2(b,6)==1){
+        if (bw_lakekills(b)>=2){ *tx=BW_NPC_XY[2][0]; *ty=BW_NPC_XY[2][1]; }
+        else { *tx=BW_SITE_XY[2][0]; *ty=BW_SITE_XY[2][1]; }
+        return 1;
+    }
+    if (bw_qstate2(b,8)==1){ bw_bitling_pos(tx, ty); return 1; }
+    if (bw_qstate(b,2)==1){ *tx=BW_NPC_XY[2][0]; *ty=BW_NPC_XY[2][1]; return 1; }
+    if (bw_qstate2(b,9)==1){
+        int best=-1; float bd=1e18f;
+        for (int i=0;i<6;i++){ if ((b->story_bits2>>(11+i))&1) continue;
+            float dx=BW_HSIGN_XY[i][0]-b->x, dy=BW_HSIGN_XY[i][1]-b->y, d=dx*dx+dy*dy;
+            if (d<bd){ bd=d; best=i; } }
+        if (best>=0){ *tx=BW_HSIGN_XY[best][0]; *ty=BW_HSIGN_XY[best][1]; return 1; }
+    }
+    return 0;
+}
+static void bw_draw_minimap(int pi){
+    Buddy *b=&G.bud[pi];
+    int vx=G.view_x0, vy=G.view_y0, vw2=G.view_w>0? G.view_w : VW;
+    const int MW=126, MH=98;
+    int mx=vx+vw2-8-MW, my=vy+8;
+    rect_fill(mx, my, MW, MH, COL(12,16,20)); rect_line(mx, my, MW, MH, COL(198,164,84));
+    int px0=mx+7, py0=my+7, pw=MW-14, ph=MH-14;
+    // The map rides with you (Nov 4, Daniel: "you can go off the map
+    // lol"): a 3900x2580 window CENTRED on the buddy over an ocean
+    // that runs to the world's hard edge. You are always the dot in
+    // the middle; an objective beyond the window hugs its edge.
+    const float WINW=3900.0f, WINH=2580.0f;
+    float mox = b->x - WINW/2, moy = b->y - WINH/2;
+    #define BW_MMX(wx) (px0 + (int)(((wx)-mox)*(float)pw/WINW))
+    #define BW_MMY(wy) (py0 + (int)(((wy)-moy)*(float)ph/WINH))
+    rect_fill(px0, py0, pw, ph, COL(32,80,136));   // ocean, everywhere the land is not
+    { int lx0=BW_MMX(BW_WX0), ly0=BW_MMY(BW_WY0), lx1=BW_MMX(BW_WX1), ly1=BW_MMY(BW_WY1);
+      int cx0 = lx0<px0? px0 : lx0, cy0 = ly0<py0? py0 : ly0;
+      int cx1 = lx1>px0+pw? px0+pw : lx1, cy1 = ly1>py0+ph? py0+ph : ly1;
+      if (cx1>cx0 && cy1>cy0) rect_fill(cx0, cy0, cx1-cx0, cy1-cy0, COL(52,96,44)); }
+    if (b->bw_mode==1){
+        static const u32 BSC[5] = { COL(232,196,120), COL(186,192,198), COL(170,220,245), COL(255,110,90), COL(170,180,120) };
+        for (int i=0;i<5;i++){
+            float wx=BW_SITE_XY[i][0], wy=BW_SITE_XY[i][1];
+            if (wx<b->x-WINW/2 || wx>b->x+WINW/2 || wy<b->y-WINH/2 || wy>b->y+WINH/2) continue;
+            disc_fill(BW_MMX(wx), BW_MMY(wy), 3, BSC[i]);
+        }
+    } else {
+        if (0>=b->x-WINW/2 && 0<=b->x+WINW/2 && 0>=b->y-WINH/2 && 0<=b->y+WINH/2)
+            disc_fill(BW_MMX(0), BW_MMY(0), 2, COL(240,248,240));   // the gate home
+    }
+    float tx, ty;
+    if (bw_quest_target(b, &tx, &ty)){
+        int sx=BW_MMX(tx), sy=BW_MMY(ty), r = fsin(G.anim_t*4.0f)>0? 5 : 4;
+        if (sx<px0+5) sx=px0+5; if (sx>px0+pw-5) sx=px0+pw-5;
+        if (sy<py0+5) sy=py0+5; if (sy>py0+ph-5) sy=py0+ph-5;
+        tri_fill(sx-r, sy, sx, sy-r, sx+r, sy, COL(255,214,64));
+        tri_fill(sx-r, sy, sx, sy+r, sx+r, sy, COL(255,214,64));
+    }
+    { int sx=BW_MMX(b->x), sy=BW_MMY(b->y); disc_fill(sx, sy, 3, OUTLINE); disc_fill(sx, sy, 2, COL(255,244,210)); }
+    #undef BW_MMX
+    #undef BW_MMY
+}
+// Story text lives in a dialogue box now (Nov 4, Daniel: "the text just
+// shows up across the top, underneath the map even — have it be in a
+// dialogue box with better contrast at the bottom"). Every note — NPC
+// lines, quest updates, drops — used to be one bare line of pale text
+// floating over the meadow at y+66. Now: an opaque dark box with a gold
+// rim along the BOTTOM of the view, text word-wrapped to two lines,
+// drawn after the minimap so nothing ever slides underneath it. The
+// box sits exactly where the context-hint pill lives; the note wins
+// while it is up. Battle text keeps its own box in the battle render.
+static void bw_draw_note(int pi){
+    BwSim *S = &BWS[pi];
+    if (S->note_t<=0 || !S->note[0]) return;
+    int vx=G.view_x0, vy=G.view_y0, vw2=G.view_w>0? G.view_w : VW, vh2=G.view_h>0? G.view_h : VH;
+    int bw2 = vw2-16; if (bw2<120) bw2=vw2;
+    int bx = vx + (vw2-bw2)/2, by = vy + vh2 - 48, bh = 44;
+    rect_fill(bx, by, bw2, bh, COL(12,14,20)); rect_line(bx, by, bw2, bh, COL(198,164,84));
+    int maxw = bw2 - 20;
+    // word-wrap into at most two lines by measured width
+    char l1[84], l2[84]; l1[0]=0; l2[0]=0; int line=1;
+    const char *p = S->note;
+    while (*p){
+        while (*p==' ') p++;
+        if (!*p) break;
+        const char *w = p; while (*p && *p!=' ') p++;
+        int wl = (int)(p-w);
+        char word[40]; int wc = wl>38? 38 : wl; for (int i=0;i<wc;i++) word[i]=w[i]; word[wc]=0;
+        for (int attempt=0; attempt<2; attempt++){
+            char *cur = line==1? l1 : l2;
+            char trial[88]; trial[0]=0;
+            char *tp = sappend(trial, cur);
+            if (*cur) tp = sappend(tp, " ");
+            tp = sappend(tp, word); (void)tp;
+            if (text_w(trial, 1) <= maxw || !*cur){ scpy(cur, trial, 84); break; }
+            if (line==1){ line=2; continue; }
+            // both lines full: the note is longer than the box (cannot
+            // happen for the 72-char note buffer at full width)
+        }
+    }
+    if (l2[0]){ draw_text(bx+10, by+8, l1, 1, COL(255,250,235)); draw_text(bx+10, by+24, l2, 1, COL(255,250,235)); }
+    else draw_text(bx+10, by+16, l1, 1, COL(255,250,235));
+}
+
+// ===========================================================================
+// SUPER BUDDY RUN (Banzai World mode 3, Nov 5 — Daniel asked for a
+// side-scrolling platformer in the game's own clothes): run right,
+// stomp bugs, bonk mystery crates, kick shells, grab bits, and plant
+// the DEPLOY flag. Levels are generated per (seed, level); finishing
+// one unlocks the next for good (the Buddy's pd record).
+// ===========================================================================
+#define PL_TILE 24
+#define PL_ROWS 15
+#define PL_MAXW 240
+#define PL_GROUND 13
+static int plat_tile(BwSim *S, int tx, int ty){
+    if (tx<0 || ty<0 || tx>=S->plat_w || ty>=PL_ROWS) return 0;
+    return S->plat_grid[ty*PL_MAXW + tx];
+}
+static void plat_settile(BwSim *S, int tx, int ty, int v){
+    if (tx>=0 && ty>=0 && tx<S->plat_w && ty<PL_ROWS) S->plat_grid[ty*PL_MAXW + tx] = (unsigned char)v;
+}
+static int plat_solidt(int t){ return t==1 || t==2 || t==3 || t==4 || t==5 || t==6 || t==7 || t==9; }
+static int plat_solid_px(BwSim *S, float px, float py){
+    return plat_solidt(plat_tile(S, (int)(px/PL_TILE), (int)(py/PL_TILE)));
+}
+// the buddy's collision box: 16 wide, 22 tall, origin at the feet
+static int plat_box_hit(BwSim *S, float cx, float feet){
+    return plat_solid_px(S, cx-8, feet-21) || plat_solid_px(S, cx+7, feet-21)
+        || plat_solid_px(S, cx-8, feet-11) || plat_solid_px(S, cx+7, feet-11)
+        || plat_solid_px(S, cx-8, feet-1)  || plat_solid_px(S, cx+7, feet-1);
+}
+static void plat_puff(BwSim *S, float x, float y){
+    for (int i=0;i<10;i++) if (!S->plat_puff_a[i]){
+        S->plat_puff_a[i]=1; S->plat_puff_x[i]=x; S->plat_puff_y[i]=y; S->plat_puff_t[i]=0.4f; return;
+    }
+}
+static void plat_en_add(BwSim *S, int kind, float x, float y){
+    if (S->plat_en_n>=24) return;
+    PlatEn *e=&S->plat_en[S->plat_en_n++];
+    e->x=x; e->y=y; e->vx=0; e->vy=0; e->kind=kind; e->state=0; e->t=0;
+    if (kind==0) e->vx=-38; if (kind==1) e->vx=-30; if (kind==5) e->vx=44;
+}
+static void plat_load_level(int pi, int lvl){
+    BwSim *S=&BWS[pi]; Buddy *b=&G.bud[pi];
+    for (int i=0;i<PL_MAXW*PL_ROWS;i++) S->plat_grid[i]=0;
+    S->plat_lvl=lvl; S->plat_en_n=0; S->plat_cleart=0; S->plat_deadt=0; S->plat_grace=0;
+    for (int i=0;i<8;i++) S->plat_fa[i]=0;
+    int W = 110 + lvl*14; if (W>PL_MAXW-4) W=PL_MAXW-4; S->plat_w=W;
+    u32 seed = (u32)b->bw_seed ^ (0x9E37u + (u32)lvl*7919u);
+    for (int x=0;x<W;x++){ plat_settile(S, x, 13, 1); plat_settile(S, x, 14, 1); }
+    int x=10, cpdone=0;
+    while (x < W-18){
+        u32 h = hash2(x, lvl*3+1, seed);
+        int seg = (int)(hash2(x*3+1, lvl*7, seed>>3) % 6);
+        if (!cpdone && x > W/2){ cpdone=1; S->plat_cpx = x*PL_TILE; x += 6; continue; }
+        if (seg==0){            // a gap, sometimes with a floating platform
+            int gw = 2 + (int)(h%3);
+            for (int g2=0;g2<gw;g2++){ plat_settile(S, x+g2, 13, 0); plat_settile(S, x+g2, 14, 0); }
+            if (h&8){ for (int p2=0;p2<3;p2++){ plat_settile(S, x+p2, 8, 5); plat_settile(S, x+p2, 7, 10); } }
+            x += gw + 2;
+        } else if (seg==1){     // a server pipe
+            int ph = 2 + (int)(h%3);
+            for (int r=0;r<ph;r++) for (int c2=0;c2<2;c2++) plat_settile(S, x+c2, 12-r, r==ph-1? 7 : 6);
+            if (lvl>=2 && (h&16)) plat_en_add(S, 3, (x+1)*PL_TILE, (13-ph)*PL_TILE);
+            x += 4;
+        } else if (seg==2){     // a crate row: bricks and mystery crates
+            int n = 3 + (int)(h%3);
+            for (int i2=0;i2<n;i2++) plat_settile(S, x+i2, 9, (i2==n/2 || (h>>i2)&1)? 3 : 2);
+            if (h&32) for (int i2=0;i2<n;i2++) plat_settile(S, x+i2, 8, 10);
+            x += n + 3;
+        } else if (seg==3){     // stairs up (and maybe down)
+            int sh = 2 + (int)(h%3);
+            for (int s2=0;s2<sh;s2++) for (int r=0;r<=s2;r++) plat_settile(S, x+s2, 12-r, 5);
+            x += sh + 2;
+            if (h&64){ for (int s2=0;s2<sh;s2++) for (int r=0;r<sh-s2;r++) plat_settile(S, x+s2, 12-r, 5); x += sh + 1; }
+        } else if (seg==4){     // an enemy stretch, bits arcing over it
+            int ne = 1 + (int)(h%3);
+            for (int e2=0;e2<ne;e2++){
+                int kind = 0;
+                u32 eh = hash2(x+e2*7, lvl, seed^0xE11u);
+                if (lvl>=3 && eh%5==0) kind=4; else if (lvl>=2 && eh%3==0) kind=1;
+                plat_en_add(S, kind, (x+2+e2*3)*PL_TILE, kind==4? 9*PL_TILE : PL_GROUND*PL_TILE);
+            }
+            for (int b2=0;b2<4;b2++) plat_settile(S, x+1+b2, 11, 10);
+            x += 6 + ne*2;
+        } else {                // platforms with bits
+            for (int p2=0;p2<3;p2++){ plat_settile(S, x+1+p2, 9, 5); plat_settile(S, x+1+p2, 8, 10); }
+            if (h&128) for (int p2=0;p2<3;p2++){ plat_settile(S, x+3+p2, 5, 5); plat_settile(S, x+3+p2, 4, 10); }
+            x += 7;
+        }
+    }
+    // a clean runway: nothing solid overhead and no critters for the
+    // first nine tiles (the runner could spawn inside scenery —
+    // Daniel), and the same courtesy around the checkpoint post,
+    // whose ground the pit-respawn trusts
+    for (int cx2=0;cx2<9;cx2++) for (int ry=0;ry<PL_GROUND;ry++) plat_settile(S, cx2, ry, 0);
+    { int ct = (int)(S->plat_cpx/PL_TILE);
+      for (int cx2=ct-1;cx2<=ct+2;cx2++) for (int ry=0;ry<PL_GROUND;ry++) plat_settile(S, cx2, ry, 0); }
+    { int ct = S->plat_w/2;   // the runtime checkpoint target gets the same courtesy
+      for (int cx2=ct-1;cx2<=ct+2;cx2++) for (int ry=0;ry<PL_GROUND;ry++) plat_settile(S, cx2, ry, 0); }
+    for (int e2=0;e2<S->plat_en_n;e2++) if (S->plat_en[e2].x < 9*PL_TILE) S->plat_en[e2].kind=-1;
+    // the run home: a tall staircase, a hop, and the DEPLOY flag
+    int sx = W-13;
+    for (int s2=0;s2<8;s2++) for (int r=0;r<=s2;r++) plat_settile(S, sx+s2, 12-r, 5);
+    plat_settile(S, W-3, 12, 9);
+    for (int r=4;r<=11;r++) plat_settile(S, W-3, r, 8);
+    b->x = 2.5f*PL_TILE; b->y = PL_GROUND*PL_TILE;
+    S->plat_vx=0; S->plat_vy=0; S->plat_face=1; S->plat_cpx = 2.5f*PL_TILE;
+    S->plat_run_t=0; S->plat_skid=0; S->plat_land_t=0; S->plat_jumpheld=0; S->plat_dust_t=0;
+    for (int i=0;i<10;i++) S->plat_puff_a[i]=0;
+}
+static void plat_enter(int pi){
+    BwSim *S=&BWS[pi]; Buddy *b=&G.bud[pi];
+    S->plat_score=0; S->plat_bits=0; S->plat_hearts=3; S->plat_power=0; S->plat_t=0;
+    plat_load_level(pi, b->plat_done+1);
+}
+static void plat_hurt(int pi, float fromx){
+    BwSim *S=&BWS[pi]; Buddy *b=&G.bud[pi];
+    if (S->plat_grace>0 || S->plat_cleart>0 || S->plat_deadt>0) return;
+    if (S->plat_power>0){
+        S->plat_power--; S->plat_grace=2.0f; sfx(16);
+        scpy(S->note, "THE PATCH WORE OFF!", 72); S->note_t=1.8f;
+    } else {
+        S->plat_hearts--; S->plat_grace=2.0f; sfx(16);
+        if (S->plat_hearts<=0){ S->plat_deadt=1.4f; return; }
+        scpy(S->note, "OUCH! MIND THE BUGS.", 72); S->note_t=1.8f;
+    }
+    S->plat_vx = (b->x < fromx? -150 : 150); S->plat_vy = -190;
+}
+static void plat_bonk_tile(int pi, int tx, int ty){
+    BwSim *S=&BWS[pi]; Buddy *b=&G.bud[pi];
+    int t = plat_tile(S, tx, ty);
+    if (t==3){
+        plat_settile(S, tx, ty, 4); sfx(11);
+        u32 h = hash2(tx*5+1, ty*9+2, (u32)b->bw_seed ^ (u32)S->plat_lvl*131u);
+        int roll = (int)(h%100);
+        if (roll<55){ S->plat_bits += 5; S->plat_score += 250; scpy(S->note, "A BURST OF BITS! +5", 72); S->note_t=1.6f; }
+        else if (roll<82){ plat_en_add(S, 5, tx*PL_TILE+12, ty*PL_TILE); scpy(S->note, "A PATCH SHROOM! IT FIXES WHAT AILS YOU.", 72); S->note_t=2.0f; }
+        else { plat_en_add(S, 6, tx*PL_TILE+12, ty*PL_TILE); { char *q=S->note; q=sappend(q, "A HOTFIX FLOWER! "); q=sappend(q, lbl_int()); q=sappend(q, " THROWS HOTFIXES."); *q=0; } S->note_t=2.0f; }
+    } else if (t==2 && S->plat_power>=1){
+        plat_settile(S, tx, ty, 0); S->plat_score += 50; sfx(4);
+        splat(tx*PL_TILE+12, ty*PL_TILE+12, COL(150,100,60), 6, 90);
+    } else if (t==2 || t==3) sfx(5);
+}
+static void plat_update(int pi, float dt, const BwIn *in){
+    BwSim *S=&BWS[pi]; Buddy *b=&G.bud[pi];
+    if (in->exit_){ bw_exit(pi, 0); return; }
+    S->plat_t += dt;
+    if (S->plat_grace>0) S->plat_grace -= dt;
+    if (b->atk_cd>0) b->atk_cd -= dt;
+    if (S->plat_deadt>0){
+        S->plat_deadt -= dt; b->y += 130*dt;
+        if (S->plat_deadt<=0){ b->hp=0; b->fainted=1; bw_exit(pi, 1); }
+        return;
+    }
+    if (S->plat_cleart>0){
+        S->plat_cleart += dt;
+        // victory hops while the flag slides down the pole
+        float hop = ffabs(fsin(S->plat_cleart*6.2f)) * 9.0f * (1.0f - S->plat_cleart/1.9f);
+        if (hop>0) b->y = S->plat_cleary - hop;
+        if (S->plat_cleart>1.9f){
+            if (S->plat_lvl > b->plat_done){ b->plat_done = S->plat_lvl; }
+            do_save();
+            plat_load_level(pi, S->plat_lvl+1);
+            scpy(S->note, "DEPLOYED! ON TO THE NEXT LEVEL.", 72); S->note_t=2.6f;
+        }
+        return;
+    }
+    // --- the runner ---
+    b->bw_x = b->x; b->bw_y = b->y;   // keep the stored BW spot in step (dbg_bwx reads it)
+    int dir = 0;
+    if (in->keys & K_LEFT) dir -= 1;
+    if (in->keys & K_RIGHT) dir += 1;
+    // momentum (Daniel: the running felt rigid): acceleration and
+    // friction are gentler, air control is weaker than ground
+    // control, a held run builds to a faster top speed, a jump
+    // carries your speed with it — and letting go of the button
+    // early cuts the jump short. In the air, momentum just carries.
+    int grounded = S->plat_ground;
+    if (dir!=0 && grounded && dir==S->plat_face) S->plat_run_t += dt;
+    else if (grounded && dir==0) S->plat_run_t = 0;
+    else if (grounded && dir!=S->plat_face) S->plat_run_t = 0;
+    float maxs = 138.0f + 38.0f*fclamp(S->plat_run_t/0.9f, 0.0f, 1.0f);   // Daniel: the physics feel right, it was just too zippy overall
+    if (dir!=0){
+        float acc = grounded? 980.0f : 640.0f;
+        if (grounded && ((dir>0 && S->plat_vx<-120) || (dir<0 && S->plat_vx>120))){
+            acc = 2400.0f; S->plat_skid = 0.16f;   // skidding against your own momentum
+            if (S->plat_dust_t<=0){ plat_puff(S, b->x - S->plat_face*8, b->y-2); S->plat_dust_t = 0.05f; }
+        }
+        S->plat_vx += dir*acc*dt;
+        if (dir>0 && S->plat_vx>maxs){ float d2 = S->plat_vx-260*dt; S->plat_vx = d2>maxs? d2 : maxs; }
+        if (dir<0 && S->plat_vx<-maxs){ float d2 = S->plat_vx+260*dt; S->plat_vx = d2<-maxs? d2 : -maxs; }
+        S->plat_face = dir;
+    } else if (grounded){
+        float fr = 1050.0f*dt;
+        if (S->plat_vx > 0) S->plat_vx = S->plat_vx>fr? S->plat_vx-fr : 0;
+        else if (S->plat_vx < 0) S->plat_vx = S->plat_vx<-fr? S->plat_vx+fr : 0;
+    }
+    if (S->plat_skid>0) S->plat_skid -= dt;
+    if (S->plat_land_t>0) S->plat_land_t -= dt;
+    if (S->plat_dust_t>0) S->plat_dust_t -= dt;
+    if (grounded && (S->plat_vx>200 || S->plat_vx<-200) && S->plat_dust_t<=0){
+        plat_puff(S, b->x - S->plat_face*9, b->y-1); S->plat_dust_t = 0.13f;   // sprint dust
+    }
+    if (grounded && S->plat_vx!=0){ b->walk_ph += dt * (5.0f + (S->plat_vx<0? -S->plat_vx : S->plat_vx) * 0.05f); b->mv_t = 0.15f; }
+    b->aim = S->plat_face>0? 0 : PI;
+    // jumping: Space, or an up-tap (the touch stick's jump)
+    int upnow = (in->keys & K_UP)? 1:0;
+    if (in->sel || (upnow && !S->plat_up_prev)) S->plat_jbuf = 0.12f; else if (S->plat_jbuf>0) S->plat_jbuf -= dt;
+    S->plat_up_prev = upnow;
+    if (S->plat_ground) S->plat_coyote = 0.10f; else if (S->plat_coyote>0) S->plat_coyote -= dt;
+    if (S->plat_jbuf>0 && S->plat_coyote>0){
+        float sp2 = S->plat_vx<0? -S->plat_vx : S->plat_vx;
+        S->plat_vy = -560 - (sp2*0.35f>95? 95 : sp2*0.35f);
+        S->plat_jbuf = 0; S->plat_coyote = 0; S->plat_ground = 0; S->plat_jumpheld = 1; sfx(6);
+    }
+    if (S->plat_jumpheld){
+        if (S->plat_vy >= -60) S->plat_jumpheld = 0;
+        else if (!in->sel_held){ S->plat_vy = -210; S->plat_jumpheld = 0; }   // released early: a short hop
+    }
+    S->plat_vy += 1500.0f*dt;
+    if ((in->keys & K_DOWN) && !S->plat_ground) S->plat_vy += 2200.0f*dt;   // stomp-dive
+    if (S->plat_vy > 640) S->plat_vy = 640;
+    float vy_pre = S->plat_vy; int was_ground = S->plat_ground;
+    // integrate in substeps so fast falls never tunnel
+    {
+        float dx = S->plat_vx*dt, dy = S->plat_vy*dt;
+        float adx2 = dx<0? -dx:dx, ady2 = dy<0? -dy:dy;
+        int steps = (int)((adx2>ady2? adx2 : ady2)/4.0f) + 1;
+        if (steps>8) steps=8;
+        float sx = dx/steps, sy = dy/steps;
+        for (int s2=0;s2<steps;s2++){
+            b->x += sx;
+            if (plat_box_hit(S, b->x, b->y)){ b->x -= sx; if (sx!=0){ /* step back to the wall face */ int guard=0; while (!plat_box_hit(S, b->x + (sx>0? 1:-1), b->y) && guard++<8) b->x += (sx>0? 1:-1); } S->plat_vx = 0; }
+            if (b->x < 10) b->x = 10;
+            float oldy = b->y;
+            b->y += sy;
+            if (plat_box_hit(S, b->x, b->y)){
+                b->y = oldy;
+                if (sy>0){ int g2=0; while (!plat_box_hit(S, b->x, b->y+1.0f) && g2++<8) b->y += 1.0f;
+                           S->plat_ground = 1; S->plat_vy = 0; }
+                else if (sy<0){
+                    // head bonk: the tile at head-centre gets it
+                    int tx = (int)(b->x/PL_TILE), ty = (int)((b->y-23)/PL_TILE);
+                    if (!plat_solidt(plat_tile(S, tx, ty))){ tx = (int)((b->x + (S->plat_face>0? 7:-7))/PL_TILE); }
+                    plat_bonk_tile(pi, tx, ty);
+                    S->plat_vy = 0;
+                }
+                sy = 0;
+            }
+        }
+    }
+    S->plat_ground = plat_box_hit(S, b->x, b->y+1.5f)? 1:0;
+    if (S->plat_ground && S->plat_vy>0) S->plat_vy = 0;
+    if (!was_ground && S->plat_ground && vy_pre>420){
+        S->plat_land_t = 0.14f;   // a hard landing: crouch + a puff of dust
+        plat_puff(S, b->x-6, b->y-1); plat_puff(S, b->x+6, b->y-1);
+    }
+    // checkpoint + flag
+    if (b->x > S->plat_cpx + 6*PL_TILE && S->plat_cpx < (S->plat_w/2+6)*PL_TILE) S->plat_cpx = (S->plat_w/2)*PL_TILE;
+    {
+        int tx = (int)(b->x/PL_TILE);
+        for (int ty=0;ty<PL_ROWS;ty++) if (plat_tile(S, tx, ty)==8){
+            S->plat_cleart = 0.001f; S->plat_cleary = b->y; S->plat_score += 500 + S->plat_hearts*100; sfx(11);
+            scpy(S->note, "FLAG PLANTED! LEVEL CLEAR!", 72); S->note_t=2.6f;
+            break;
+        }
+    }
+    // bits underfoot
+    {
+        int tx0=(int)((b->x-8)/PL_TILE), tx1=(int)((b->x+7)/PL_TILE), ty0=(int)((b->y-22)/PL_TILE), ty1=(int)((b->y-1)/PL_TILE);
+        for (int ty=ty0;ty<=ty1;ty++) for (int tx=tx0;tx<=tx1;tx++) if (plat_tile(S, tx, ty)==10){
+            plat_settile(S, tx, ty, 0); S->plat_bits++; S->plat_score += 50; sfx(6);
+            if (S->plat_bits%25==0 && S->plat_hearts<5){ S->plat_hearts++; scpy(S->note, "25 BITS! +1 HEART", 72); S->note_t=2.0f; }
+        }
+    }
+    // hotfix fireballs
+    if (in->interact && S->plat_power>=2 && b->atk_cd<=0){
+        b->atk_cd = 0.34f;
+        for (int i=0;i<8;i++) if (!S->plat_fa[i]){
+            S->plat_fa[i]=1; S->plat_ft[i]=2.2f;
+            S->plat_fx[i]=b->x + S->plat_face*12; S->plat_fy[i]=b->y-12;
+            S->plat_fvx[i]=S->plat_face*235; S->plat_fvy[i]=40; sfx(12);
+            break;
+        }
+    }
+    for (int i=0;i<8;i++) if (S->plat_fa[i]){
+        S->plat_ft[i] -= dt; if (S->plat_ft[i]<=0){ S->plat_fa[i]=0; continue; }
+        S->plat_fvy[i] += 900*dt; if (S->plat_fvy[i]>420) S->plat_fvy[i]=420;
+        S->plat_fx[i] += S->plat_fvx[i]*dt; S->plat_fy[i] += S->plat_fvy[i]*dt;
+        if (plat_solid_px(S, S->plat_fx[i], S->plat_fy[i]+5)){
+            S->plat_fy[i] -= 2; S->plat_fvy[i] = -250;
+            if (plat_solid_px(S, S->plat_fx[i], S->plat_fy[i]-6)){ S->plat_fa[i]=0; }
+        }
+        if (plat_solid_px(S, S->plat_fx[i] + (S->plat_fvx[i]>0? 5:-5), S->plat_fy[i])) S->plat_fa[i]=0;
+        for (int e2=0;e2<S->plat_en_n && S->plat_fa[i];e2++){
+            PlatEn *e=&S->plat_en[e2];
+            if (e->kind>=5) continue;
+            float dx=S->plat_fx[i]-e->x, dy=S->plat_fy[i]-(e->y-8);
+            if (dx*dx+dy*dy < 15*15){ e->kind=-1; S->plat_fa[i]=0; S->plat_score += 100; sfx(4); splat(e->x, e->y-6, COL(255,150,60), 8, 100); }
+        }
+    }
+    // dust puffs drift up and thin out
+    for (int i=0;i<10;i++) if (S->plat_puff_a[i]){
+        S->plat_puff_t[i] -= dt; S->plat_puff_y[i] -= 13*dt;
+        if (S->plat_puff_t[i]<=0) S->plat_puff_a[i]=0;
+    }
+    // --- the critters ---
+    for (int i=0;i<S->plat_en_n;i++){
+        PlatEn *e=&S->plat_en[i];
+        if (e->kind<0) continue;
+        e->t += dt;
+        if (e->kind==3){   // the piranha bug rides its pipe
+            float ph = e->t - (int)(e->t/3.4f)*3.4f;
+            float rise = ph<0.8f? ph/0.8f : ph<1.9f? 1.0f : ph<2.7f? (2.7f-ph)/0.8f : 0.0f;
+            e->vy = rise;   // vy doubles as the rise fraction for the drawing
+            continue;
+        }
+        if (e->kind==4){   // the fly drifts and bobs
+            e->x -= 22*dt;
+            if (e->x < b->x - 700) e->kind=-1;
+            continue;
+        }
+        // walkers (and the shell, and the power-ups) get gravity
+        if (e->kind!=2 || e->state==1) e->x += e->vx*dt;
+        e->vy += 1500*dt; if (e->vy>600) e->vy=600;
+        {
+            float ny = e->y + e->vy*dt;
+            // land on the first solid under the feet
+            int txa=(int)((e->x-6)/PL_TILE), txb=(int)((e->x+6)/PL_TILE), tyy=(int)(ny/PL_TILE);
+            if (plat_solidt(plat_tile(S, txa, tyy)) || plat_solidt(plat_tile(S, txb, tyy))){
+                e->y = tyy*PL_TILE; e->vy = 0;
+            } else e->y = ny;
+            if (e->y > PL_ROWS*PL_TILE + 60){ e->kind=-1; continue; }
+            // walls turn walkers around; a sliding shell bounces off
+            if (e->vx!=0){
+                float ahead = e->x + (e->vx>0? 9:-9);
+                if (plat_solid_px(S, ahead, e->y-6)){
+                    e->vx = -e->vx;
+                    if (e->kind==2 && e->state==1) sfx(5);
+                }
+                // ledges turn walkers around too (shells and power-ups roll on)
+                if (e->kind==0 || e->kind==1){
+                    float below = e->y + 4;
+                    if (!plat_solid_px(S, ahead, below)){ e->vx = -e->vx; }
+                }
+            }
+        }
+        // contact with the runner
+        if (S->plat_cleart>0) continue;
+        float dx = b->x - e->x, dy = (b->y-11) - (e->y-8);
+        if (dx*dx > 17*17 || dy*dy > 20*20) continue;
+        if (e->kind==5 || e->kind==6){
+            S->plat_power = e->kind==5? 1 : 2; e->kind=-1; S->plat_score += 200; sfx(19);
+            if (S->plat_power==1){ scpy(S->note, "PATCHED UP! BRICKS BREAK NOW.", 72); }
+            else { char *q=S->note; q=sappend(q, "HOTFIX POWER! "); q=sappend(q, lbl_int()); q=sappend(q, " THROWS FIRE."); *q=0; }
+            S->note_t=2.0f;
+            continue;
+        }
+        if (e->kind==3){ if (e->vy>0.4f) plat_hurt(pi, e->x); continue; }
+        int stomp = S->plat_vy > 60 && (b->y - (e->y-16)) < 13;
+        if (e->kind==2 && e->state==0){
+            // a resting shell: any touch kicks it away from the runner
+            e->state=1; e->vx = (e->x >= b->x? 205 : -205); sfx(5); S->plat_grace = 0.35f;
+            if (stomp) S->plat_vy = -300;
+            continue;
+        }
+        if (stomp){
+            if (e->kind==0 || e->kind==4){ e->kind=-1; S->plat_score += 100; sfx(4); splat(e->x, e->y-8, COL(120,90,160), 7, 95); }
+            else if (e->kind==1){ e->kind=2; e->state=0; e->vx=0; sfx(4); }
+            else if (e->kind==2){ e->state=0; e->vx=0; sfx(4); }
+            S->plat_vy = -350;
+            continue;
+        }
+        if (e->kind==2 && e->state==1 && S->plat_grace<=0){ plat_hurt(pi, e->x); continue; }
+        if (e->kind==0 || e->kind==1 || e->kind==4) plat_hurt(pi, e->x);
+    }
+    // a sliding shell clears out whatever it touches
+    for (int i=0;i<S->plat_en_n;i++){
+        PlatEn *sh=&S->plat_en[i];
+        if (sh->kind!=2 || sh->state!=1) continue;
+        for (int j=0;j<S->plat_en_n;j++){
+            if (j==i) continue; PlatEn *e=&S->plat_en[j];
+            if (e->kind<0 || e->kind>=5 || e->kind==3) continue;
+            float dx=sh->x-e->x, dy=sh->y-e->y;
+            if (dx*dx<18*18 && dy*dy<18*18){ e->kind=-1; S->plat_score += 100; sfx(4); splat(e->x, e->y-8, COL(120,200,120), 7, 95); }
+        }
+    }
+    // the long drop
+    if (b->y > PL_ROWS*PL_TILE + 26){
+        S->plat_hearts--;
+        if (S->plat_hearts<=0){ S->plat_deadt=1.4f; b->y = PL_ROWS*PL_TILE; }
+        else { // back to the checkpoint — but never inside scenery:
+               // if the post's own column is blocked, scan a few
+               // columns either way for a free box (the checkpoint
+               // respawn could embed him in a rock — Daniel)
+               float rx = S->plat_cpx;
+               if (plat_box_hit(S, rx, PL_GROUND*PL_TILE - 2)){
+                   int found = 0;
+                   for (int d2=1; d2<=4 && !found; d2++){
+                       if (!plat_box_hit(S, S->plat_cpx + d2*PL_TILE, PL_GROUND*PL_TILE - 2)){ rx = S->plat_cpx + d2*PL_TILE; found = 1; }
+                       else if (!plat_box_hit(S, S->plat_cpx - d2*PL_TILE, PL_GROUND*PL_TILE - 2)){ rx = S->plat_cpx - d2*PL_TILE; found = 1; }
+                   }
+               }
+               b->x = rx; b->y = PL_GROUND*PL_TILE - 2; S->plat_vx=0; S->plat_vy=0; S->plat_grace=2.0f;
+               scpy(S->note, "DOWN A PIT! BACK TO THE CHECKPOINT.", 72); S->note_t=2.2f; sfx(16); }
+    }
+    // compact the critter list now and then
+    if (S->plat_en_n>0 && S->plat_en[0].kind<0){
+        int w=0; for (int i=0;i<S->plat_en_n;i++) if (S->plat_en[i].kind>=0) S->plat_en[w++]=S->plat_en[i];
+        S->plat_en_n=w;
+    }
+}
+static void plat_draw_enemy(PlatEn *e, int bob){
+    int x = SX(e->x), y = SY(e->y);
+    if (e->kind==0 || e->kind==1){   // crawlers: a bug with a dome (green for the shell-bug)
+        ellipse_fill(x, y-7, 10, 7, e->kind==1? COL(64,150,70) : COL(96,74,140));
+        if (e->kind==1){ rect_fill(x-10, y-9, 20, 3, COL(50,120,56)); }
+        disc_fill(x + (e->vx<0? -5:5), y-8, 2, COL(255,255,255));
+        disc_fill(x + (e->vx<0? -5:5), y-8, 1, COL(20,16,24));
+        for (int l=0;l<3;l++){ int lx2 = x-6+l*6; line_thick(lx2, y-2, lx2-2, y+ (bob&&l%2? 2:0), 1, COL(40,30,50)); }
+    } else if (e->kind==2){          // the shell, at rest or at speed
+        ellipse_fill(x, y-5, 10, 6, COL(64,150,70));
+        rect_fill(x-10, y-3, 20, 3, COL(220,230,220));
+        if (e->state==1){   // spinning: the highlights chase each other around the shell
+            int ph = ((int)(e->x*0.45f) % 4 + 4) % 4;
+            static const int SPO[4][2] = { {-5,-2}, {0,-4}, {5,-2}, {0,0} };
+            disc_fill(x+SPO[ph][0], y-5+SPO[ph][1], 2, COL(255,255,255));
+            disc_fill(x-SPO[ph][0], y-5+SPO[(ph+2)&3][1], 2, COL(210,240,210)); }
+    } else if (e->kind==3){          // the piranha bug, mid-rise
+        int top = (int)(e->y - e->vy*34);
+        if (e->vy>0.03f){
+            ellipse_fill(x, top+8, 9, 8, COL(196,64,54));
+            disc_fill(x-3, top+5, 2, COL(255,255,255)); disc_fill(x+3, top+5, 2, COL(255,255,255));
+            int chomp = (e->vy>0.85f && ((int)(e->t*10)&1))? 2 : 0;   // the teeth chomp as it tops out
+            for (int t2=0;t2<3;t2++){ rect_fill(x-5+t2*5, top+12, 3, 4+chomp, COL(255,240,220)); }
+        }
+    } else if (e->kind==4){          // the fly
+        int fy2 = y-8 + (int)(fsin(e->t*7)*3);
+        ellipse_fill(x, fy2, 8, 6, COL(150,90,60));
+        int wf = (int)(fsin(e->t*30)*3);
+        ellipse_fill(x-5, fy2-7+wf, 5, 2, COL(230,240,250));
+        ellipse_fill(x+5, fy2-7-wf, 5, 2, COL(230,240,250));
+        disc_fill(x-4, fy2-1, 2, COL(255,220,80));
+    } else if (e->kind==5){          // the patch shroom ambles by
+        rect_fill(x-3, y-7, 6, 7, COL(240,235,220));
+        ellipse_fill(x, y-8, 9, 6, COL(210,70,60));
+        rect_fill(x-1, y-12, 3, 7, COL(255,255,255)); rect_fill(x-3, y-10, 7, 3, COL(255,255,255));
+    } else if (e->kind==6){          // the hotfix flower stands its ground
+        line_thick(x, y, x, y-10, 2, COL(70,150,70));
+        for (int p2=0;p2<5;p2++){ float a = p2*1.2566f + e->t; disc_fill(x + (int)(fcos(a)*5), y-13 + (int)(fsin(a)*5), 3, COL(255,140,40)); }
+        disc_fill(x, y-13, 3, COL(255,220,90));
+    }
+}
+static void plat_render(int pi){
+    BwSim *S=&BWS[pi]; Buddy *b=&G.bud[pi];
+    int vx=G.view_x0, vy=G.view_y0, vw2=G.view_w>0? G.view_w : VW, vh2=G.view_h>0? G.view_h : VH;
+    float camx = b->x; float half = vw2/2.0f;
+    if (camx < half) camx = half;
+    if (camx > S->plat_w*PL_TILE - half) camx = S->plat_w*PL_TILE - half;
+    G.camx = camx; G.camy = 180;
+    // sky, then two layers of server skyline drifting behind
+    rect_fill(vx, vy, vw2, vh2, COL(104,178,238));
+    rect_fill(vx, vy+vh2/3, vw2, vh2/3, COL(122,190,242));   // gradient step (glow-up)
+    rect_fill(vx, vy+vh2*2/3, vw2, vh2/3, COL(140,200,245));
+    // the sun, high and pleased with itself (glow-up)
+    { int sunx = vx + vw2 - 84, suny = vy + 44;
+      glow_ellipse(sunx, suny, 34, 34, COL(255,236,160), 60);
+      disc_fill(sunx, suny, 15, COL(255,240,170)); disc_fill(sunx-4, suny-4, 6, COL(255,250,215)); }
+    // lazy clouds on the slowest parallax (glow-up)
+    { int coff = (int)(camx*0.12f + G.anim_t*3.0f);
+      for (int sx = vx - (coff % 150) - 150; sx < vx+vw2+150; sx += 150){
+          int idx = (coff + sx - vx)/150;
+          u32 hh = hash2(idx, 3, 0xC10Du);
+          int cy2 = vy + 18 + (int)(hh % 44), cs = 12 + (int)((hh>>6) % 10);
+          ellipse_fill(sx+30, cy2, cs+10, cs*2/3, COL(235,246,255));
+          ellipse_fill(sx+52, cy2-4, cs+4, cs/2, COL(245,250,255));
+          ellipse_fill(sx+12, cy2+2, cs, cs/2, COL(228,242,252));
+      } }
+    for (int layer=0; layer<2; layer++){
+        float par = layer? 0.65f : 0.35f;
+        u32 lc = layer? COL(90,120,170) : COL(120,150,195);
+        int off = (int)(camx*par) % 92;
+        for (int sx = vx - off - 92; sx < vx+vw2+92; sx += 92){
+            int wx = sx + (int)(camx*par) - vx;
+            int hh = 46 + (int)(hash2(wx/92, layer*31+7, 0x51DEu)%54) + layer*16;
+            rect_fill(sx, vy+vh2-hh-52, 54, hh, lc);
+            for (int wnd=0; wnd<4; wnd++) if ((hash2(wx/92, wnd*3+layer, 0xBEEFu)&3)==0) rect_fill(sx+8+wnd*11, vy+vh2-hh-38, 5, 7, COL(250,230,150));
+        }
+    }
+    int tx0 = (int)((camx-half)/PL_TILE)-1, tx1 = (int)((camx+half)/PL_TILE)+1;
+    if (tx0<0) tx0=0; if (tx1>=S->plat_w) tx1=S->plat_w-1;
+    for (int ty=0;ty<PL_ROWS;ty++) for (int tx=tx0;tx<=tx1;tx++){
+        int t = plat_tile(S, tx, ty); if (!t) continue;
+        int x = SX(tx*PL_TILE), y = SY(ty*PL_TILE);
+        if (t==1){
+            int above = plat_tile(S, tx, ty-1);
+            rect_fill(x, y, PL_TILE, PL_TILE, COL(122,84,50));
+            rect_fill(x, y, PL_TILE, 4, COL(140,102,62));
+            if (above!=1){ rect_fill(x, y, PL_TILE, 8, COL(84,176,84)); rect_fill(x, y+6, PL_TILE, 3, COL(64,150,66)); }
+        } else if (t==2){
+            rect_fill(x+1, y+1, PL_TILE-2, PL_TILE-2, COL(168,102,58));
+            rect_line(x+1, y+1, PL_TILE-2, PL_TILE-2, COL(110,62,34));
+            line_thick(x+2, y+11, x+PL_TILE-2, y+11, 1, COL(110,62,34));
+        } else if (t==3){
+            float pulse = 0.9f + 0.1f*fsin(S->plat_t*5 + tx);
+            rect_fill(x+1, y+1, PL_TILE-2, PL_TILE-2, col_shade(COL(238,186,54), pulse));
+            rect_line(x+1, y+1, PL_TILE-2, PL_TILE-2, COL(160,116,26));
+            disc_fill(x+12, y+12, 5, COL(255,240,180)); disc_fill(x+12, y+12, 2, COL(160,116,26));
+        } else if (t==4){
+            rect_fill(x+1, y+1, PL_TILE-2, PL_TILE-2, COL(146,110,70));
+            rect_line(x+1, y+1, PL_TILE-2, PL_TILE-2, COL(100,74,44));
+        } else if (t==5){
+            rect_fill(x, y, PL_TILE, PL_TILE, COL(128,134,142));
+            rect_fill(x, y, PL_TILE, 3, COL(160,166,174));
+            disc_fill(x+4, y+4, 1, COL(90,94,100)); disc_fill(x+PL_TILE-5, y+PL_TILE-5, 1, COL(90,94,100));
+        } else if (t==6 || t==7){
+            rect_fill(x+2, y, PL_TILE-4, PL_TILE, COL(38,148,96));
+            rect_fill(x+5, y, 4, PL_TILE, COL(70,180,120));
+            if (t==7) rect_fill(x-1, y, PL_TILE+2, 7, COL(30,128,84));
+        } else if (t==8){
+            rect_fill(x+10, y, 3, PL_TILE, COL(190,196,204));
+            if (ty==4){
+                // the flag ripples in the wind, and once the level is
+                // cleared it SLIDES down the pole (it used to teleport)
+                int slide = S->plat_cleart>0? (int)(fclamp(S->plat_cleart/0.8f, 0.0f, 1.0f)*118) : 0;
+                int flagy = y + 2 + slide;
+                for (int r=0;r<9;r++){
+                    int xo = (int)(fsin(S->plat_t*9 + r*0.85f)*2.0f);
+                    u32 fc = ((r + (int)(S->plat_t*6))%3==0)? COL(104,214,110) : COL(84,196,90);
+                    rect_fill(x+13+xo, flagy+r, 15-r, 1, fc);
+                }
+                draw_text(x-8, flagy+12, "DEPLOY", 1, COL(30,90,40)); }
+        } else if (t==9){
+            rect_fill(x, y, PL_TILE, PL_TILE, COL(110,116,124));
+            rect_fill(x, y, PL_TILE, 4, COL(150,156,164));
+        } else if (t==10){
+            int sq = (int)(fsin(S->plat_t*6 + tx*1.7f)*2.5f);
+            ellipse_fill(x+12, y+12, 5-(sq<0?-sq:sq)/2+2, 6, COL(250,205,70));
+            disc_fill(x+12, y+12, 2, COL(200,150,40));
+        }
+    }
+    // the checkpoint post
+    {
+        int x = SX(S->plat_cpx), y = SY(PL_GROUND*PL_TILE);
+        rect_fill(x, y-34, 3, 34, COL(200,204,210));
+        int passed = b->x > S->plat_cpx;
+        for (int r=0;r<7;r++) rect_fill(x+3, y-34+r, 11-r, 1, passed? COL(84,196,90) : COL(240,240,240));
+    }
+    for (int i=0;i<S->plat_en_n;i++) if (S->plat_en[i].kind>=0) plat_draw_enemy(&S->plat_en[i], (int)(S->plat_t*8)&1);
+    for (int i=0;i<8;i++) if (S->plat_fa[i]){
+        int x = SX(S->plat_fx[i]), y = SY(S->plat_fy[i]);
+        disc_fill(x, y, 5, COL(255,130,40)); disc_fill(x, y, 3, COL(255,200,80));
+    }
+    // dust puffs
+    for (int i=0;i<10;i++) if (S->plat_puff_a[i]){
+        int x = SX(S->plat_puff_x[i]), y = SY(S->plat_puff_y[i]);
+        int rr = 3 + (int)((0.4f - S->plat_puff_t[i])*16);
+        glow_ellipse(x, y, rr, rr*2/3, COL(232,220,196), (int)(S->plat_puff_t[i]/0.4f*120));
+    }
+    // a ground shadow that shrinks as he flies — reads the height at a glance
+    { int gy = -1; int tx2 = (int)(b->x/PL_TILE);
+      for (int ty2=(int)(b->y/PL_TILE); ty2<PL_ROWS; ty2++) if (plat_solidt(plat_tile(S, tx2, ty2))){ gy = ty2*PL_TILE; break; }
+      if (gy>=0){ float hgt = gy - b->y; int sr = (int)(9 - hgt/18); if (sr<3) sr=3; if (sr>9) sr=9;
+          shadow_ellipse(SX(b->x), SY(gy)+2, sr, 2); } }
+    // the runner, drawn by the shared buddy brush (feet -> centre)
+    if (!(S->plat_grace>0 && ((int)(S->plat_t*14)&1))){
+        float savey = b->y; b->y -= 12 - (S->plat_land_t>0? 2 : 0); draw_buddy(b); b->y = savey;   // a landing crouch
+        if (S->plat_power==1){ int x=SX(b->x), y=SY(b->y-12); rect_line(x-14, y-14, 28, 28, COL(250,205,70)); }
+        if (S->plat_power==2){ int x=SX(b->x), y=SY(b->y-12); rect_line(x-14, y-14, 28, 28, COL(255,130,40)); }
+    }
+    // HUD
+    rect_fill(vx, vy, vw2, 20, COL(16,20,28));
+    { char buf[96]; char *q=buf;
+      q=sappend(q, "LEVEL "); q=sapp_int(q, S->plat_lvl);
+      q=sappend(q, "   SCORE "); q=sapp_int(q, S->plat_score);
+      q=sappend(q, "   BITS "); q=sapp_int(q, S->plat_bits);
+      if (S->plat_power==1) q=sappend(q, "   PATCHED");
+      if (S->plat_power==2) q=sappend(q, "   HOTFIX!");
+      *q=0; draw_text(vx+8, vy+6, buf, 1, COL(240,244,250)); }
+    for (int hh2=0;hh2<S->plat_hearts;hh2++){
+        int hx = vx+vw2-16-hh2*16, hy = vy+10;
+        disc_fill(hx-3, hy-2, 4, COL(240,80,90)); disc_fill(hx+3, hy-2, 4, COL(240,80,90));
+        rect_fill(hx-6, hy-2, 13, 5, COL(240,80,90));
+    }
+    if (S->plat_cleart>0) draw_text_center(vx+vw2/2, vy+vh2/3, "LEVEL CLEAR!", 2, COL(255,244,180));
+    // (no standing hint line here any more — controls live in the
+    // Start-menu's CONTROLS panel; Daniel, Nov 6)
+    if (S->note_t>0){
+        rect_fill(vx, vy+vh2-22, vw2, 22, COL(14,14,20));
+        draw_text_center(vx+vw2/2, vy+vh2-15, S->note, 1, COL(255,240,200));
+    }
+}
+
+// ===========================================================================
+// BUDDY CRAFT (Banzai World mode 4, Nov 5 — Daniel asked for a
+// Minecraft-style analogue; heavily expanded the same evening):
+// a top-down, endless, procedural wild of biomes with a full
+// day/night cycle. Chop trees, mine rocks, gather fiber, bonk feral
+// bugs (worse after dark), and craft through five categories —
+// tools, weapons, building, defense, food — with tiers, upgrades
+// and prerequisites. Everything you gather, craft, BUILD and mine
+// persists on the Buddy (cm/cn/cg/cw/cd/ct): leaving no longer
+// wipes your base (Daniel's bug), and campfires really do let you
+// sleep — right through the night, if it's dark.
+// build kinds: 0 wood wall, 1 campfire, 2 stone wall, 3 fireplace,
+// 4 zapper tower, 5 spike trap, 6 torch post.
+// ===========================================================================
+static int cdiv2(int a, int b){ int q = a/b; if ((a%b)!=0 && ((a<0)!=(b<0))) q--; return q; }
+static u32 craft_seed(Buddy *b){ return (u32)b->bw_seed ^ 0xC4A7u; }
+static float craft_noise(int tx, int ty, u32 seed){
+    int cs = 9;
+    int cx = cdiv2(tx, cs), cy = cdiv2(ty, cs);
+    float fx = (tx - cx*cs)/(float)cs, fy = (ty - cy*cs)/(float)cs;
+    float sx = fx*fx*(3-2*fx), sy = fy*fy*(3-2*fy);
+    float v00 = hash_f(cx, cy, seed), v10 = hash_f(cx+1, cy, seed);
+    float v01 = hash_f(cx, cy+1, seed), v11 = hash_f(cx+1, cy+1, seed);
+    return (v00*(1-sx) + v10*sx)*(1-sy) + (v01*(1-sx) + v11*sx)*sy;
+}
+// biomes: 0 plains, 1 forest, 2 desert, 3 snow, 4 swamp, 5 water
+static int craft_biome_at(Buddy *b, int tx, int ty){
+    if (tx>=-3 && tx<=3 && ty>=-3 && ty<=4) return 0;   // the spawn clearing is always plains
+    u32 sd = craft_seed(b);
+    if (craft_noise(tx, ty, sd ^ 0x11AAu) > 0.60f) return 5;
+    float t = craft_noise(tx, ty, sd ^ 0x22BBu), m = craft_noise(tx, ty, sd ^ 0x33CCu);
+    if (t < 0.30f) return 3;
+    if (t > 0.68f && m < 0.46f) return 2;
+    if (m > 0.66f) return 4;
+    if (m > 0.50f) return 1;
+    return 0;
+}
+static int craft_key(int tx, int ty){ return ((tx+2048)<<12) + (ty+2048); }
+static int craft_gone_has(Buddy *b, int key){
+    for (int i=0;i<b->craft_gn;i++) if (b->craft_gone[i]==key) return 1;
+    return 0;
+}
+// nodes: 0 none, 1 tree, 2 rock, 3 cactus, 4 fiber tuft
+static int craft_node_at(int pi, int tx, int ty){
+    Buddy *b=&G.bud[pi];
+    if (craft_gone_has(b, craft_key(tx, ty))) return 0;
+    int biome = craft_biome_at(b, tx, ty);
+    if (biome==5) return 0;
+    if (tx>=-2 && tx<=2 && ty>=-2 && ty<=3) return 0;   // keep the spawn clearing clear
+    int roll = (int)(hash2(tx, ty, craft_seed(b) ^ 0xB10Cu) % 1000);
+    switch (biome){
+        case 1: return roll<240? 1 : roll<270? 2 : roll<350? 4 : 0;
+        case 2: return roll<90? 3 : roll<170? 2 : 0;
+        case 3: return roll<150? 1 : roll<220? 2 : 0;
+        case 4: return roll<120? 1 : roll<260? 4 : roll<280? 2 : 0;
+        default: return roll<60? 1 : roll<180? 4 : roll<200? 2 : 0;
+    }
+}
+static int craft_build_at(Buddy *b, int tx, int ty){
+    for (int i=0;i<b->craft_bn;i++) if (b->craft_btx[i]==tx && b->craft_bty[i]==ty) return i;
+    return -1;
+}
+static int craft_build_kind_count(Buddy *b, int kind){
+    int n=0; for (int i=0;i<b->craft_bn;i++) if (b->craft_bk[i]==kind) n++;
+    return n;
+}
+static int craft_buildhp_max(int kind){ return kind==0? 30 : kind==2? 90 : kind==4? 60 : kind==7? 40 : kind==9? 25 : kind==10? 170 : 9999; }
+static void craft_build_remove(Buddy *b, int idx){
+    if (idx<0 || idx>=b->craft_bn) return;
+    b->craft_bn--;
+    for (int j=idx;j<b->craft_bn;j++){
+        b->craft_btx[j]=b->craft_btx[j+1]; b->craft_bty[j]=b->craft_bty[j+1];
+        b->craft_bk[j]=b->craft_bk[j+1]; b->craft_bhp[j]=b->craft_bhp[j+1];
+    }
+}
+// solidity: water drowns everyone without a raft; trees, rocks,
+// cacti and the sturdy builds block. for_buddy honours the raft.
+static int craft_solid_at(int pi, float x, float y, int for_buddy){
+    Buddy *b=&G.bud[pi];
+    int tx = bw_tileof(x), ty = bw_tileof(y);
+    if (craft_biome_at(b, tx, ty)==5){
+        int dbi = craft_build_at(b, tx, ty);
+        if (dbi>=0 && b->craft_bk[dbi]==7) return for_buddy? 0 : 1;   // a dock: the buddy walks it, bugs don't
+        if (for_buddy && (b->craft_gear&512)) return 0;
+        return 1;
+    }
+    int nd = craft_node_at(pi, tx, ty);
+    if (nd==1 || nd==2 || nd==3) return 1;
+    int bi = craft_build_at(b, tx, ty);
+    if (bi>=0){ int k=b->craft_bk[bi]; if (k==0 || k==2 || k==4 || k==10) return 1; }
+    return 0;
+}
+// hard for bolts: nodes and sturdy builds, water is fine to cross
+static int craft_hard_at(int pi, float x, float y){
+    Buddy *b=&G.bud[pi];
+    int tx = bw_tileof(x), ty = bw_tileof(y);
+    int nd = craft_node_at(pi, tx, ty);
+    if (nd==1 || nd==2 || nd==3) return 1;
+    int bi = craft_build_at(b, tx, ty);
+    if (bi>=0){ int k=b->craft_bk[bi]; if (k==0 || k==2 || k==4) return 1; }
+    return 0;
+}
+// the day/night cycle: 240s — dawn [225..15], day, dusk [140..170],
+// night [170..225]. darkness 0..1 drives spawns, light and peril.
+static float craft_darkf(Buddy *b){
+    float t = b->craft_tod;
+    if (t<15) return 1.0f - t/15.0f;
+    if (t<140) return 0;
+    if (t<170) return (t-140)/30.0f;
+    if (t<225) return 1.0f;
+    return 1.0f - (t-225)/15.0f;
+}
+static int craft_isnight(Buddy *b){ return craft_darkf(b) > 0.55f; }
+// the nearest lit fire (campfire or fireplace) within r of (x, y)
+static int craft_fire_near(Buddy *b, float x, float y, float r, float *fx, float *fy){
+    for (int i=0;i<b->craft_bn;i++){
+        if (b->craft_bk[i]!=1 && b->craft_bk[i]!=3) continue;
+        float cx2 = b->craft_btx[i]*BW_TILE+24, cy2 = b->craft_bty[i]*BW_TILE+24;
+        float dx=x-cx2, dy=y-cy2;
+        if (dx*dx+dy*dy < r*r){ if (fx) *fx=cx2; if (fy) *fy=cy2; return 1; }
+    }
+    return 0;
+}
+static void craft_enter(int pi){
+    BwSim *S=&BWS[pi]; Buddy *b=&G.bud[pi];
+    if (b->craft_x==0 && b->craft_y==0){ b->x = 0; b->y = 56; }
+    else { b->x = b->craft_x; b->y = b->craft_y; }
+    if (b->craft_tod<=0) b->craft_tod = 40;   // first trip starts in the morning
+    S->craft_menu=0; S->craft_sel=0; S->craft_cat=0; S->craft_scroll=0; S->craft_biome=-1; S->craft_hitn=0;
+    S->craft_bugn=0; S->craft_grace=0; S->craft_bt=2.0f; S->craft_demolish=0;
+    S->craft_swarm_t=70; S->craft_cache_t=40; S->craft_cache_on=0; S->craft_haste=0;
+    S->craft_darkp=craft_darkf(b); S->craft_beam_t=0; S->craft_prevk=0;
+    for (int i=0;i<4;i++) S->craft_bolt_a[i]=0;
+    for (int i=0;i<48;i++) S->craft_tz[i]=0;
+    S->craft_shn=0; S->craft_sh_t=3.0f; S->craft_bmr_a=0; S->craft_nap=0;
+}
+static const char *CRAFT_BIOME_NAME[6] = { "THE GREEN REACHES", "THE DEEPWOOD", "THE SUNBAKED STACKS", "THE FROZEN REACHES", "THE MURK", "THE WIDE WATER" };
+// ---------------------------------------------------------------------------
+// the recipe book: five categories, tiers with prerequisites.
+// build >= 0 deploys that build kind; build -2 bakes a pie, -3 cooks
+// a stew. bit is the gear flag set on craft (or the "built it once"
+// flag for buildings); req is the gear flag you must already hold.
+// ---------------------------------------------------------------------------
+typedef struct { const char *name; int cat, w, s, f, c, bit, req, build; } CRec;
+static const CRec CREC[31] = {
+    { "WOODEN AXE",       0, 3,0,0,0, 1,      0,    -1 },   // 0
+    { "STONE PICK",       0, 3,3,0,0, 2,      0,    -1 },   // 1
+    { "STONE AXE",        0, 2,4,0,0, 16,     1,    -1 },   // 2
+    { "CARAPACE PICK",    0, 0,2,0,4, 32,     2,    -1 },   // 3
+    { "RAFT",             0, 5,0,3,0, 512,    2048, -1 },   // 4
+    { "LANTERN",          0, 1,0,2,0, 8192,   0,    -1 },   // 5: a light of your own, all night
+    { "FISHING ROD",      0, 3,0,2,0, 16384,  0,    -1 },   // 6
+    { "SAIL RAFT",        0, 4,0,4,0, 262144, 512,  -1 },   // 7: the raft, faster — sharks permitting
+    { "CARAPACE SWORD",   1, 2,0,0,4, 4,      0,    -1 },   // 8
+    { "CARAPACE SPEAR",   1, 3,0,0,6, 64,     4,    -1 },   // 9
+    { "HOTFIX ZAPPER",    1, 0,4,2,4, 128,    32,   -1 },   // 10
+    { "BOOMERANG",        1, 3,0,2,0, 32768,  0,    -1 },   // 11: it comes back. They don't.
+    { "STORM ZAPPER",     1, 0,2,0,5, 65536,  128,  -1 },   // 12: bolts pierce, and fly faster
+    { "FIBER ARMOR",      1, 0,0,6,0, 8,      0,    -1 },   // 13
+    { "REINFORCED ARMOR", 1, 0,0,4,4, 256,    8,    -1 },   // 14
+    { "SHELL PLATE",      1, 0,0,2,8, 131072, 256,  -1 },   // 15
+    { "WOODEN WALL",      2, 4,0,0,0, 1024,   0,    0 },    // 16
+    { "STONE WALL",       2, 0,6,0,0, 4096,   2,    2 },    // 17
+    { "CAMPFIRE",         2, 5,2,0,0, 2048,   0,    1 },    // 18
+    { "FIREPLACE",        2, 4,6,0,0, 0,      2048, 3 },    // 19
+    { "TORCH POST",       2, 2,0,1,0, 0,      0,    6 },    // 20
+    { "DOCK",             2, 5,0,0,0, 0,      0,    7 },    // 21: the one build that WANTS the water
+    { "BEDROLL",          2, 1,0,4,0, 0,      0,    8 },    // 22: a nap anywhere — the wild watches
+    { "REINFORCED WALL",  2, 3,3,0,0, 0,      2,    10 },   // 23
+    { "LANTERN POST",     2, 0,2,2,0, 0,      0,    11 },   // 24
+    { "SPIKE TRAP",       3, 0,2,2,0, 0,      0,    5 },    // 25
+    { "ZAPPER TOWER",     3, 0,6,0,3, 0,      4096, 4 },    // 26
+    { "SCARECROW",        3, 3,0,3,0, 0,      0,    9 },    // 27: bugs bite IT first
+    { "HEART PIE",        4, 0,0,2,1, 0,      0,    -2 },   // 28
+    { "CARAPACE STEW",    4, 0,0,2,2, 0,      0,    -3 },   // 29
+    { "COOKED FISH",      4, 0,0,0,0, 0,      2048, -5 },   // 30: eats a caught fish, needs a fire first
+};
+#define CREC_N 31
+static const char *CRAFT_CAT_NAME[5] = { "TOOLS", "WEAPONS", "BUILDING", "DEFENSE", "FOOD" };
+static const char *craft_reqname(int req){
+    switch (req){
+        case 1: return "WOODEN AXE"; case 2: return "STONE PICK";
+        case 4: return "CARAPACE SWORD"; case 8: return "FIBER ARMOR";
+        case 32: return "CARAPACE PICK"; case 1024: return "BUILD A WOODEN WALL";
+        case 128: return "HOTFIX ZAPPER"; case 256: return "REINFORCED ARMOR";
+        case 512: return "THE RAFT";
+        case 2048: return "BUILD A CAMPFIRE"; case 4096: return "BUILD A STONE WALL";
+        default: return "MORE CRAFTING";
+    }
+}
+// menu rows for a category: 100 eat pie, 101 eat stew, 102 demolish,
+// 103 eat a lake fish
+static int craft_rows(Buddy *b, int cat, int *ids){
+    int n=0;
+    if (cat==4){ if (b->craft_fish>0) ids[n++]=103; if (b->craft_pies>0) ids[n++]=100; if (b->craft_stews>0) ids[n++]=101; }
+    for (int i=0;i<CREC_N;i++) if (CREC[i].cat==cat) ids[n++]=i;
+    if (cat==2) ids[n++]=102;
+    return n;
+}
+// THE LIST: every category as a segment of ONE long list — a segment
+// header is encoded -(cat+1), anything else is a craft_rows id. There
+// are no tabs any more: a sloppy diagonal on the pad can only scroll,
+// it can never flip you into another list (Daniel's daughter, Nov 6).
+static int craft_all_rows(Buddy *b, int *rows){
+    int n=0;
+    for (int c=0;c<5;c++){
+        int ids[16]; int m = craft_rows(b, c, ids);
+        if (!m) continue;
+        rows[n++] = -(c+1);
+        for (int i=0;i<m;i++) rows[n++]=ids[i];
+    }
+    return n;
+}
+// move the selection one CRAFTABLE row in a direction, skipping the
+// segment headers, wrapping around the ends of the list
+static int craft_step(const int *rows, int n, int from, int dir){
+    int i=from;
+    for (int t=0;t<n;t++){ i+=dir; if (i>=n) i=0; if (i<0) i=n-1; if (rows[i]>=0) return i; }
+    return from;
+}
+static int craft_row_cat(int id){
+    if (id>=100) return id==102? 2 : 4;
+    return CREC[id].cat;
+}
+static int craft_afford(Buddy *b, const CRec *R){
+    return b->craft_wood>=R->w && b->craft_stone>=R->s && b->craft_fiber>=R->f && b->craft_car>=R->c;
+}
+static void craft_spend(Buddy *b, const CRec *R){
+    b->craft_wood-=R->w; b->craft_stone-=R->s; b->craft_fiber-=R->f; b->craft_car-=R->c;
+}
+static void craft_note(BwSim *S, const char *t){ scpy(S->note, t, 72); S->note_t=2.0f; }
+static void craft_do(int pi, int id){
+    BwSim *S=&BWS[pi]; Buddy *b=&G.bud[pi];
+    if (id==100){   // eat a heart pie
+        b->craft_pies--; b->hp += b->maxhp*0.5f; if (b->hp>b->maxhp) b->hp=b->maxhp;
+        craft_note(S, "HEART PIE. WARM AND BUTTERY. +50% HP"); sfx(11); do_save(); return;
+    }
+    if (id==101){   // eat a carapace stew
+        b->craft_stews--; b->hp += b->maxhp*0.5f; if (b->hp>b->maxhp) b->hp=b->maxhp;
+        S->craft_haste = 25.0f;
+        craft_note(S, "CARAPACE STEW. WARM, AND SWIFT FOR A WHILE."); sfx(11); do_save(); return;
+    }
+    if (id==103){   // eat a lake fish, straight from the line
+        b->craft_fish--; b->hp += b->maxhp*0.35f; if (b->hp>b->maxhp) b->hp=b->maxhp;
+        craft_note(S, "DOWN THE HATCH. +35% HP. SLIGHTLY FISHY."); sfx(11); do_save(); return;
+    }
+    if (id==102){   // demolish mode: the next interacts take builds apart
+        S->craft_demolish = 12.0f; S->craft_menu = 0;
+        { char *q=S->note; q=sappend(q, "DEMOLISH ARMED - "); q=sappend(q, lbl_int()); q=sappend(q, " REMOVES A BUILD. HALF BACK."); *q=0; }
+        S->note_t=2.4f; sfx(6); return;
+    }
+    const CRec *R = &CREC[id];
+    if (R->req && !(b->craft_gear & R->req)){
+        { char *q=S->note; q=sappend(q, "YOU NEED THE "); q=sappend(q, craft_reqname(R->req)); q=sappend(q, " FIRST."); *q=0; }
+        S->note_t=1.8f; sfx(16); return;
+    }
+    if (!craft_afford(b, R)){ craft_note(S, "NOT ENOUGH MATERIALS. GO GATHER."); S->note_t=1.8f; sfx(16); return; }
+    if (R->build==-5){   // cooked fish: eats a caught fish, right now, by the fire
+        if (b->craft_fish<1){ craft_note(S, "NO FISH TO COOK. THE WATER PROVIDES."); S->note_t=1.8f; sfx(16); return; }
+        b->craft_fish--; b->hp += b->maxhp*0.6f; if (b->hp>b->maxhp) b->hp=b->maxhp;
+        craft_note(S, "COOKED FISH. CRISP EDGES, WARM MIDDLE. +60% HP"); sfx(11); do_save(); return;
+    }
+    if (R->build==-2 || R->build==-3){   // food, into the pack
+        if (R->build==-2 && b->craft_pies>=99){ craft_note(S, "YOUR PACK IS FULL OF PIES."); sfx(16); return; }
+        if (R->build==-3 && b->craft_stews>=99){ craft_note(S, "YOUR PACK IS FULL OF STEWS."); sfx(16); return; }
+        craft_spend(b, R);
+        if (R->build==-2){ b->craft_pies++; craft_note(S, "A HEART PIE, BAKED AND BAGGED."); }
+        else { b->craft_stews++; craft_note(S, "A CARAPACE STEW, SEALED AND STEAMING."); }
+        sfx(11); do_save(); return;
+    }
+    if (R->build<0){   // gear: one of each, forever
+        if (b->craft_gear & R->bit){ craft_note(S, "YOU ALREADY CRAFTED THAT."); S->note_t=1.6f; sfx(16); return; }
+        craft_spend(b, R);
+        b->craft_gear |= R->bit;
+        { char *q=S->note; q=sappend(q, "CRAFTED: "); q=sappend(q, R->name); q=sappend(q, "!"); *q=0; }
+        S->note_t=2.0f; sfx(11); do_save(); return;
+    }
+    // a build: fires plant at your feet, everything else on the tile ahead
+    int kind = R->build;
+    int tx, ty;
+    if (kind==1 || kind==3){ tx = bw_tileof(b->x); ty = bw_tileof(b->y); }
+    else { tx = bw_tileof(b->x + fcos(b->aim)*BW_TILE); ty = bw_tileof(b->y + fsin(b->aim)*BW_TILE); }
+    if (craft_build_at(b, tx, ty)>=0){ craft_note(S, "SOMETHING ALREADY STANDS THERE."); S->note_t=1.8f; sfx(16); return; }
+    if (kind==7){   // the dock is the exception: it belongs ON the water
+        if (craft_biome_at(b, tx, ty)!=5){ craft_note(S, "A DOCK NEEDS WATER."); S->note_t=1.8f; sfx(16); return; }
+    }
+    else if (craft_biome_at(b, tx, ty)==5){ craft_note(S, "NOT IN THE WATER."); S->note_t=1.8f; sfx(16); return; }
+    if (kind!=1 && kind!=3 && kind!=7){
+        if (craft_node_at(pi, tx, ty)){ craft_note(S, "NO ROOM THERE. CLEAR IT FIRST."); S->note_t=1.8f; sfx(16); return; }
+        // never entomb the builder: the tile must clear his own body
+        float cxp = b->x < tx*BW_TILE? tx*BW_TILE : b->x > tx*BW_TILE+BW_TILE? tx*BW_TILE+BW_TILE : b->x;
+        float cyp = b->y < ty*BW_TILE? ty*BW_TILE : b->y > ty*BW_TILE+BW_TILE? ty*BW_TILE+BW_TILE : b->y;
+        float dx=b->x-cxp, dy=b->y-cyp;
+        if (dx*dx+dy*dy < 23*23){ craft_note(S, "TOO CLOSE - STEP BACK A LITTLE."); S->note_t=1.8f; sfx(16); return; }
+    }
+    if (b->craft_bn>=48){ craft_note(S, "THAT IS ENOUGH BUILDING FOR ANYONE."); S->note_t=1.8f; sfx(16); return; }
+    if (kind==4 && craft_build_kind_count(b, 4)>=3){ craft_note(S, "THREE TOWERS HUM ALREADY."); S->note_t=1.8f; sfx(16); return; }
+    if (kind==5 && craft_build_kind_count(b, 5)>=8){ craft_note(S, "ENOUGH SPIKES FOR ONE WILD."); S->note_t=1.8f; sfx(16); return; }
+    if (kind==6 && craft_build_kind_count(b, 6)>=8){ craft_note(S, "ENOUGH TORCHES FOR ONE WILD."); S->note_t=1.8f; sfx(16); return; }
+    if ((kind==1 || kind==3) && craft_build_kind_count(b, 1)+craft_build_kind_count(b, 3)>=6){ craft_note(S, "ENOUGH FIRES FOR ONE WILD."); S->note_t=1.8f; sfx(16); return; }
+    if (kind==7 && craft_build_kind_count(b, 7)>=10){ craft_note(S, "ENOUGH DOCKS FOR ONE WILD."); S->note_t=1.8f; sfx(16); return; }
+    if (kind==8 && craft_build_kind_count(b, 8)>=4){ craft_note(S, "ENOUGH BEDROLLS FOR ONE WILD."); S->note_t=1.8f; sfx(16); return; }
+    if (kind==9 && craft_build_kind_count(b, 9)>=3){ craft_note(S, "THREE SCARECROWS ARE WATCHING ALREADY."); S->note_t=1.8f; sfx(16); return; }
+    if (kind==11 && craft_build_kind_count(b, 11)>=8){ craft_note(S, "ENOUGH LANTERNS FOR ONE WILD."); S->note_t=1.8f; sfx(16); return; }
+    craft_spend(b, R);
+    b->craft_btx[b->craft_bn]=tx; b->craft_bty[b->craft_bn]=ty;
+    b->craft_bk[b->craft_bn]=kind; b->craft_bhp[b->craft_bn]=craft_buildhp_max(kind);
+    b->craft_bn++;
+    if (R->bit) b->craft_gear |= R->bit;
+    if (kind==0) craft_note(S, "A WOODEN WALL! STURDY ENOUGH.");
+    else if (kind==2) craft_note(S, "A STONE WALL. TRY CHEWING THAT.");
+    else if (kind==1){ char *q=S->note; q=sappend(q, "A CAMPFIRE! STAND CLOSE AND REST WITH "); q=sappend(q, lbl_int()); q=sappend(q, "."); *q=0; S->note_t=2.2f; }
+    else if (kind==3) craft_note(S, "A FIREPLACE. THE HEART OF A HOME.");
+    else if (kind==4) craft_note(S, "A ZAPPER TOWER! IT GUARDS THIS GROUND.");
+    else if (kind==5) craft_note(S, "SPIKES SET. MIND YOUR OWN FEET.");
+    else if (kind==7) craft_note(S, "A DOCK! THE WATER IS A FLOOR NOW. MOSTLY.");
+    else if (kind==8){ char *q=S->note; q=sappend(q, "A BEDROLL. REST WITH "); q=sappend(q, lbl_int()); q=sappend(q, " - A NAP, NOT A SLEEP."); *q=0; S->note_t=2.2f; }
+    else if (kind==9) craft_note(S, "A SCARECROW. BUGS BITE IT FIRST. USUALLY.");
+    else if (kind==10) craft_note(S, "A REINFORCED WALL. COME AND CHEW. WE DARE YOU.");
+    else if (kind==11) craft_note(S, "A LANTERN POST. THE DARK BACKS UP.");
+    else craft_note(S, "A TORCH POST. A LITTLE SUN, ON A STICK.");
+    sfx(19); do_save();
+}
+static void craft_hit_node(int pi, int tx, int ty){
+    BwSim *S=&BWS[pi]; Buddy *b=&G.bud[pi];
+    int nd = craft_node_at(pi, tx, ty);
+    if (!nd) return;
+    int key = craft_key(tx, ty);
+    int tool = 0;   // 0 hands, else the gear bit of the best tool for this node
+    if (nd==1) tool = (b->craft_gear&16)? 16 : (b->craft_gear&1)? 1 : 0;
+    else if (nd==2) tool = (b->craft_gear&32)? 32 : (b->craft_gear&2)? 2 : 0;
+    else if (nd==3 && ((b->craft_gear&16) || (b->craft_gear&32))) tool = 1;
+    int base = nd==1? 3 : nd==2? 4 : nd==3? 2 : 1;
+    if (tool) base = 1;
+    int idx=-1;
+    for (int i=0;i<S->craft_hitn;i++) if (S->craft_hk[i]==key) idx=i;
+    int left = idx>=0? S->craft_hv[idx] : base;
+    left--;
+    sfx(4);
+    splat(tx*BW_TILE+24, ty*BW_TILE+24, nd==1? COL(90,160,80) : nd==2? COL(150,150,155) : nd==3? COL(110,180,90) : COL(200,220,120), 4, 70);
+    if (left>0){
+        if (idx<0 && S->craft_hitn<24){ S->craft_hk[S->craft_hitn]=key; S->craft_hv[S->craft_hitn]=left; S->craft_hitn++; }
+        else if (idx>=0) S->craft_hv[idx]=left;
+        return;
+    }
+    if (idx>=0){ S->craft_hitn--; S->craft_hk[idx]=S->craft_hk[S->craft_hitn]; S->craft_hv[idx]=S->craft_hv[S->craft_hitn]; }
+    if (b->craft_gn<96) b->craft_gone[b->craft_gn++]=key;
+    int yw=0, ys=0, yf=0;
+    if (nd==1){ yw = (b->craft_gear&16)? 5 : (b->craft_gear&1)? 4 : 3; }
+    if (nd==2){ ys = (b->craft_gear&32)? 5 : (b->craft_gear&2)? 4 : 3; }
+    if (nd==3) yf = 2;
+    if (nd==4) yf = 1;
+    b->craft_wood += yw; if (b->craft_wood>999) b->craft_wood=999;
+    b->craft_stone += ys; if (b->craft_stone>999) b->craft_stone=999;
+    b->craft_fiber += yf; if (b->craft_fiber>999) b->craft_fiber=999;
+    { char *q=S->note;
+      if (yw){ q=sappend(q, "+"); q=sapp_int(q, yw); q=sappend(q, " WOOD"); }
+      else if (ys){ q=sappend(q, "+"); q=sapp_int(q, ys); q=sappend(q, " STONE"); }
+      else { q=sappend(q, "+"); q=sapp_int(q, yf); q=sappend(q, " FIBER"); }
+      *q=0; S->note_t=1.4f; }
+    sfx(11);
+    do_save();   // a felled tree is progress; keep it
+}
+static void craft_loot_cache(int pi){
+    BwSim *S=&BWS[pi]; Buddy *b=&G.bud[pi];
+    S->craft_cache_on=0; S->craft_cache_t=55;
+    u32 h = hash2((int)(b->x), (int)(G.anim_t*10), craft_seed(b));
+    int m1 = (int)(h%4), a1 = 2 + (int)((h>>4)%3);
+    int m2 = (int)((h>>8)%4), a2 = 1 + (int)((h>>12)%3);
+    int gain[4] = {0,0,0,0}; gain[m1]+=a1; gain[m2]+=a2;
+    b->craft_wood += gain[0]; b->craft_stone += gain[1]; b->craft_fiber += gain[2]; b->craft_car += gain[3];
+    if (b->craft_wood>999) b->craft_wood=999; if (b->craft_stone>999) b->craft_stone=999;
+    if (b->craft_fiber>999) b->craft_fiber=999; if (b->craft_car>999) b->craft_car=999;
+    static const char *MN[4] = { "WOOD", "STONE", "FIBER", "CARAPACE" };
+    { char *q=S->note; int first=1;
+      for (int i=0;i<4;i++) if (gain[i]){ if (!first) q=sappend(q, " +"); else q=sappend(q, "+");
+          q=sapp_int(q, gain[i]); q=sappend(q, " "); q=sappend(q, MN[i]); first=0; }
+      q=sappend(q, " - A SUPPLY CACHE!"); *q=0; S->note_t=2.2f; }
+    sfx(11); do_save();
+}
+static void craft_demolish_at(int pi){
+    BwSim *S=&BWS[pi]; Buddy *b=&G.bud[pi];
+    int txs[2] = { bw_tileof(b->x + fcos(b->aim)*BW_TILE), bw_tileof(b->x) };
+    int tys[2] = { bw_tileof(b->y + fsin(b->aim)*BW_TILE), bw_tileof(b->y) };
+    static const int KIND2REC[12] = { 16, 18, 17, 19, 26, 25, 20, 21, 22, 27, 23, 24 };
+    for (int t=0;t<2;t++){
+        int bi = craft_build_at(b, txs[t], tys[t]);
+        if (bi<0) continue;
+        const CRec *R = &CREC[KIND2REC[b->craft_bk[bi]%12]];
+        int rw=R->w/2, rs=R->s/2, rf=R->f/2, rc=R->c/2;
+        b->craft_wood+=rw; b->craft_stone+=rs; b->craft_fiber+=rf; b->craft_car+=rc;
+        splat(txs[t]*BW_TILE+24, tys[t]*BW_TILE+24, COL(170,140,90), 8, 90);
+        craft_build_remove(b, bi);
+        { char *q=S->note; q=sappend(q, "DEMOLISHED.");
+          if (rw){ q=sappend(q, " +"); q=sapp_int(q, rw); q=sappend(q, "W"); }
+          if (rs){ q=sappend(q, " +"); q=sapp_int(q, rs); q=sappend(q, "S"); }
+          if (rf){ q=sappend(q, " +"); q=sapp_int(q, rf); q=sappend(q, "F"); }
+          if (rc){ q=sappend(q, " +"); q=sapp_int(q, rc); q=sappend(q, "C"); }
+          q=sappend(q, " BACK."); *q=0; S->note_t=2.0f; }
+        S->craft_demolish=0; sfx(4); do_save(); return;
+    }
+    craft_note(S, "NOTHING TO DEMOLISH THERE."); S->note_t=1.4f; sfx(16);
+}
+static void craft_bug_die(int pi, int i){
+    BwSim *S=&BWS[pi]; Buddy *b=&G.bud[pi];
+    int kind = S->craft_bk[i];
+    splat(S->craft_bx[i], S->craft_by[i], kind==2? COL(250,205,80) : COL(150,80,70), 6, 90);
+    if (kind==2){
+        b->craft_car += 5; if (b->craft_car>999) b->craft_car=999;
+        b->craft_fiber += 3; if (b->craft_fiber>999) b->craft_fiber=999;
+        craft_note(S, "A GOLDEN BUG! +5 CARAPACE +3 FIBER");
+    } else {
+        int gain = kind==1? 2 + (int)(hash2(i*7+1, (int)(b->x), craft_seed(b))%2)
+                           : 1 + (int)(hash2(i*7+1, (int)(b->x), craft_seed(b))%2);
+        b->craft_car += gain; if (b->craft_car>999) b->craft_car=999;
+        { char *q=S->note; q=sappend(q, "+"); q=sapp_int(q, gain); q=sappend(q, " CARAPACE"); *q=0; S->note_t=1.4f; }
+    }
+    S->craft_bhp[i]=0;
+    sfx(11);
+}
+static void craft_spawn_bug(int pi, float ang, float dist, int force_kind){
+    BwSim *S=&BWS[pi]; Buddy *b=&G.bud[pi];
+    if (S->craft_bugn>=14) return;
+    float nx = b->x + fcos(ang)*dist, ny = b->y + fsin(ang)*dist;
+    if (craft_solid_at(pi, nx, ny, 0)) return;
+    int i=S->craft_bugn++;
+    int kind = force_kind;
+    if (kind<0){
+        u32 h = hash2((int)(nx*3), (int)(ny*3) + (int)(G.anim_t*7), craft_seed(b));
+        int r = (int)(h%100);
+        kind = r<4? 2 : (craft_isnight(b) && r<44)? 1 : 0;
+    }
+    S->craft_bx[i]=nx; S->craft_by[i]=ny; S->craft_bk[i]=kind;
+    S->craft_bhp[i] = kind==1? 4 : kind==2? 1 : 2;
+    S->craft_bph[i] = hash_f(i*13, (int)(nx), craft_seed(b))*6.28f;
+    S->craft_btr[i]=0;
+}
+static int craft_bedroll_near(Buddy *b){
+    for (int i=0;i<b->craft_bn;i++){
+        if (b->craft_bk[i]!=8) continue;
+        float dx=b->x-(b->craft_btx[i]*BW_TILE+24), dy=b->y-(b->craft_bty[i]*BW_TILE+24);
+        if (dx*dx+dy*dy < 70*70) return 1;
+    }
+    return 0;
+}
+static void craft_fish_at(int pi){
+    BwSim *S=&BWS[pi]; Buddy *b=&G.bud[pi];
+    float r = hash_f((int)(b->x/24), (int)(b->y/24) + (int)(G.anim_t*7), craft_seed(b));
+    sfx(12);
+    splat(b->x + fcos(b->aim)*34, b->y + fsin(b->aim)*34, COL(170,220,255), 4, 60);
+    if (r < 0.45f){ b->craft_fish++; craft_note(S, "CAUGHT A LAKE FISH!"); }
+    else if (r < 0.70f){ b->craft_fiber++; craft_note(S, "SOGGY FIBER. THE LAKE PROVIDES. SORT OF."); }
+    else if (r < 0.85f){ b->craft_car++; craft_note(S, "A SNAPPING TURTLE-BUG! +1 CARAPACE."); }
+    else craft_note(S, "IT GOT AWAY. THE ONE THAT GOT AWAY WAS HUGE.");
+    S->note_t = 2.0f;
+    do_save();
+}
+static void craft_shark_die(int pi, int i){
+    BwSim *S=&BWS[pi]; Buddy *b=&G.bud[pi];
+    splat(S->craft_sh_x[i], S->craft_sh_y[i], COL(190,200,210), 10, 110); sfx(17);
+    b->craft_car += 2; if ((i&1)==0) b->craft_car += 1;
+    b->craft_fiber += 1;
+    craft_note(S, "SHARK DOWN! THE TEETH STOP HERE. +CARAPACE");
+    S->craft_sh_hp[i]=0;
+    do_save();
+}
+static void craft_shark_spawn(int pi, float ang, float dist){
+    BwSim *S=&BWS[pi]; Buddy *b=&G.bud[pi];
+    if (S->craft_shn>=6) return;
+    for (int t=0;t<6;t++){
+        float a = ang + t*1.05f;
+        float x = b->x + fcos(a)*dist, y = b->y + fsin(a)*dist;
+        if (craft_biome_at(b, bw_tileof(x), bw_tileof(y))!=5) continue;
+        int i=S->craft_shn++;
+        S->craft_sh_x[i]=x; S->craft_sh_y[i]=y; S->craft_sh_hp[i]=3;
+        S->craft_sh_ph[i]=hash_f((int)x, (int)y, craft_seed(b))*6.28f; S->craft_sh_tr[i]=0; S->craft_sh_hd[i]=a;
+        return;
+    }
+}
+static void craft_update(int pi, float dt, const BwIn *in){
+    BwSim *S=&BWS[pi]; Buddy *b=&G.bud[pi];
+    if (in->exit_ && !S->craft_menu){ bw_exit(pi, 0); return; }
+    if (S->craft_grace>0) S->craft_grace -= dt;
+    if (b->atk_cd>0) b->atk_cd -= dt;
+    if (b->lunge_t>0) b->lunge_t -= dt;
+    if (b->hurt_t>0) b->hurt_t -= dt;
+    if (S->craft_haste>0) S->craft_haste -= dt;
+    if (S->craft_demolish>0) S->craft_demolish -= dt;
+    if (S->craft_beam_t>0) S->craft_beam_t -= dt;
+    // the day turns, in this mode only
+    b->craft_tod += dt; if (b->craft_tod>=240) b->craft_tod -= 240;
+    { float dk = craft_darkf(b);
+      if (dk>0.6f && S->craft_darkp<=0.6f) craft_note(S, "NIGHT FALLS. THE WILD GETS HUNGRY.");
+      S->craft_darkp = dk; }
+    // woke from a rest (bw_update ran the sleep itself)
+    if (S->slept){
+        S->slept = 0;
+        if (S->craft_nap){   // a bedroll nap: time passes, the night does not skip
+            S->craft_nap = 0;
+            b->craft_tod += 90; if (b->craft_tod>=240) b->craft_tod -= 240;
+            scpy(S->note, "A FITFUL NAP UNDER THE STARS.", 72); S->note_t=2.6f;
+            if (craft_darkf(b)>0.4f){   // and something noticed you sleeping out there
+                craft_spawn_bug(pi, hash_f((int)(b->x/48), (int)(G.anim_t*10), craft_seed(b))*6.2832f, 300, -1);
+                scpy(S->note, "YOU WAKE TO COMPANY. THE WILD FOUND YOU.", 72); S->note_t=2.6f;
+            }
+        }
+        else if (craft_darkf(b)>0.4f){
+            b->craft_tod = 232;   // slept through the dangerous hours
+            scpy(S->note, "YOU SLEPT TILL DAWN. GOOD AS NEW.", 72); S->note_t=2.6f;
+        }
+    }
+    // the crafting menu swallows the rest of the input
+    if (S->craft_menu){
+        // ONE list with segment headers (craft_all_rows). Up/down are
+        // the only way the selection moves — left/right do nothing in
+        // here on purpose, so a sensitive dpad can never flip lists.
+        int rows[64]; int n = craft_all_rows(b, rows);
+        if (S->craft_sel>=n) S->craft_sel=0;
+        if (rows[S->craft_sel]<0) S->craft_sel = craft_step(rows, n, S->craft_sel, 1);
+        if (in->up){ S->craft_sel = craft_step(rows, n, S->craft_sel, -1); sfx(6); }
+        if (in->down){ S->craft_sel = craft_step(rows, n, S->craft_sel, 1); sfx(6); }
+        S->craft_cat = craft_row_cat(rows[S->craft_sel]);   // kept truthful for the detail strip/tests
+        // keep the selection inside the visible window of the list
+        if (S->craft_sel < S->craft_scroll) S->craft_scroll = S->craft_sel;
+        if (S->craft_sel > S->craft_scroll+6) S->craft_scroll = S->craft_sel-6;
+        if (n>7){ if (S->craft_scroll > n-7) S->craft_scroll = n-7; } else S->craft_scroll = 0;
+        if (S->craft_scroll<0) S->craft_scroll=0;
+        // touch: the menu is a real touch menu (both schemes) — tap a
+        // row to pick it, tap it again to craft, tap a segment header
+        // to hop to that segment, tap outside to close. Geometry
+        // mirrors craft_render exactly.
+        if (pi==G.my_id && IN.tapped){
+            int vx,vy,vw2,vh2; p1_view_rect(&vx,&vy,&vw2,&vh2);
+            int visn = n<7? n : 7;
+            int w=380, h=40+visn*20+16+24;
+            int x=vx+(vw2-w)/2, y=vy+(vh2-h)/2;
+            if (w>vw2-8){ w=vw2-8; x=vx+4; }
+            int tx=IN.tap_x, ty=IN.tap_y; IN.tapped=0;
+            if (tx<x || tx>x+w || ty<y || ty>y+h){ S->craft_menu=0; sfx(6); }
+            else for (int r=S->craft_scroll; r<S->craft_scroll+visn && r<n; r++){
+                int ry = y+30+(r-S->craft_scroll)*20;
+                if (ty>=ry-4 && ty<ry+15){
+                    if (rows[r]<0){ S->craft_sel = craft_step(rows, n, r, 1); sfx(6); }
+                    else if (r==S->craft_sel) craft_do(pi, rows[r]);
+                    else { S->craft_sel=r; sfx(6); }
+                    break;
+                }
+            }
+            S->craft_prevk = in->keys;
+            return;
+        }
+        if (in->sel || in->interact) craft_do(pi, rows[S->craft_sel]);
+        if (in->exit_ || in->wall) S->craft_menu=0;
+        S->craft_prevk = in->keys;
+        return;
+    }
+    if (in->wall){ int rows[64]; int n = craft_all_rows(b, rows);
+        S->craft_menu=1; S->craft_sel = n>1? craft_step(rows, n, 0, 1) : 0; S->craft_scroll=0; S->craft_demolish=0; sfx(6); S->craft_prevk = in->keys; return; }
+    // movement, meadow-style, against the wild's own solids
+    float mx=0, my=0; int k=in->keys;
+    if (k&K_UP) my-=1; if (k&K_DOWN) my+=1; if (k&K_LEFT) mx-=1; if (k&K_RIGHT) mx+=1;
+    int on_dock = 0;
+    { int dbi = craft_build_at(b, bw_tileof(b->x), bw_tileof(b->y)); if (dbi>=0 && b->craft_bk[dbi]==7) on_dock = 1; }
+    int on_water = craft_biome_at(b, bw_tileof(b->x), bw_tileof(b->y))==5 && (b->craft_gear&512) && !on_dock;
+    if (mx!=0 || my!=0){
+        float d=fsqrt(mx*mx+my*my); mx/=d; my/=d;
+        b->aim = fatan2(my, mx);
+        float sp = BUD_SPD[b->species%BUDN];
+        if (on_water) sp *= (b->craft_gear&262144)? 0.88f : 0.62f;   // a sail makes the raft honest
+        if (S->craft_haste>0) sp *= 1.35f;
+        float nx = b->x + mx*sp*dt, ny = b->y + my*sp*dt;
+        if (!craft_solid_at(pi, nx, b->y, 1)) b->x = nx;
+        if (!craft_solid_at(pi, b->x, ny, 1)) b->y = ny;
+        b->walk_ph += dt*9;
+        b->mv_t = 0.15f;
+    }
+    // backstop: never leave the builder inside a solid tile — shove
+    // him out by the nearest open edge (a placed wall used to be
+    // able to entomb him; placement refuses now, this is the belt
+    // to its suspenders)
+    if (craft_solid_at(pi, b->x, b->y, 1)){
+        int tx=bw_tileof(b->x), ty=bw_tileof(b->y);
+        float cand[4][2] = { { tx*BW_TILE-16.0f, b->y }, { (tx+1)*BW_TILE+16.0f, b->y },
+                             { b->x, ty*BW_TILE-16.0f }, { b->x, (ty+1)*BW_TILE+16.0f } };
+        float best=1e9f; int bi2=-1;
+        for (int c2=0;c2<4;c2++){
+            if (craft_solid_at(pi, cand[c2][0], cand[c2][1], 1)) continue;
+            float dx=cand[c2][0]-b->x, dy=cand[c2][1]-b->y, d2=dx*dx+dy*dy;
+            if (d2<best){ best=d2; bi2=c2; }
+        }
+        if (bi2>=0){ b->x=cand[bi2][0]; b->y=cand[bi2][1]; }
+    }
+    if (b->energy<BUD_ENERGY_MAX){ b->energy += BUD_EN_REGEN*dt; if (b->energy>BUD_ENERGY_MAX) b->energy=BUD_ENERGY_MAX; }
+    b->bw_x = b->x; b->bw_y = b->y;
+    b->calm += dt;
+    if (b->calm>4.0f && b->hp>0 && b->hp<b->maxhp){ b->hp += 2.2f*dt; if (b->hp>b->maxhp) b->hp=b->maxhp; }
+    // fires warm you faster — the fireplace reaches further
+    for (int i=0;i<b->craft_bn;i++){
+        if (b->craft_bk[i]!=1 && b->craft_bk[i]!=3) continue;
+        float r = b->craft_bk[i]==3? 112.0f : 74.0f, heal = b->craft_bk[i]==3? 10.0f : 6.0f;
+        float dx=b->x-(b->craft_btx[i]*BW_TILE+24), dy=b->y-(b->craft_bty[i]*BW_TILE+24);
+        if (dx*dx+dy*dy < r*r && b->hp>0 && b->hp<b->maxhp){ b->hp += heal*dt; if (b->hp>b->maxhp) b->hp=b->maxhp; }
+    }
+    // where are we?
+    int biome = craft_biome_at(b, bw_tileof(b->x), bw_tileof(b->y));
+    if (biome != S->craft_biome){
+        S->craft_biome = biome;
+        if (biome!=5){ scpy(S->note, CRAFT_BIOME_NAME[biome], 72); S->note_t = 2.4f; }
+    }
+    // hands: interact gathers, rests, loots, demolishes; the fire
+    // wins ties — at camp, the interact button means REST
+    int ttx = bw_tileof(b->x + fcos(b->aim)*34), tty = bw_tileof(b->y + fsin(b->aim)*34);
+    if (in->interact && b->atk_cd<=0){
+        b->atk_cd = 0.38f;
+        if (S->craft_demolish>0) craft_demolish_at(pi);
+        else if (craft_fire_near(b, b->x, b->y, 84, 0, 0)){ S->sleep_t = 1.4f; S->slept = 0; S->craft_nap = 0; sfx(11); }
+        else if (craft_bedroll_near(b)){ S->sleep_t = 1.4f; S->slept = 0; S->craft_nap = 1; sfx(11); }
+        else if ((b->craft_gear&16384) && craft_biome_at(b, ttx, tty)==5) craft_fish_at(pi);
+        else if (S->craft_cache_on){
+            float dx=S->craft_cache_x-b->x, dy=S->craft_cache_y-b->y;
+            if (dx*dx+dy*dy < 50*50) craft_loot_cache(pi);
+            else if (craft_node_at(pi, ttx, tty)) craft_hit_node(pi, ttx, tty);
+        }
+        else if (craft_node_at(pi, ttx, tty)) craft_hit_node(pi, ttx, tty);
+    }
+    if (in->sel && b->atk_cd<=0){
+        if ((b->craft_gear&128) && S->craft_demolish<=0){   // the zapper shoots instead of swinging
+            int storm = (b->craft_gear&65536)? 1 : 0;
+            b->atk_cd = storm? 0.22f : 0.34f; b->lunge_t = 0.12f;
+            for (int i=0;i<4;i++) if (!S->craft_bolt_a[i]){
+                S->craft_bolt_a[i]=1; S->craft_bolt_t[i]=0.55f;
+                S->craft_bolt_x[i]=b->x + fcos(b->aim)*16; S->craft_bolt_y[i]=b->y + fsin(b->aim)*16;
+                S->craft_bolt_vx[i]=fcos(b->aim)*330; S->craft_bolt_vy[i]=fsin(b->aim)*330;
+                S->craft_bolt_pc[i]=storm; S->craft_bolt_hc[i]=0;
+                sfx(12); break;
+            }
+        } else if ((b->craft_gear&32768) && !S->craft_bmr_a && S->craft_demolish<=0){   // the boomerang goes out — and comes back
+            b->atk_cd = 0.5f; b->lunge_t = 0.14f;
+            S->craft_bmr_a=1; S->craft_bmr_t=0;
+            S->craft_bmr_x=b->x + fcos(b->aim)*16; S->craft_bmr_y=b->y + fsin(b->aim)*16;
+            S->craft_bmr_vx=fcos(b->aim)*360; S->craft_bmr_vy=fsin(b->aim)*360;
+            sfx(12);
+        } else {
+            b->atk_cd = 0.42f; b->lunge_t = 0.16f;
+            int dmg = (b->craft_gear&64)? 3 : (b->craft_gear&4)? 2 : 1;
+            float reach = (b->craft_gear&64)? 70.0f : 52.0f;
+            if (S->craft_cache_on){
+                float dx=S->craft_cache_x-b->x, dy=S->craft_cache_y-b->y;
+                if (dx*dx+dy*dy < (reach+22)*(reach+22)) craft_loot_cache(pi);
+            }
+            for (int i=0;i<S->craft_bugn;i++){
+                if (S->craft_bhp[i]<=0) continue;
+                float dx=S->craft_bx[i]-b->x, dy=S->craft_by[i]-b->y;
+                float d2 = dx*dx+dy*dy;
+                if (d2 < reach*reach){
+                    float dl = fsqrt(d2)+0.01f;
+                    if ((dx*fcos(b->aim) + dy*fsin(b->aim))/dl > 0.15f || d2 < 24*24){
+                        S->craft_bhp[i] -= dmg; sfx(4);
+                        splat(S->craft_bx[i], S->craft_by[i], COL(150,80,70), 5, 80);
+                        if (S->craft_bhp[i]<=0) craft_bug_die(pi, i);
+                    }
+                }
+            }
+            for (int i=0;i<S->craft_shn;i++){   // a swing reaches the sharks at the raft's edge too
+                if (S->craft_sh_hp[i]<=0) continue;
+                float dx=S->craft_sh_x[i]-b->x, dy=S->craft_sh_y[i]-b->y;
+                float d2 = dx*dx+dy*dy;
+                if (d2 < (reach+8)*(reach+8)){
+                    float dl = fsqrt(d2)+0.01f;
+                    if ((dx*fcos(b->aim) + dy*fsin(b->aim))/dl > 0.15f || d2 < 26*26){
+                        S->craft_sh_hp[i] -= dmg; sfx(4);
+                        splat(S->craft_sh_x[i], S->craft_sh_y[i], COL(190,200,210), 5, 80);
+                        if (S->craft_sh_hp[i]<=0) craft_shark_die(pi, i);
+                    }
+                }
+            }
+            if (craft_node_at(pi, ttx, tty)) craft_hit_node(pi, ttx, tty);
+        }
+    }
+    // zapper bolts in flight (storm bolts pierce one extra target)
+    for (int i=0;i<4;i++) if (S->craft_bolt_a[i]){
+        S->craft_bolt_t[i] -= dt;
+        if (S->craft_bolt_hc[i]>0) S->craft_bolt_hc[i] -= dt;
+        S->craft_bolt_x[i] += S->craft_bolt_vx[i]*dt;
+        S->craft_bolt_y[i] += S->craft_bolt_vy[i]*dt;
+        if (S->craft_bolt_t[i]<=0 || craft_hard_at(pi, S->craft_bolt_x[i], S->craft_bolt_y[i])){ S->craft_bolt_a[i]=0; continue; }
+        if (S->craft_bolt_hc[i]>0) continue;
+        int consumed = 0;
+        for (int j=0;j<S->craft_bugn && !consumed;j++){
+            if (S->craft_bhp[j]<=0) continue;
+            float dx=S->craft_bx[j]-S->craft_bolt_x[i], dy=S->craft_by[j]-S->craft_bolt_y[i];
+            if (dx*dx+dy*dy < 15*15){
+                S->craft_bhp[j] -= 2; sfx(4);
+                splat(S->craft_bx[j], S->craft_by[j], COL(255,170,80), 5, 80);
+                if (S->craft_bhp[j]<=0) craft_bug_die(pi, j);
+                if (S->craft_bolt_pc[i]>0){ S->craft_bolt_pc[i]--; S->craft_bolt_hc[i]=0.18f; }
+                else { S->craft_bolt_a[i]=0; consumed=1; }
+            }
+        }
+        for (int j=0;j<S->craft_shn && !consumed && S->craft_bolt_a[i];j++){
+            if (S->craft_sh_hp[j]<=0) continue;
+            float dx=S->craft_sh_x[j]-S->craft_bolt_x[i], dy=S->craft_sh_y[j]-S->craft_bolt_y[i];
+            if (dx*dx+dy*dy < 17*17){
+                S->craft_sh_hp[j] -= 2; sfx(4);
+                splat(S->craft_sh_x[j], S->craft_sh_y[j], COL(255,170,80), 5, 80);
+                if (S->craft_sh_hp[j]<=0) craft_shark_die(pi, j);
+                if (S->craft_bolt_pc[i]>0){ S->craft_bolt_pc[i]--; S->craft_bolt_hc[i]=0.18f; }
+                else S->craft_bolt_a[i]=0;
+            }
+        }
+    }
+    // the boomerang: out fast, then it homes back to the hand
+    if (S->craft_bmr_a){
+        S->craft_bmr_t += dt;
+        if (S->craft_bmr_t < 0.42f){
+            S->craft_bmr_x += S->craft_bmr_vx*dt; S->craft_bmr_y += S->craft_bmr_vy*dt;
+            if (craft_hard_at(pi, S->craft_bmr_x, S->craft_bmr_y)) S->craft_bmr_t = 0.42f;
+        } else {
+            float dx=b->x-S->craft_bmr_x, dy=b->y-S->craft_bmr_y, d2=dx*dx+dy*dy;
+            if (d2 < 22*22 || S->craft_bmr_t > 2.2f){ S->craft_bmr_a=0; }
+            else { float dl=fsqrt(d2)+0.01f; S->craft_bmr_x += dx/dl*400*dt; S->craft_bmr_y += dy/dl*400*dt; }
+        }
+        if (S->craft_bmr_a){
+            for (int j=0;j<S->craft_bugn;j++){
+                if (S->craft_bhp[j]<=0 || S->craft_btr[j]>0.25f) continue;
+                float dx=S->craft_bx[j]-S->craft_bmr_x, dy=S->craft_by[j]-S->craft_bmr_y;
+                if (dx*dx+dy*dy < 17*17){
+                    S->craft_bhp[j] -= 2; S->craft_btr[j]=0.3f; sfx(4);
+                    splat(S->craft_bx[j], S->craft_by[j], COL(255,190,90), 5, 80);
+                    if (S->craft_bhp[j]<=0) craft_bug_die(pi, j);
+                }
+            }
+            for (int j=0;j<S->craft_shn;j++){
+                if (S->craft_sh_hp[j]<=0 || S->craft_sh_tr[j]>0) continue;
+                float dx=S->craft_sh_x[j]-S->craft_bmr_x, dy=S->craft_sh_y[j]-S->craft_bmr_y;
+                if (dx*dx+dy*dy < 18*18){
+                    S->craft_sh_hp[j] -= 2; S->craft_sh_tr[j]=0.3f; sfx(4);
+                    splat(S->craft_sh_x[j], S->craft_sh_y[j], COL(255,190,90), 5, 80);
+                    if (S->craft_sh_hp[j]<=0) craft_shark_die(pi, j);
+                }
+            }
+        }
+    }
+    // feral bugs: the wild is not empty, and the night is worse
+    int night = craft_isnight(b);
+    S->craft_bt -= dt;
+    if (S->craft_bt<=0){
+        S->craft_bt = night? 0.9f : 2.5f;
+        if (S->craft_bugn < (night? 13 : 8)){
+            float a = hash_f((int)(b->x/48), (int)(G.anim_t*10), craft_seed(b)) * 6.2832f;
+            craft_spawn_bug(pi, a, 500, -1);
+        }
+    }
+    // the occasional swarm keeps everyone honest
+    S->craft_swarm_t -= dt;
+    if (S->craft_swarm_t<=0){
+        S->craft_swarm_t = 85 + hash_f((int)(b->x/48), (int)(b->y/48), craft_seed(b))*40;
+        int n2 = night? 7 : 5;
+        for (int s2=0;s2<n2;s2++) craft_spawn_bug(pi, s2*1.13f + b->x*0.01f, 260, -1);
+        craft_note(S, "A SWARM IS COMING!"); S->note_t=2.4f; sfx(16);
+    }
+    // supply caches drift in now and then
+    S->craft_cache_t -= dt;
+    if (!S->craft_cache_on && S->craft_cache_t<=0){
+        int placed=0;
+        for (int t2=0;t2<8 && !placed;t2++){
+            float a = hash_f((int)(G.anim_t*3)+t2*17, (int)(b->y/48), craft_seed(b)) * 6.2832f;
+            float dd = 230 + hash_f(t2*31, (int)(b->x/48), craft_seed(b))*90;
+            float cx2 = b->x + fcos(a)*dd, cy2 = b->y + fsin(a)*dd;
+            if (!craft_solid_at(pi, cx2, cy2, 0) && craft_biome_at(b, bw_tileof(cx2), bw_tileof(cy2))!=5){
+                S->craft_cache_x=cx2; S->craft_cache_y=cy2; S->craft_cache_on=1; S->craft_cache_t=75; placed=1;
+            }
+        }
+        if (!placed) S->craft_cache_t=20;
+    }
+    if (S->craft_cache_on && S->craft_cache_t<=0){ S->craft_cache_on=0; S->craft_cache_t=50; }
+    for (int i=0;i<S->craft_bugn;i++){
+        if (S->craft_bhp[i]<=0) continue;
+        int bk = S->craft_bk[i];
+        float dx=b->x-S->craft_bx[i], dy=b->y-S->craft_by[i];
+        float d2=dx*dx+dy*dy;
+        S->craft_bph[i] += dt*0.7f;
+        if (S->craft_btr[i]>0) S->craft_btr[i] -= dt;
+        // standing on spikes hurts and slows (checked before moving)
+        int on_trap = craft_build_at(b, bw_tileof(S->craft_bx[i]), bw_tileof(S->craft_by[i]))>=0
+                   && b->craft_bk[craft_build_at(b, bw_tileof(S->craft_bx[i]), bw_tileof(S->craft_by[i]))]==5;
+        float mvx, mvy, sp;
+        float chase_r = bk==1? 300.0f : 240.0f;
+        // a scarecrow is easier to catch than a buddy, and bugs know it
+        float txp=b->x, typ=b->y, td2=d2; int decoy=-1;
+        if (bk!=2){
+            for (int j2=0;j2<b->craft_bn;j2++){
+                if (b->craft_bk[j2]!=9) continue;
+                float sx2=b->craft_btx[j2]*BW_TILE+24, sy2=b->craft_bty[j2]*BW_TILE+24;
+                float sdx=sx2-S->craft_bx[i], sdy=sy2-S->craft_by[i], sd2=sdx*sdx+sdy*sdy;
+                if (sd2<d2 && sd2<320*320){ txp=sx2; typ=sy2; td2=sd2; decoy=j2; }
+            }
+        }
+        float tdx=txp-S->craft_bx[i], tdy=typ-S->craft_by[i];
+        if (bk==2 && d2 < 210*210){ float dl=fsqrt(d2)+0.01f; mvx=-dx/dl; mvy=-dy/dl; sp=125.0f; }   // the golden one runs
+        else if (td2 < chase_r*chase_r){ float dl=fsqrt(td2)+0.01f; mvx=tdx/dl; mvy=tdy/dl; sp = bk==1? 74.0f : 56.0f; }
+        else { mvx=fcos(S->craft_bph[i]); mvy=fsin(S->craft_bph[i]); sp = bk==1? 30.0f : 22.0f; }
+        if (on_trap) sp *= 0.55f;
+        float nx = S->craft_bx[i] + mvx*sp*dt, ny = S->craft_by[i] + mvy*sp*dt;
+        if (!craft_solid_at(pi, nx, S->craft_by[i], 0)) S->craft_bx[i]=nx;
+        if (!craft_solid_at(pi, S->craft_bx[i], ny, 0)) S->craft_by[i]=ny;
+        if (on_trap && S->craft_btr[i]<=0){
+            S->craft_bhp[i] -= 1; S->craft_btr[i]=0.7f; sfx(4);
+            if (S->craft_bhp[i]<=0){ craft_bug_die(pi, i); continue; }
+        }
+        if (decoy>=0 && td2 < 27*27 && S->craft_btr[i]<=0){
+            S->craft_btr[i]=0.8f; b->craft_bhp[decoy] -= 1; sfx(4);
+            if (b->craft_bhp[decoy]<=0){ craft_build_remove(b, decoy); craft_note(S, "THE SCARECROW IS DOWN!"); S->note_t=2.0f; do_save(); }
+        }
+        // after dark, bugs chew through builds that pen them in
+        if (night && bk!=2){
+            for (int j=0;j<b->craft_bn;j++){
+                int kk2=b->craft_bk[j];
+                if (kk2!=0 && kk2!=2 && kk2!=4 && kk2!=10) continue;
+                float cx2=b->craft_btx[j]*BW_TILE+24, cy2=b->craft_bty[j]*BW_TILE+24;
+                float ddx=S->craft_bx[i]-cx2, ddy=S->craft_by[i]-cy2;
+                if (ddx*ddx+ddy*ddy < 42*42 && S->craft_btr[i]<=0){
+                    b->craft_bhp[j] -= 1;
+                    S->craft_btr[i] = (kk2==2||kk2==10)? 0.7f : kk2==4? 0.35f : 0.22f;
+                    sfx(4);
+                    if (b->craft_bhp[j]<=0){
+                        craft_build_remove(b, j);
+                        craft_note(S, "SOMETHING WAS CHEWED THROUGH IN THE DARK!"); S->note_t=2.2f; sfx(16); do_save();
+                    }
+                    break;
+                }
+            }
+        }
+        if (d2 < 25*25 && S->craft_grace<=0 && !b->fainted && bk!=2){
+            float dmgf = (bk==1? 0.16f : 0.12f) * ((b->craft_gear&131072)? 0.15f : (b->craft_gear&256)? 0.3f : (b->craft_gear&8)? 0.5f : 1.0f);
+            b->hp -= b->maxhp * dmgf; b->calm = 0; b->hurt_t = 0.3f;
+            S->craft_grace = 1.3f; sfx(16);
+            scpy(S->note, (b->craft_gear&8) || (b->craft_gear&256) || (b->craft_gear&131072)? "THE ARMOR TOOK THE BITE." : "A FERAL BUG BIT YOU!", 72); S->note_t=1.8f;
+            if (b->hp<=0){ b->hp=0; b->fainted=1; bw_exit(pi, 1); return; }
+        }
+        if (d2 > 900*900) S->craft_bhp[i]=0;   // wandered off for good
+    }
+    // sharks: the water was never safe, it was just unguarded
+    if (on_water){
+        S->craft_sh_t -= dt;
+        if (S->craft_sh_t<=0){
+            S->craft_sh_t = 2.2f;
+            if (S->craft_shn<4) craft_shark_spawn(pi, hash_f((int)(b->x/48), (int)(G.anim_t*10), craft_seed(b))*6.2832f, 300.0f);
+        }
+    }
+    for (int i=0;i<S->craft_shn;i++){
+        if (S->craft_sh_hp[i]<=0) continue;
+        if (S->craft_sh_tr[i]>0) S->craft_sh_tr[i] -= dt;
+        S->craft_sh_ph[i] += dt*0.9f;
+        float dx=b->x-S->craft_sh_x[i], dy=b->y-S->craft_sh_y[i], d2=dx*dx+dy*dy;
+        float mvx, mvy, sp;
+        if (d2 < 380*380){ float dl=fsqrt(d2)+0.01f; mvx=dx/dl; mvy=dy/dl; sp=97.0f; }
+        else { mvx=fcos(S->craft_sh_ph[i]); mvy=fsin(S->craft_sh_ph[i]); sp=26.0f; }
+        S->craft_sh_hd[i] = fatan2(mvy, mvx);
+        float nx=S->craft_sh_x[i]+mvx*sp*dt, ny=S->craft_sh_y[i]+mvy*sp*dt;
+        // keep the whole fish in the water: the centre AND a
+        // body's-length ahead of it must both be wet, or the grey
+        // shows on the sand (Daniel, Nov 6)
+        if (craft_biome_at(b, bw_tileof(nx), bw_tileof(S->craft_sh_y[i]))==5
+         && craft_biome_at(b, bw_tileof(nx + mvx*15), bw_tileof(S->craft_sh_y[i]))==5) S->craft_sh_x[i]=nx;
+        if (craft_biome_at(b, bw_tileof(S->craft_sh_x[i]), bw_tileof(ny))==5
+         && craft_biome_at(b, bw_tileof(S->craft_sh_x[i]), bw_tileof(ny + mvy*15))==5) S->craft_sh_y[i]=ny;
+        if (d2 < 27*27 && S->craft_grace<=0 && !b->fainted){
+            float dmgf = 0.20f * ((b->craft_gear&131072)? 0.15f : (b->craft_gear&256)? 0.3f : (b->craft_gear&8)? 0.5f : 1.0f);
+            b->hp -= b->maxhp*dmgf; b->calm=0; b->hurt_t=0.3f; S->craft_grace=1.3f; sfx(16);
+            scpy(S->note, "SHARK BITE! THE WATER HAS TEETH.", 72); S->note_t=1.8f;
+            splat(b->x, b->y, COL(200,215,225), 6, 90);
+            if (b->hp<=0){ b->hp=0; b->fainted=1; bw_exit(pi, 1); return; }
+        }
+        if (d2 > 1000*1000) S->craft_sh_hp[i]=0;   // lost the scent
+    }
+    if (S->craft_shn>0 && S->craft_sh_hp[0]<=0){
+        int w=0;
+        for (int i=0;i<S->craft_shn;i++) if (S->craft_sh_hp[i]>0){ S->craft_sh_x[w]=S->craft_sh_x[i]; S->craft_sh_y[w]=S->craft_sh_y[i]; S->craft_sh_hp[w]=S->craft_sh_hp[i]; S->craft_sh_ph[w]=S->craft_sh_ph[i]; S->craft_sh_tr[w]=S->craft_sh_tr[i]; S->craft_sh_hd[w]=S->craft_sh_hd[i]; w++; }
+        S->craft_shn=w;
+    }
+    // zapper towers stand guard over the base
+    for (int j=0;j<b->craft_bn;j++){
+        if (b->craft_bk[j]!=4) continue;
+        if (S->craft_tz[j]>0){ S->craft_tz[j] -= dt; continue; }
+        float cx2=b->craft_btx[j]*BW_TILE+24, cy2=b->craft_bty[j]*BW_TILE+24;
+        int tgt=-1; float td=132*132;
+        for (int i=0;i<S->craft_bugn;i++){
+            if (S->craft_bhp[i]<=0) continue;
+            float dx=S->craft_bx[i]-cx2, dy=S->craft_by[i]-cy2, d2=dx*dx+dy*dy;
+            if (d2<td){ td=d2; tgt=i; }
+        }
+        if (tgt>=0){
+            S->craft_tz[j]=1.1f; S->craft_beam_t=0.12f;
+            S->craft_beam_x1=cx2; S->craft_beam_y1=cy2-16;
+            S->craft_beam_x2=S->craft_bx[tgt]; S->craft_beam_y2=S->craft_by[tgt];
+            S->craft_bhp[tgt] -= 1; sfx(12);
+            splat(S->craft_bx[tgt], S->craft_by[tgt], COL(160,210,255), 4, 80);
+            if (S->craft_bhp[tgt]<=0) craft_bug_die(pi, tgt);
+        } else S->craft_tz[j]=0.25f;
+    }
+    // compact the bug list occasionally
+    if (S->craft_bugn>0 && S->craft_bhp[0]<=0){
+        int w=0;
+        for (int i=0;i<S->craft_bugn;i++) if (S->craft_bhp[i]>0){ S->craft_bx[w]=S->craft_bx[i]; S->craft_by[w]=S->craft_by[i]; S->craft_bhp[w]=S->craft_bhp[i]; S->craft_bph[w]=S->craft_bph[i]; S->craft_bk[w]=S->craft_bk[i]; S->craft_btr[w]=S->craft_btr[i]; w++; }
+        S->craft_bugn=w;
+    }
+    S->craft_prevk = in->keys;
+}
+static void glow_ellipse(int cx, int cy, int rx, int ry, u32 c, int alpha){
+    for (int pass=0; pass<2; pass++){
+        int prx = pass? rx*2/3 : rx, pry = pass? ry*2/3 : ry, al = pass? alpha : alpha/2;
+        if (prx<1) prx=1; if (pry<1) pry=1;
+        for (int yy=cy-pry; yy<=cy+pry; yy++){
+            float t=(float)(yy-cy)/(float)pry;
+            int dx=(int)(prx*fsqrt(1.0f-t*t));
+            for (int xx=cx-dx; xx<=cx+dx; xx++) pset_blend(xx, yy, c, al);
+        }
+    }
+}
+// row labels shared by the list rows and the selection detail strip,
+// so the two can never disagree about a name or a price
+static const char *craft_row_name(int id){
+    if (id==103) return "EAT LAKE FISH (+35% HP)";
+    if (id==100) return "EAT HEART PIE (+50% HP)";
+    if (id==101) return "EAT CARAPACE STEW (+50% HP, SWIFT)";
+    if (id==102) return "DEMOLISH MODE (HALF BACK)";
+    return CREC[id].name;
+}
+static const char *craft_row_shortname(int id){
+    if (id==103) return "LAKE FISH";
+    if (id==100) return "HEART PIE";
+    if (id==101) return "CARAPACE STEW";
+    if (id==102) return "DEMOLISH MODE";
+    return CREC[id].name;
+}
+static void craft_row_status(Buddy *b, int id, char *st){
+    char *sq=st;
+    if (id==103){ sq=sappend(sq, "HAVE "); sq=sapp_int(sq, b->craft_fish); }
+    else if (id==100){ sq=sappend(sq, "HAVE "); sq=sapp_int(sq, b->craft_pies); }
+    else if (id==101){ sq=sappend(sq, "HAVE "); sq=sapp_int(sq, b->craft_stews); }
+    else if (id==102){ sq=sappend(sq, "ARM"); }
+    else {
+        const CRec *R = &CREC[id];
+        int owned = R->build<0 && R->bit && (b->craft_gear & R->bit);
+        int built = R->build>=0 && R->bit && (b->craft_gear & R->bit);
+        if (owned) sq=sappend(sq, "OWNED");
+        else if (built){ sq=sappend(sq, "BUILT "); sq=sapp_int(sq, craft_build_kind_count(b, R->build)); }
+        else if (R->req && !(b->craft_gear & R->req)){ sq=sappend(sq, "NEED "); sq=sappend(sq, craft_reqname(R->req)); }
+        else if (id==30){ if (b->craft_fish>0){ sq=sappend(sq, "FISH "); sq=sapp_int(sq, b->craft_fish); } else sq=sappend(sq, "NEED A FISH"); }
+        else {
+            if (R->w){ sq=sappend(sq, "W"); sq=sapp_int(sq, R->w); sq=sappend(sq, " "); }
+            if (R->s){ sq=sappend(sq, "S"); sq=sapp_int(sq, R->s); sq=sappend(sq, " "); }
+            if (R->f){ sq=sappend(sq, "F"); sq=sapp_int(sq, R->f); sq=sappend(sq, " "); }
+            if (R->c){ sq=sappend(sq, "C"); sq=sapp_int(sq, R->c); }
+        }
+    }
+    *sq=0;
+}
+static u32 craft_row_color(Buddy *b, int id){
+    if (id==102) return COL(255,180,130);
+    if (id>=100) return COL(240,244,250);
+    const CRec *R = &CREC[id];
+    int owned = R->build<0 && R->bit && (b->craft_gear & R->bit);
+    int built = R->build>=0 && R->bit && (b->craft_gear & R->bit);
+    if (owned || built) return COL(250,215,130);
+    if (R->req && !(b->craft_gear & R->req)) return COL(240,150,130);
+    if (id==30 && b->craft_fish<1) return COL(140,146,150);
+    return craft_afford(b, R)? COL(240,244,250) : COL(140,146,150);
+}
+// little pictograms for the crafting list — you scan pictures, not text
+static void craft_icon(int x, int y, int id){
+    switch (id){
+        case 0: case 2:   // axes (the stone one wears grey)
+            line_thick(x+3, y+11, x+9, y+4, 2, COL(140,96,54));
+            rect_fill(x+7, y+1, 6, 5, id==0? COL(120,124,132) : COL(150,152,158)); break;
+        case 1: case 3:   // picks (the carapace one burns orange)
+            line_thick(x+6, y+12, x+6, y+4, 2, COL(140,96,54));
+            line_thick(x+1, y+5, x+6, y+1, 2, id==1? COL(150,152,158) : COL(255,150,60));
+            line_thick(x+11, y+5, x+6, y+1, 2, id==1? COL(150,152,158) : COL(255,150,60)); break;
+        case 4: case 7:   // rafts (the sail one flies a triangle)
+            rect_fill(x+1, y+8, 12, 3, COL(156,116,66)); rect_fill(x+1, y+4, 12, 3, COL(146,106,58));
+            if (id==7){ line_thick(x+7, y+8, x+7, y+0, 1, COL(110,76,44)); rect_fill(x+8, y+1, 4, 5, COL(240,238,225)); } break;
+        case 5:   // lantern
+            rect_fill(x+4, y+3, 6, 8, COL(240,210,110)); rect_line(x+4, y+3, 6, 8, COL(90,80,60)); disc_fill(x+7, y+7, 1, COL(255,250,220)); break;
+        case 6:   // fishing rod
+            line_thick(x+2, y+12, x+11, y+2, 2, COL(140,96,54)); line_thick(x+11, y+2, x+11, y+7, 1, COL(220,226,235)); disc_fill(x+11, y+9, 1, COL(255,120,130)); break;
+        case 8:   // sword
+            line_thick(x+3, y+11, x+10, y+3, 2, COL(210,214,220)); rect_fill(x+2, y+9, 5, 2, COL(198,164,84)); break;
+        case 9:   // spear
+            line_thick(x+2, y+12, x+10, y+4, 2, COL(140,96,54)); line_thick(x+10, y+4, x+12, y+1, 2, COL(255,170,80)); break;
+        case 10: case 12:   // zappers (the storm one crackles twice)
+            rect_fill(x+4, y+5, 6, 6, COL(120,124,134)); disc_fill(x+7, y+3, 2, COL(120,190,255));
+            if (id==12) disc_fill(x+11, y+6, 2, COL(160,215,255)); break;
+        case 11:   // boomerang
+            disc_fill(x+3, y+9, 2, COL(230,160,70)); disc_fill(x+7, y+4, 2, COL(230,160,70)); disc_fill(x+11, y+9, 2, COL(230,160,70)); break;
+        case 13: case 14: case 15:   // armor tiers
+            rect_fill(x+3, y+3, 8, 9, id==13? COL(170,190,110) : id==14? COL(140,146,152) : COL(255,150,60));
+            rect_fill(x+5, y+3, 4, 3, COL(18,22,20));
+            if (id!=13) rect_fill(x+3, y+7, 8, 2, COL(90,94,102)); break;
+        case 16: case 23:   // walls (the reinforced one wears iron)
+            rect_fill(x+1, y+3, 12, 9, id==16? COL(156,110,62) : COL(120,84,48)); rect_fill(x+1, y+7, 12, 2, COL(96,64,32));
+            if (id==23){ rect_fill(x+1, y+3, 2, 9, COL(96,100,108)); rect_fill(x+11, y+3, 2, 9, COL(96,100,108)); } break;
+        case 17:   // stone wall
+            rect_fill(x+1, y+3, 12, 9, COL(138,142,150)); disc_fill(x+4, y+6, 1, COL(96,100,108)); disc_fill(x+10, y+9, 1, COL(96,100,108)); break;
+        case 18: case 19:   // fires
+            line_thick(x+3, y+11, x+11, y+9, 2, COL(110,76,44));
+            ellipse_fill(x+7, y+6, 3, 5, COL(255,140,50)); disc_fill(x+7, y+6, 1, COL(255,215,110));
+            if (id==19){ rect_fill(x+1, y+3, 2, 9, COL(104,108,116)); rect_fill(x+11, y+3, 2, 9, COL(104,108,116)); } break;
+        case 20:   // torch post
+            rect_fill(x+6, y+5, 2, 7, COL(110,76,44)); ellipse_fill(x+7, y+3, 2, 3, COL(255,160,60)); break;
+        case 21:   // dock
+            rect_fill(x+1, y+4, 12, 3, COL(156,116,66));
+            line_thick(x+1, y+10, x+4, y+9, 1, COL(120,190,235)); line_thick(x+5, y+11, x+8, y+10, 1, COL(120,190,235)); line_thick(x+9, y+10, x+12, y+9, 1, COL(120,190,235)); break;
+        case 22:   // bedroll
+            rect_fill(x+2, y+5, 10, 6, COL(150,60,60)); rect_fill(x+2, y+7, 10, 1, COL(240,230,200)); rect_fill(x+2, y+4, 4, 3, COL(240,244,250)); break;
+        case 24:   // lantern post
+            rect_fill(x+6, y+4, 2, 8, COL(84,66,44)); rect_fill(x+4, y+1, 6, 5, COL(240,210,110)); break;
+        case 25:   // spike trap
+            line_thick(x+3, y+11, x+4, y+4, 2, COL(168,172,180)); line_thick(x+7, y+11, x+7, y+3, 2, COL(168,172,180)); line_thick(x+11, y+11, x+10, y+4, 2, COL(120,124,132)); break;
+        case 26:   // zapper tower
+            rect_fill(x+3, y+6, 8, 6, COL(120,124,134)); disc_fill(x+7, y+3, 3, COL(120,190,255)); break;
+        case 27:   // scarecrow
+            line_thick(x+7, y+12, x+7, y+5, 2, COL(110,76,44)); rect_fill(x+2, y+5, 10, 2, COL(110,76,44)); disc_fill(x+7, y+3, 3, COL(255,150,50)); break;
+        case 28: case 100:   // pies
+            disc_fill(x+7, y+7, 5, COL(226,170,90)); line_thick(x+4, y+5, x+10, y+9, 1, COL(170,120,60)); line_thick(x+10, y+5, x+4, y+9, 1, COL(170,120,60)); break;
+        case 29: case 101:   // stew pot
+            ellipse_fill(x+7, y+8, 6, 4, COL(90,94,102)); rect_fill(x+3, y+4, 8, 2, COL(140,74,54)); break;
+        case 30: case 103:   // fish
+            ellipse_fill(x+6, y+7, 5, 3, COL(140,200,235)); line_thick(x+10, y+7, x+13, y+4, 2, COL(110,170,210)); line_thick(x+10, y+7, x+13, y+10, 2, COL(110,170,210)); disc_fill(x+4, y+6, 1, COL(20,30,40)); break;
+        case 102:   // demolish hammer
+            line_thick(x+4, y+12, x+9, y+6, 2, COL(140,96,54)); rect_fill(x+7, y+1, 6, 5, COL(255,150,90)); break;
+        default:
+            disc_fill(x+7, y+7, 3, COL(200,200,205)); break;
+    }
+}
+static void craft_render(int pi){
+    BwSim *S=&BWS[pi]; Buddy *b=&G.bud[pi];
+    G.camx=b->x; G.camy=b->y;
+    int vx=G.view_x0, vy=G.view_y0, vw2=G.view_w>0? G.view_w : VW, vh2=G.view_h>0? G.view_h : VH;
+    int tx0=bw_tileof(b->x - vw2/2 - BW_TILE), tx1=bw_tileof(b->x + vw2/2 + BW_TILE);
+    int ty0=bw_tileof(b->y - vh2/2 - BW_TILE), ty1=bw_tileof(b->y + vh2/2 + BW_TILE);
+    for (int ty=ty0; ty<=ty1; ty++) for (int tx=tx0; tx<=tx1; tx++){
+        int x=SX(tx*BW_TILE), y=SY(ty*BW_TILE);
+        if (x+BW_TILE<vx || x>vx+vw2 || y+BW_TILE<vy || y>vy+vh2) continue;
+        int biome = craft_biome_at(b, tx, ty);
+        u32 h = hash2(tx, ty, craft_seed(b) ^ 0x7A55u);
+        if (biome==5){
+            u32 base = ((tx+ty)&1)==0? COL(44,104,164) : COL(38,96,154);
+            rect_fill(x, y, BW_TILE+1, BW_TILE+1, col_shade(base, 0.94f + (float)((h>>20)%14)*0.01f));
+            if (h % 7 == 0){ int wxp = x + (int)((h>>6) % 30) + 6 + (int)(G.anim_t*6 + (h%40)) % 13 - 6,
+                                wyp = y + (int)((h>>11) % 32) + 8;
+                line_thick(wxp, wyp, wxp+4, wyp-2, 1, COL(150,200,235)); line_thick(wxp+4, wyp-2, wxp+8, wyp, 1, COL(150,200,235)); }
+            { int dbi = craft_build_at(b, tx, ty);   // a dock rides the water tile itself
+              if (dbi>=0 && b->craft_bk[dbi]==7){
+                  rect_fill(x+1, y+8, BW_TILE-2, 30, COL(156,116,66));
+                  rect_fill(x+1, y+17, BW_TILE-2, 3, COL(120,86,44));
+                  rect_fill(x+1, y+28, BW_TILE-2, 3, COL(120,86,44));
+                  rect_line(x+1, y+8, BW_TILE-2, 30, COL(96,66,34));
+                  disc_fill(x+6, y+12, 1, COL(70,70,74)); disc_fill(x+BW_TILE-7, y+12, 1, COL(70,70,74));
+                  disc_fill(x+6, y+33, 1, COL(70,70,74)); disc_fill(x+BW_TILE-7, y+33, 1, COL(70,70,74));
+              } }
+            // foam where water meets land (glow-up): a dashed lip
+            // that breathes on the same slow clock as the sparkles
+            { int fo = ((int)(G.anim_t*2) + ((h>>5)&1)) & 1; u32 fc = COL(225,242,250);
+              if (craft_biome_at(b, tx, ty-1)!=5){ for (int s2=0;s2<3;s2++) rect_fill(x+4+s2*14+fo*4, y+1, 8, 2, fc); }
+              if (craft_biome_at(b, tx, ty+1)!=5){ for (int s2=0;s2<3;s2++) rect_fill(x+4+s2*14+((fo^1)*4), y+BW_TILE-3, 8, 2, fc); }
+              if (craft_biome_at(b, tx-1, ty)!=5){ for (int s2=0;s2<3;s2++) rect_fill(x+1, y+4+s2*14+fo*4, 2, 8, fc); }
+              if (craft_biome_at(b, tx+1, ty)!=5){ for (int s2=0;s2<3;s2++) rect_fill(x+BW_TILE-3, y+4+s2*14+((fo^1)*4), 2, 8, fc); } }
+            continue;
+        }
+        { u32 base;
+          if (biome==0) base = ((tx+ty)&1)==0? COL(106,180,82) : COL(96,168,72);
+          else if (biome==1) base = ((tx+ty)&1)==0? COL(66,134,60) : COL(58,124,52);
+          else if (biome==2) base = ((tx+ty)&1)==0? COL(219,192,124) : COL(209,182,114);
+          else if (biome==3) base = ((tx+ty)&1)==0? COL(228,234,240) : COL(216,224,232);
+          else base = ((tx+ty)&1)==0? COL(90,112,68) : COL(80,102,60);
+          rect_fill(x, y, BW_TILE+1, BW_TILE+1, col_shade(base, 0.94f + (float)((h>>20)%14)*0.01f));
+          // sparse darker freckles so the flat biomes have grain (glow-up)
+          if ((h>>3)%9==0){ u32 sc2 = col_shade(base, 0.86f);
+              pset(x + (int)((h>>6)%38) + 5, y + (int)((h>>11)%38) + 5, sc2);
+              pset(x + (int)((h>>16)%30) + 9, y + (int)((h>>21)%30) + 9, sc2); }
+          // shore: land kissing water gets a sandy rim
+          if (craft_biome_at(b, tx+1, ty)==5 || craft_biome_at(b, tx-1, ty)==5 || craft_biome_at(b, tx, ty+1)==5 || craft_biome_at(b, tx, ty-1)==5)
+              rect_fill(x, y+BW_TILE-6, BW_TILE+1, 6, COL(226,204,140));
+        }
+        int nd = craft_node_at(pi, tx, ty);
+        if (nd==1){   // a tree (a snowy pine in the snow)
+            shadow_ellipse(x+24, y+41, 12, 3);
+            rect_fill(x+21, y+26, 6, 14, COL(110,76,44));
+            if (biome==3){ disc_fill(x+24, y+16, 13, COL(52,110,96)); disc_fill(x+24, y+10, 9, COL(66,128,112)); disc_fill(x+24, y+6, 5, COL(240,246,250)); }
+            else { disc_fill(x+17, y+20, 10, COL(52,128,54)); disc_fill(x+31, y+20, 10, COL(58,138,58)); disc_fill(x+24, y+13, 11, COL(70,156,66)); }
+        } else if (nd==2){
+            ellipse_fill(x+24, y+30, 13, 9, COL(142,146,152));
+            ellipse_fill(x+19, y+25, 7, 5, COL(164,168,174));
+            disc_fill(x+27, y+24, 2, COL(110,114,120));
+        } else if (nd==3){
+            rect_fill(x+19, y+12, 10, 30, COL(74,160,84));
+            rect_fill(x+12, y+20, 7, 4, COL(74,160,84)); rect_fill(x+12, y+16, 4, 8, COL(74,160,84));
+            rect_fill(x+29, y+24, 7, 4, COL(74,160,84)); rect_fill(x+33, y+20, 4, 8, COL(74,160,84));
+            disc_fill(x+24, y+10, 3, COL(240,120,150));
+        } else if (nd==4){
+            for (int g2=0;g2<5;g2++){ int gx2 = x+10+g2*7; line_thick(gx2, y+38, gx2 + (int)(fsin(G.anim_t*2 + g2*1.3f + tx)*2), y+24 - (g2%3)*3, 1, biome==4? COL(120,160,80) : COL(150,200,90)); }
+        }
+        int bi2 = craft_build_at(b, tx, ty);
+        if (bi2>=0){
+            int bk = b->craft_bk[bi2], bhp = b->craft_bhp[bi2], bmax = craft_buildhp_max(bk);
+            if (bk!=7) shadow_ellipse(x+24, y+41, 20, 4);   // builds sit ON the ground now (glow-up)
+            if (bk==0){   // wooden wall
+                rect_fill(x+2, y+8, BW_TILE-4, 30, COL(156,110,62));
+                rect_fill(x+2, y+20, BW_TILE-4, 3, COL(120,82,42));
+                rect_line(x+2, y+8, BW_TILE-4, 30, COL(96,64,32));
+                disc_fill(x+7, y+13, 1, COL(70,70,74)); disc_fill(x+BW_TILE-8, y+13, 1, COL(70,70,74));
+                if (bhp < bmax){ line_thick(x+8, y+14, x+24, y+30, 1, COL(70,44,20)); line_thick(x+26, y+12, x+18, y+26, 1, COL(70,44,20)); }
+            } else if (bk==2){   // stone wall
+                rect_fill(x+2, y+8, BW_TILE-4, 30, COL(138,142,150));
+                rect_fill(x+2, y+22, BW_TILE-4, 3, COL(104,108,116));
+                rect_line(x+2, y+8, BW_TILE-4, 30, COL(78,82,90));
+                disc_fill(x+12, y+15, 2, COL(96,100,108)); disc_fill(x+32, y+28, 2, COL(96,100,108));
+                if (bhp < bmax*2/3){ line_thick(x+10, y+12, x+22, y+28, 1, COL(60,62,70)); }
+                if (bhp < bmax/3){ line_thick(x+30, y+10, x+20, y+30, 1, COL(60,62,70)); line_thick(x+6, y+30, x+24, y+18, 1, COL(60,62,70)); }
+            } else if (bk==1 || bk==3){   // campfire / fireplace
+                int cxp=x+24, cyp=y+24;
+                if (bk==3){ ellipse_fill(cxp, cyp+5, 15, 8, COL(104,108,116)); ellipse_fill(cxp, cyp+3, 11, 6, COL(70,72,80)); }
+                else ellipse_fill(cxp, cyp+4, 13, 6, COL(120,124,128));
+                line_thick(cxp-8, cyp+5, cxp+8, cyp+2, 3, COL(110,76,44)); line_thick(cxp-8, cyp+2, cxp+8, cyp+5, 3, COL(96,64,32));
+                int fl = (int)(fsin(G.anim_t*11 + bi2*2)*2);
+                int fh = bk==3? 13 : 9;
+                ellipse_fill(cxp, cyp-4, bk==3? 8:6, fh+fl, COL(255,140,50));
+                ellipse_fill(cxp, cyp-3, bk==3? 5:3, fh-3+fl, COL(255,205,90));
+            } else if (bk==4){   // zapper tower
+                int cxp=x+24, cyp=y+24;
+                rect_fill(cxp-9, cyp-2, 18, 16, COL(120,124,134)); rect_line(cxp-9, cyp-2, 18, 16, COL(80,84,94));
+                rect_fill(cxp-3, cyp-12, 6, 11, COL(96,100,110));
+                int pu = 3 + (int)(fsin(G.anim_t*5 + bi2)*1.5f);
+                disc_fill(cxp, cyp-15, pu+2, COL(120,190,255)); disc_fill(cxp, cyp-15, 2, COL(230,246,255));
+                if (bhp < bmax){ line_thick(cxp-7, cyp+2, cxp+4, cyp+12, 1, COL(60,62,70)); }
+            } else if (bk==5){   // spike trap: quiet grey teeth in the grass
+                for (int s3=0;s3<4;s3++){ int sxp = x+8+s3*10;
+                    line_thick(sxp, y+36, sxp+3, y+22, 2, COL(168,172,180)); line_thick(sxp+6, y+36, sxp+3, y+22, 2, COL(120,124,132)); }
+            } else if (bk==6){   // torch post
+                int cxp=x+24, cyp=y+24;
+                rect_fill(cxp-2, cyp-2, 4, 16, COL(110,76,44));
+                int fl = (int)(fsin(G.anim_t*13 + bi2*3)*1.5f);
+                ellipse_fill(cxp, cyp-6, 4, 6+fl, COL(255,160,60));
+                disc_fill(cxp, cyp-6, 2, COL(255,225,140));
+            } else if (bk==10){   // reinforced wall: dark planks, iron bands
+                rect_fill(x+2, y+8, BW_TILE-4, 30, COL(120,84,48));
+                rect_fill(x+2, y+20, BW_TILE-4, 3, COL(88,60,30));
+                rect_fill(x+2, y+8, 5, 30, COL(96,100,108)); rect_fill(x+BW_TILE-7, y+8, 5, 30, COL(96,100,108));
+                rect_line(x+2, y+8, BW_TILE-4, 30, COL(70,48,24));
+                if (bhp < bmax){ line_thick(x+10, y+12, x+26, y+32, 1, COL(56,36,16)); line_thick(x+28, y+10, x+16, y+28, 1, COL(56,36,16)); }
+            } else if (bk==8){   // bedroll: a striped blanket, waiting
+                rect_fill(x+8, y+16, 32, 18, COL(150,60,60));
+                rect_fill(x+8, y+21, 32, 3, COL(240,230,200)); rect_fill(x+8, y+28, 32, 3, COL(240,230,200));
+                rect_fill(x+8, y+13, 12, 6, COL(240,244,250));
+            } else if (bk==9){   // the scarecrow stands its watch
+                int cxp=x+24, cyp=y+24;
+                rect_fill(cxp-2, cyp-4, 4, 20, COL(110,76,44));
+                rect_fill(cxp-11, cyp-1, 22, 3, COL(110,76,44));
+                disc_fill(cxp, cyp-10, 6, COL(255,150,50));
+                rect_fill(cxp-7, cyp-16, 14, 3, COL(96,64,32)); rect_fill(cxp-3, cyp-19, 6, 4, COL(96,64,32));
+                disc_fill(cxp-2, cyp-10, 1, COL(30,26,24)); disc_fill(cxp+2, cyp-10, 1, COL(30,26,24));
+                if (bhp < bmax){ line_thick(cxp-8, cyp+2, cxp+6, cyp+12, 1, COL(70,44,20)); }
+            } else if (bk==11){   // lantern post: taller, glassed, patient
+                int cxp=x+24, cyp=y+24;
+                rect_fill(cxp-2, cyp-4, 4, 20, COL(84,66,44));
+                rect_fill(cxp-5, cyp-13, 10, 10, COL(240,210,110));
+                rect_line(cxp-5, cyp-13, 10, 10, COL(90,80,60));
+                disc_fill(cxp, cyp-8, 2, COL(255,240,190));
+                rect_fill(cxp-6, cyp-15, 12, 2, COL(70,56,36));
+            }
+        }
+    }
+    // the supply cache, when one has drifted in
+    if (S->craft_cache_on){
+        int x=SX(S->craft_cache_x), y=SY(S->craft_cache_y);
+        shadow_ellipse(x, y+8, 12, 3);
+        rect_fill(x-11, y-8, 22, 15, COL(168,120,58)); rect_line(x-11, y-8, 22, 15, COL(110,76,34));
+        rect_fill(x-11, y-2, 22, 3, COL(110,76,34));
+        disc_fill(x, y-1, 2, COL(250,220,120));
+    }
+    // feral bugs: sun-bleached, gloom-dark, or golden
+    for (int i=0;i<S->craft_bugn;i++){
+        if (S->craft_bhp[i]<=0) continue;
+        int x=SX(S->craft_bx[i]), y=SY(S->craft_by[i]);
+        int bk = S->craft_bk[i];
+        shadow_ellipse(x, y+8, 11, 3);
+        if (bk==2){
+            ellipse_fill(x, y, 11, 8, COL(232,180,60));
+            disc_fill(x-4, y-3, 2, COL(255,255,255)); disc_fill(x+4, y-3, 2, COL(120,80,10));
+            if (((int)(G.anim_t*3)+i)&1) disc_fill(x+7, y-8, 1, COL(255,246,200));
+        } else if (bk==1){
+            ellipse_fill(x, y, 12, 9, COL(74,44,96));
+            disc_fill(x-4, y-3, 2, COL(255,70,60)); disc_fill(x+4, y-3, 2, COL(255,70,60));
+        } else {
+            ellipse_fill(x, y, 11, 8, COL(140,74,54));
+            disc_fill(x-4, y-3, 2, COL(255,230,120)); disc_fill(x+4, y-3, 2, COL(255,230,120));
+        }
+        for (int l=0;l<3;l++){ int ph = (int)(fsin(G.anim_t*10 + i + l*2)*2); line_thick(x-9+l*8, y+5, x-11+l*8, y+9+ph, 1, COL(80,44,30)); }
+    }
+    // fins in the water — and the grey behind them
+    for (int i=0;i<S->craft_shn;i++){
+        if (S->craft_sh_hp[i]<=0) continue;
+        int x=SX(S->craft_sh_x[i]), y=SY(S->craft_sh_y[i]);
+        // the body stays UNDER the surface — a grey ghost in the
+        // blue, drawn blended — and only the fin breaks the water,
+        // pointing where he's actually headed (Daniel, Nov 6: they
+        // rendered weird and showed up on the sand)
+        glow_ellipse(x, y+3, 16, 7, COL(74,88,102), 120);
+        float hd = S->craft_sh_hd[i];
+        int px = (int)(-fsin(hd)*6), tipx = x + (int)(fcos(hd)*3);
+        line_thick(x+px, y-1, tipx, y-11, 3, COL(122,134,148));
+        line_thick(tipx, y-11, x-px, y-1, 3, COL(104,116,130));
+    }
+    // zapper bolts and tower beams
+    for (int i=0;i<4;i++) if (S->craft_bolt_a[i]){
+        int x=SX(S->craft_bolt_x[i]), y=SY(S->craft_bolt_y[i]);
+        disc_fill(x, y, 4, COL(255,150,50)); disc_fill(x, y, 2, COL(255,225,150));
+    }
+    if (S->craft_bmr_a){   // the boomerang, mid-flight, spinning
+        int x=SX(S->craft_bmr_x), y=SY(S->craft_bmr_y);
+        float a = G.anim_t*22;
+        for (int k2=0;k2<3;k2++){ float aa=a+k2*2.09f; disc_fill(x+(int)(fcos(aa)*5), y+(int)(fsin(aa)*5), 3, COL(230,160,70)); }
+        disc_fill(x, y, 2, COL(255,220,150));
+    }
+    if (S->craft_beam_t>0){
+        line_thick(SX(S->craft_beam_x1), SY(S->craft_beam_y1), SX(S->craft_beam_x2), SY(S->craft_beam_y2), 2, COL(170,215,255));
+        line_thick(SX(S->craft_beam_x1), SY(S->craft_beam_y1), SX(S->craft_beam_x2), SY(S->craft_beam_y2), 1, COL(240,250,255));
+    }
+    // the raft, when he's afloat (not when the dock is under him)
+    { int dbi2 = craft_build_at(b, bw_tileof(b->x), bw_tileof(b->y));
+      if (craft_biome_at(b, bw_tileof(b->x), bw_tileof(b->y))==5 && (b->craft_gear&512) && !(dbi2>=0 && b->craft_bk[dbi2]==7)){
+        int x=SX(b->x), y=SY(b->y);
+        ellipse_fill(x, y+9, 20, 7, COL(146,102,58));
+        rect_fill(x-18, y+6, 36, 3, COL(120,82,42));
+        line_thick(x-14, y+3, x-14, y+12, 2, COL(110,76,44)); line_thick(x+12, y+3, x+12, y+12, 2, COL(110,76,44));
+        if (b->craft_gear&262144){ line_thick(x+3, y+5, x+3, y-13, 2, COL(110,76,44)); rect_fill(x+4, y-12, 10, 13, COL(240,238,225)); rect_line(x+4, y-12, 10, 13, COL(190,186,170)); }
+      } }
+    draw_buddy(b);
+    // night falls over everything but the fires
+    float dk = craft_darkf(b);
+    if (dk>0.02f){
+        blend_rect(vx, vy, vw2, vh2, COL(8,10,28), (int)(dk*165));
+        for (int i=0;i<b->craft_bn;i++){
+            int bk = b->craft_bk[i];
+            int cxp=SX(b->craft_btx[i]*BW_TILE+24), cyp=SY(b->craft_bty[i]*BW_TILE+24);
+            if (bk==1) glow_ellipse(cxp, cyp, 92, 70, COL(255,170,80), (int)(95*dk));
+            else if (bk==3) glow_ellipse(cxp, cyp, 128, 96, COL(255,176,84), (int)(105*dk));
+            else if (bk==6) glow_ellipse(cxp, cyp, 82, 62, COL(255,190,96), (int)(85*dk));
+            else if (bk==4) glow_ellipse(cxp, cyp-8, 40, 30, COL(140,200,255), (int)(55*dk));
+            else if (bk==11) glow_ellipse(cxp, cyp, 122, 94, COL(255,200,110), (int)(95*dk));
+        }
+        glow_ellipse(SX(b->x), SY(b->y), (b->craft_gear&8192)? 88 : 56, (b->craft_gear&8192)? 68 : 44, COL(255,220,160), (int)(70*dk));
+    }
+    // HUD: two rows, nothing shares a line. Row 1: the pack (left)
+    // and the hour (right). Row 2: the HP bar, then your gear. The old
+    // one-row version right-aligned the gear INTO the pack text once
+    // you owned a few tools — worse in split view (Daniel, Nov 5).
+    rect_fill(vx, vy, vw2, 34, COL(16,20,28));
+    { char buf[160]; char *q=buf;
+      q=sappend(q, "WOOD "); q=sapp_int(q, b->craft_wood);
+      q=sappend(q, "  STONE "); q=sapp_int(q, b->craft_stone);
+      q=sappend(q, "  FIBER "); q=sapp_int(q, b->craft_fiber);
+      q=sappend(q, "  CARAPACE "); q=sapp_int(q, b->craft_car);
+      if (b->craft_fish>0){ q=sappend(q, "  FISH "); q=sapp_int(q, b->craft_fish); }
+      if (b->craft_pies>0){ q=sappend(q, "  PIES "); q=sapp_int(q, b->craft_pies); }
+      if (b->craft_stews>0){ q=sappend(q, "  STEWS "); q=sapp_int(q, b->craft_stews); }
+      *q=0; draw_text(vx+8, vy+5, buf, 1, COL(240,244,250)); }
+    { const char *tn = dk>0.55f? "NIGHT" : b->craft_tod<15 || b->craft_tod>=225? "DAWN" : b->craft_tod>=140? "DUSK" : "DAY";
+      u32 tc = tn[0]=='N'? COL(170,190,240) : tn[1]=='A' && tn[0]=='D'? COL(250,200,130) : COL(255,226,140);
+      draw_text(vx+vw2-8-text_w(tn,1), vy+5, tn, 1, tc); }
+    rect_fill(vx+8, vy+21, 104, 6, COL(60,30,34));
+    rect_fill(vx+8, vy+21, (int)(104 * (b->maxhp>0? b->hp/b->maxhp : 0)), 6, COL(230,84,96));
+    { char buf[160]; char *q=buf;
+      if (b->craft_gear&1) q=sappend(q, "AXE ");
+      if (b->craft_gear&2) q=sappend(q, "PICK ");
+      if (b->craft_gear&16) q=sappend(q, "S.AXE ");
+      if (b->craft_gear&32) q=sappend(q, "C.PICK ");
+      if (b->craft_gear&8192) q=sappend(q, "LAMP ");
+      if (b->craft_gear&16384) q=sappend(q, "ROD ");
+      if (b->craft_gear&512) q=sappend(q, "RAFT ");
+      if (b->craft_gear&262144) q=sappend(q, "SAIL ");
+      if (b->craft_gear&4) q=sappend(q, "SWD ");
+      if (b->craft_gear&64) q=sappend(q, "SPEAR ");
+      if (b->craft_gear&32768) q=sappend(q, "BOOM ");
+      if (b->craft_gear&128) q=sappend(q, "ZAP ");
+      if (b->craft_gear&65536) q=sappend(q, "S.ZAP ");
+      if (b->craft_gear&8) q=sappend(q, "ARM ");
+      if (b->craft_gear&256) q=sappend(q, "R.ARM ");
+      if (b->craft_gear&131072) q=sappend(q, "SHELL");
+      *q=0; if (q!=buf) draw_text(vx+124, vy+20, buf, 1, COL(250,215,130)); }
+    if (S->craft_demolish>0 && !S->craft_menu){
+        char buf[80]; char *q=buf; q=sappend(q, "DEMOLISH ARMED - "); q=sappend(q, lbl_int()); q=sappend(q, " REMOVES A BUILD"); *q=0;
+        draw_text_center(vx+vw2/2, vy+40, buf, 1, COL(255,180,130));
+    }
+    if (S->sleep_t>0){
+        float d = 1.0f - (S->sleep_t>0.7f? (S->sleep_t-0.7f)/0.7f : S->sleep_t/0.7f);
+        blend_rect(vx, vy, vw2, vh2, COL(6,6,16), (int)(210*d));
+        if (d>0.75f) draw_text_center(vx + vw2/2, vy + vh2/2-4, "Z Z Z", 2, COL(200,210,255));
+    }
+    if (S->craft_menu){
+        int rows[64]; int n = craft_all_rows(b, rows);
+        int visn = n<7? n : 7;   // the list scrolls: seven rows, never a wall of text
+        int w=380, h=40+visn*20+16+24;   // +24: the selection detail strip
+        int x=vx+(vw2-w)/2, y=vy+(vh2-h)/2;
+        if (w>vw2-8){ w=vw2-8; x=vx+4; }
+        rect_fill(x, y, w, h, COL(18,22,20)); rect_line(x, y, w, h, COL(198,164,84));
+        draw_text_center(x+w/2, y+8, "CRAFTING", 2, COL(255,214,64));
+        for (int r=S->craft_scroll;r<S->craft_scroll+visn && r<n;r++){
+            int id = rows[r], ry = y+30+(r-S->craft_scroll)*20;
+            if (id<0){   // a segment header: a signpost in the list, never selectable
+                rect_fill(x+10, ry-2, w-20, 13, COL(26,32,28));
+                draw_text_center(x+w/2, ry, CRAFT_CAT_NAME[-id-1], 1, COL(198,164,84));
+                continue;
+            }
+            char st[64]; craft_row_status(b, id, st);
+            u32 colr = craft_row_color(b, id);
+            if (S->craft_sel==r){ rect_fill(x+10, ry-3, w-20, 15, COL(70,58,30)); draw_text(x+14, ry, ">", 1, COL(255,220,90)); }
+            craft_icon(x+26, ry-1, id);
+            draw_text(x+46, ry, craft_row_name(id), 1, colr);
+            draw_text(x+w-28-text_w(st,1), ry, st, 1, colr);
+        }
+        // the scrollbar: a track, and a thumb that says where you are
+        if (n>visn){
+            int track_y = y+30, track_h = visn*20-8;
+            rect_fill(x+w-10, track_y, 3, track_h, COL(52,58,54));
+            int th = track_h*visn/n; if (th<12) th=12;
+            int ty2 = track_y + (track_h-th)*S->craft_scroll/(n-visn);
+            rect_fill(x+w-10, ty2, 3, th, COL(255,220,90));
+        }
+        // the selection, up close: its icon in a gold chip, its name big —
+        // what you are about to craft is never in doubt (Daniel, Nov 5)
+        { int sid = rows[S->craft_sel]; int dy2 = y+h-40;
+          char sst[64]; craft_row_status(b, sid, sst);
+          rect_fill(x+10, dy2, w-20, 24, COL(24,28,24));
+          rect_line(x+14, dy2+4, 16, 16, COL(198,164,84));
+          craft_icon(x+15, dy2+5, sid);
+          draw_text(x+38, dy2+5, craft_row_shortname(sid), 2, craft_row_color(b, sid));
+          draw_text(x+w-28-text_w(sst,1), dy2+8, sst, 1, COL(200,214,200)); }
+        { char buf[96]; char *q=buf;
+          if (mobile_ui() && !pad_mode()){
+              draw_text_center(x+w/2, y+h-14, G.touch_ctl? "STICK PICKS - FIRE CRAFTS - TAP ROWS TOO" : "TAP A ROW - TAP IT AGAIN TO CRAFT - TAP OUTSIDE TO CLOSE", 1, COL(150,170,190));
+          } else {
+              q=sappend(q, pad_mode()? "DPAD/STICK" : "ARROWS"); q=sappend(q, " PICK - ");
+              q=sappend(q, lbl_fire()); q=sappend(q, " CRAFTS - ");
+              q=sappend(q, lbl_wall()); q=sappend(q, " CLOSES"); *q=0;
+              draw_text_center(x+w/2, y+h-14, buf, 1, COL(150,170,190)); } }
+    }
+    // (no standing hint line here any more — controls live in the
+    // Start-menu's CONTROLS panel; Daniel, Nov 6)
+    // one contextual prompt (Daniel, Nov 6): what INTERACT would do if
+    // pressed this instant, in the update's own priority order, named
+    // for the device in hand. The note bar outranks it when speaking.
+    if (!S->craft_menu && !S->bw_menu && S->note_t<=0 && S->sleep_t<=0){
+        const char *verb = 0;
+        int ttx = bw_tileof(b->x + fcos(b->aim)*34), tty = bw_tileof(b->y + fsin(b->aim)*34);
+        if (S->craft_demolish>0) verb = "DEMOLISH";
+        else if (craft_fire_near(b, b->x, b->y, 84, 0, 0) || craft_bedroll_near(b)) verb = "REST";
+        else if ((b->craft_gear&16384) && craft_biome_at(b, ttx, tty)==5) verb = "FISH";
+        else if (S->craft_cache_on){
+            float dx=S->craft_cache_x-b->x, dy=S->craft_cache_y-b->y;
+            if (dx*dx+dy*dy < 50*50) verb = "LOOT THE CACHE";
+        }
+        if (!verb){ int nd = craft_node_at(pi, ttx, tty);
+            if (nd==1) verb = "CHOP"; else if (nd==2) verb = "MINE"; else if (nd) verb = "GATHER"; }
+        if (verb){ char hb[72]; const char *hint = key_prompt(hb, lbl_int(), verb);
+            int hw2 = text_w(hint, 1);
+            // anchored like the main game's prompt (VH-34): in this
+            // render the -22 slot lands half off the frame's bottom
+            rect_fill(vx + vw2/2 - hw2/2 - 6, vy + vh2-38, hw2+12, 14, COL(20,26,20));
+            draw_text_center(vx + vw2/2, vy + vh2-35, hint, 1, COL(240,248,240)); }
+    }
+    if (S->note_t>0){
+        rect_fill(vx, vy+vh2-22, vw2, 22, COL(14,14,20));
+        draw_text_center(vx+vw2/2, vy+vh2-15, S->note, 1, COL(255,240,200));
+    }
+}
+
+
+// ===========================================================================
+// TANK RESCUE (Banzai World mode 5, Nov 10 — Daniel asked for a Jackal
+// (NES) clone for the Arcade): the buddy drives a tank up a long field,
+// blasting turrets, patrol tanks and prison huts, ferrying the freed
+// captives to helipads, and breaking the fortress core at the top —
+// which drops the gate so he can roll over the finish line. Tiles are
+// a pure hash function of (buddy seed, level); entities are generated
+// once per level into the session. The record (deepest level cleared)
+// lives on the Buddy as td.
+// ===========================================================================
+static int tank_pad_ty(int k){ return TANK_LEN - 30 - k*28; }   // helipad rows, marching north
+// 0 ground, 1 water (blocks the tank, not shells), 2 concrete (blocks,
+// indestructible), 3 trees (blocks, destructible), 4 sandbags (blocks,
+// destructible, tougher), 5 the boss gate (blocks the tank while the
+// core lives; shells fly clean over it)
+static int tank_tile(BwSim *S, int tx, int ty){
+    if (tx<0 || tx>=TANK_W || ty<0 || ty>=TANK_LEN) return 2;
+    if (ty==TANK_GATE_TY) return S->tank_boss_hp>0? 5 : 0;
+    if (ty==TANK_MID_TY) return (S->tank_mid_hp>0 || S->tank_deliv < S->tank_quota)? 5 : 0;   // the blockade barrier: shells pass, the tank doesn't — and it stays shut until the rescue quota is earned, so the bosses come in sequence
+    if (ty<TANK_GATE_TY) return 0;                          // finish strip + the boss arena plaza
+    if (ty>=TANK_LEN-5) return 0;                           // the spawn apron
+    for (int k=0;k<3;k++){ int pt = tank_pad_ty(k);         // helipads stay clear
+        if (ty>=pt && ty<pt+2 && tx>=10 && tx<15) return 0; }
+    if (tx==12 || tx==13) return 0;                         // the spine: one lane is always drivable
+    u32 seed = (u32)S->tank_seed;
+    u32 h = hash2(tx, ty, seed);
+    int r = (int)(h % 1000);
+    int ct = 30 + S->tank_lvl; if (ct>46) ct=46;            // cover thickens a touch per level
+    int t = 0;
+    if ((int)(hash2(tx>>1, ty>>1, seed ^ 0xA17u) % 100) < 6) t = 1;        // water, in pond-ish blobs
+    else if (r < ct) t = 2;
+    else if (r < ct+62) t = 3;
+    else if (r < ct+92) t = 4;
+    if ((t==3 || t==4) && S->tank_dead[ty*TANK_W+tx]) t = 0;               // shot away earlier
+    return t;
+}
+static int tank_tank_blocked(BwSim *S, float x, float y){
+    static const float off[8][2] = { {-16,-16},{0,-17},{16,-16},{-17,0},{17,0},{-16,16},{0,17},{16,16} };
+    for (int i=0;i<8;i++){
+        int t = tank_tile(S, bw_tileof(x+off[i][0]), bw_tileof(y+off[i][1]));
+        if (t==1 || t==2 || t==3 || t==4 || t==5) return 1;
+    }
+    return 0;
+}
+static TankEn *tank_en_add(BwSim *S, int kind, float x, float y, int hp){
+    if (S->tank_en_n>=TANK_MAXEN) return 0;
+    TankEn *e = &S->tank_en[S->tank_en_n++];
+    e->x=x; e->y=y; e->aim=PI/2; e->lo=0; e->hi=0; e->kind=kind; e->hp=hp; e->dir=1;
+    e->ft = 0.8f + (float)(S->tank_en_n%7)*0.31f;   // staggered, so the field never volleys as one
+    return e;
+}
+static void tank_load_level(int pi, int lvl){
+    BwSim *S=&BWS[pi]; Buddy *b=&G.bud[pi];
+    S->tank_lvl = lvl;
+    S->tank_seed = (int)((u32)b->bw_seed ^ (0x7A9Cu + (u32)lvl*104729u));
+    S->tank_hull = 100; S->tank_pass = 0;
+    S->tank_deliv = 0; S->tank_quota = 3; S->tank_obj = 0; S->tank_obj_x = 12.5f*BW_TILE; S->tank_obj_y = 60*BW_TILE;
+    S->tank_fire_cd = 0; S->tank_grace = 0; S->tank_deadt = 0; S->tank_cleart = 0;
+    S->tank_fx = 0; S->tank_fy = -1;
+    for (int i=0;i<TANK_W*TANK_LEN;i++){ S->tank_dead[i]=0; S->tank_hit[i]=0; }
+    for (int i=0;i<24;i++){ S->tank_cap_a[i]=0; S->tank_sh_a[i]=0; }
+    for (int i=0;i<32;i++) S->tank_es_a[i]=0;
+    S->tank_en_n = 0;
+    // the fortress core and its two guards
+    int bosshp = 430 + 90*lvl;
+    S->tank_boss_hp = bosshp; S->tank_boss_max = bosshp;
+    tank_en_add(S, 4, 12.5f*BW_TILE, 3.5f*BW_TILE, bosshp);
+    if (S->tank_en_n>0) S->tank_en[0].ft = 1.6f;
+    tank_en_add(S, 0, 6*BW_TILE+24, 5*BW_TILE+24, 30 + lvl*4);
+    tank_en_add(S, 0, 19*BW_TILE+24, 5*BW_TILE+24, 30 + lvl*4);
+    // the blockade gun, squatting on the road behind the mid-field
+    // barrier: the second boss of the run, and it dies second-to-last
+    int midhp = 110 + 30*lvl;
+    S->tank_mid_hp = midhp; S->tank_mid_max = midhp;
+    tank_en_add(S, 5, 12.5f*BW_TILE, 44*BW_TILE+24, midhp);
+    // three prison huts are GUARANTEED south of the blockade, so the
+    // delivery quota can always be earned before the road north opens
+    int gh=0;
+    for (int k=0; k<400 && gh<3; k++){
+        u32 h = hash2(k*5+2, lvl*11+3, (u32)S->tank_seed ^ 0xB10Cu);
+        int tx = 2 + (int)(h % 22);
+        int ty = 58 + (int)((h>>8) % 38);
+        if (tank_tile(S, tx, ty)!=0) continue;
+        float ex = tx*BW_TILE+24, ey = ty*BW_TILE+24;
+        int clear = 1;
+        for (int i=0;i<S->tank_en_n;i++){ float dx=S->tank_en[i].x-ex, dy=S->tank_en[i].y-ey; if (dx*dx+dy*dy < 115*115){ clear=0; break; } }
+        if (!clear) continue;
+        // the gate aprons stay clear: nothing camps the road through
+        // either barrier, so a fresh boss kill always has an open road
+        { float gx=ex-600, gy=ey-2232; if (gx*gx+gy*gy < 130*130) continue; }
+        { float gx=ex-600, gy=ey-408;  if (gx*gx+gy*gy < 130*130) continue; }
+        if (tank_en_add(S, 2, ex, ey, 40)) gh++;
+    }
+    // scatter the garrison: hash-picked spots, on open ground, spread out
+    int want_t = 11 + lvl*2; if (want_t>28) want_t=28;
+    int want_p = 6 + lvl;   if (want_p>16) want_p=16;
+    int want_h = 5 + lvl/2; if (want_h>8) want_h=8;
+    int want_r = 2;
+    int gt=0, gp=0, gr=0;
+    for (int k=0; k<700; k++){
+        if (gt>=want_t && gp>=want_p && gh>=want_h && gr>=want_r) break;
+        if (S->tank_en_n >= TANK_MAXEN-1) break;
+        u32 h = hash2(k*3+1, lvl*7+5, (u32)S->tank_seed ^ 0x6A11u);
+        int tx = 2 + (int)(h % 22);
+        int ty = 12 + (int)((h>>8) % (TANK_LEN-22));
+        if (tank_tile(S, tx, ty)!=0) continue;
+        int nearpad = 0;
+        for (int pk=0; pk<3; pk++){ int pt = tank_pad_ty(pk);
+            if (tx>=9 && tx<16 && ty>=pt-1 && ty<pt+3) nearpad = 1; }
+        if (nearpad) continue;
+        float ex = tx*BW_TILE+24, ey = ty*BW_TILE+24;
+        int clear = 1;
+        for (int i=0;i<S->tank_en_n;i++){ float dx=S->tank_en[i].x-ex, dy=S->tank_en[i].y-ey; if (dx*dx+dy*dy < 115*115){ clear=0; break; } }
+        if (!clear) continue;
+        // the gate aprons stay clear: nothing camps the road through
+        // either barrier, so a fresh boss kill always has an open road
+        { float gx=ex-600, gy=ey-2232; if (gx*gx+gy*gy < 130*130) continue; }
+        { float gx=ex-600, gy=ey-408;  if (gx*gx+gy*gy < 130*130) continue; }
+        int roll = (int)((h>>16) % 100);
+        int kind = -1;
+        if (roll<38 && gt<want_t) kind=0;
+        else if (roll<62 && gp<want_p) kind=1;
+        else if (roll<84 && gh<want_h) kind=2;
+        else if (gr<want_r) kind=3;
+        else if (gt<want_t) kind=0;
+        else if (gp<want_p) kind=1;
+        else if (gh<want_h) kind=2;
+        if (kind<0) continue;
+        int hp = kind==0? 30 + lvl*4 : kind==1? 40 + lvl*5 : kind==2? 40 : 1;
+        TankEn *e = tank_en_add(S, kind, ex, ey, hp);
+        if (!e) break;
+        if (kind==0) gt++; else if (kind==1) gp++; else if (kind==2) gh++; else gr++;
+        if (kind==1){   // a patrol: an axis, a span, a way to start
+            float span = (2.0f + (float)((h>>20)%3))*BW_TILE;
+            e->dir = (h&64)? 1 : -1;
+            if (!(h&128)) e->dir *= 2;   // vertical patrol
+            if (e->dir==1 || e->dir==-1){ e->lo = ex-span; e->hi = ex+span; e->aim = e->dir>0? 0 : PI; }
+            else { e->lo = ey-span; e->hi = ey+span; e->aim = e->dir>0? PI/2 : -PI/2; }
+        }
+    }
+    b->x = 12.5f*BW_TILE; b->y = (TANK_LEN-3)*BW_TILE + 24;
+    S->tank_respawn_y = b->y;
+}
+static void tank_enter(int pi){
+    BwSim *S=&BWS[pi]; Buddy *b=&G.bud[pi];
+    S->tank_score=0; S->tank_lives=3; S->tank_t=0;
+    tank_load_level(pi, b->tank_done+1);
+    scpy(S->note, "FOLLOW THE YELLOW ARROW: RESCUE, DELIVER, BREAK THROUGH!", 72); S->note_t=3.6f;
+}
+static void tank_kill_en(int pi, TankEn *e){
+    BwSim *S=&BWS[pi];
+    int kind = e->kind;
+    if (kind==2){   // a hut breaks open: one captive, standing and waving
+        for (int i=0;i<24;i++) if (!S->tank_cap_a[i]){
+            S->tank_cap_a[i]=1; S->tank_cap_x[i]=e->x; S->tank_cap_y[i]=e->y; break; }
+        scpy(S->note, "A CAPTIVE! DRIVE OVER TO PICK THEM UP.", 72); S->note_t=2.4f;
+        S->tank_score += 200;
+    } else if (kind==0) S->tank_score += 100;
+    else if (kind==1) S->tank_score += 150;
+    else if (kind==5){
+        S->tank_score += 500; S->tank_mid_hp = 0;
+        for (int i=0;i<32;i++) S->tank_es_a[i]=0;   // same courtesy as the core: its shells die with it
+        scpy(S->note, "BLOCKADE BROKEN! THE ROAD NORTH IS OPEN.", 72); S->note_t=3.2f;
+        sfx(12);
+    }
+    else if (kind==4){
+        S->tank_score += 1000; S->tank_boss_hp = 0;
+        for (int i=0;i<32;i++) S->tank_es_a[i]=0;   // a dead boss's shells fizzle — no posthumous kills on your victory lap
+        scpy(S->note, "BOSS DOWN! THE GATE IS OPEN - DRIVE NORTH!", 72); S->note_t=3.2f;
+        sfx(12);
+    }
+    if (kind!=3){ splat(e->x, e->y, kind==4? COL(255,160,60) : COL(200,120,70), kind==4? 26 : 12, 130); sfx(7); }
+    e->kind = -1;
+}
+static void tank_hurt(int pi, int dmg){
+    BwSim *S=&BWS[pi]; Buddy *b=&G.bud[pi];
+    if (S->tank_grace>0 || S->tank_deadt>0 || S->tank_cleart>0) return;
+    S->tank_hull -= dmg; sfx(9);
+    splat(b->x, b->y, COL(255,120,60), 6, 90);
+    if (S->tank_hull<=0){
+        S->tank_hull = 0; S->tank_lives--; S->tank_deadt = 1.5f;
+        splat(b->x, b->y, COL(255,170,70), 24, 150); sfx(7); sfx(13);
+        if (S->tank_lives<=0){ scpy(S->note, "THE TANK IS SCRAP. THE BUDDY WALKS HOME.", 72); S->note_t=3.0f; }
+        else { scpy(S->note, "TANK DOWN! BACK TO THE LAST PAD.", 72); S->note_t=2.4f; }
+    } else if (S->tank_grace<0.35f) S->tank_grace = 0.35f;   // a breath of mercy between hits
+}
+static void tank_fire_eshell(BwSim *S, float x, float y, float ang, float spd){
+    for (int i=0;i<32;i++) if (!S->tank_es_a[i]){
+        S->tank_es_a[i]=1; S->tank_es_t[i]=1.7f;
+        S->tank_es_x[i]=x; S->tank_es_y[i]=y;
+        S->tank_es_vx[i]=fcos(ang)*spd; S->tank_es_vy[i]=fsin(ang)*spd;
+        return;
+    }
+}
+static void tank_update_shells(int pi, float dt){
+    BwSim *S=&BWS[pi]; Buddy *b=&G.bud[pi];
+    // your shells: over water and the gate, stopped by hard cover
+    for (int i=0;i<24;i++) if (S->tank_sh_a[i]){
+        S->tank_sh_t[i]-=dt; if (S->tank_sh_t[i]<=0){ S->tank_sh_a[i]=0; continue; }
+        S->tank_sh_x[i]+=S->tank_sh_vx[i]*dt; S->tank_sh_y[i]+=S->tank_sh_vy[i]*dt;
+        float sx=S->tank_sh_x[i], sy=S->tank_sh_y[i];
+        int tx=bw_tileof(sx), ty=bw_tileof(sy);
+        int t=tank_tile(S, tx, ty);
+        if (t==2){ S->tank_sh_a[i]=0; splat(sx, sy, COL(190,190,200), 3, 60); continue; }
+        if (t==3 || t==4){
+            S->tank_sh_a[i]=0;
+            int idx=ty*TANK_W+tx;
+            if (t==3){ S->tank_dead[idx]=1; S->tank_score+=10; splat(sx, sy, COL(90,160,70), 6, 80); sfx(5); }
+            else { S->tank_hit[idx]++; splat(sx, sy, COL(210,180,120), 5, 80); sfx(5);
+                   if (S->tank_hit[idx]>=2){ S->tank_dead[idx]=1; S->tank_score+=25; } }
+            continue;
+        }
+        for (int j=0;j<S->tank_en_n;j++){
+            TankEn *e=&S->tank_en[j];
+            if (e->kind<0 || e->kind==3) continue;
+            float rr = e->kind==4? 48.0f : e->kind==5? 30.0f : e->kind==2? 24.0f : 18.0f;
+            float dx=sx-e->x, dy=sy-e->y;
+            if (dx*dx+dy*dy < rr*rr){
+                S->tank_sh_a[i]=0;
+                e->hp -= 5;
+                if (e->kind==4) S->tank_boss_hp = e->hp>0? e->hp : 0;
+                if (e->kind==5) S->tank_mid_hp = e->hp>0? e->hp : 0;
+                splat(sx, sy, COL(255,210,120), 4, 80); sfx(5);
+                if (e->hp<=0) tank_kill_en(pi, e);
+                break;
+            }
+        }
+    }
+    // their shells: hard cover works for you, too
+    for (int i=0;i<32;i++) if (S->tank_es_a[i]){
+        S->tank_es_t[i]-=dt; if (S->tank_es_t[i]<=0){ S->tank_es_a[i]=0; continue; }
+        S->tank_es_x[i]+=S->tank_es_vx[i]*dt; S->tank_es_y[i]+=S->tank_es_vy[i]*dt;
+        float sx=S->tank_es_x[i], sy=S->tank_es_y[i];
+        int t=tank_tile(S, bw_tileof(sx), bw_tileof(sy));
+        if (t==2 || t==3 || t==4){ S->tank_es_a[i]=0; continue; }
+        float dx=sx-b->x, dy=sy-b->y;
+        if (dx*dx+dy*dy < 20*20){ S->tank_es_a[i]=0; tank_hurt(pi, 10); }
+    }
+}
+static void tank_update_foes(int pi, float dt){
+    BwSim *S=&BWS[pi]; Buddy *b=&G.bud[pi];
+    for (int j=0;j<S->tank_en_n;j++){
+        TankEn *e=&S->tank_en[j];
+        if (e->kind<0) continue;
+        float dx=b->x-e->x, dy=b->y-e->y;
+        float d2=dx*dx+dy*dy;
+        if (e->kind==0){   // a turret: the barrel tracks you, the shots are aimed
+            if (d2 < 430*430) e->aim = fatan2(dy, dx);
+            e->ft -= dt;
+            if (e->ft<=0 && d2 < 340*340){
+                float cd = 1.3f - (float)S->tank_lvl*0.05f; if (cd<0.9f) cd=0.9f;
+                e->ft = cd;
+                tank_fire_eshell(S, e->x + fcos(e->aim)*20, e->y + fsin(e->aim)*20, e->aim, 335);
+                sfx(2);
+            }
+        } else if (e->kind==5){   // the blockade gun: twin barrels, patient and heavy
+            e->aim = fatan2(dy, dx);
+            e->ft -= dt;
+            if (e->ft<=0 && d2 < 540*540){
+                float cd = 1.5f - (float)S->tank_lvl*0.03f; if (cd<1.15f) cd=1.15f;
+                e->ft = cd;
+                for (int s2=-1;s2<=1;s2+=2) tank_fire_eshell(S, e->x + (float)s2*10, e->y + 26, e->aim + (float)s2*0.09f, 320);
+                sfx(2);
+            }
+        } else if (e->kind==1){   // a patrol tank, trundling its beat
+            float sp = 55.0f;
+            if (e->dir==1 || e->dir==-1){
+                float nx2 = e->x + e->dir*sp*dt;
+                if (nx2 > e->hi){ nx2 = e->hi; e->dir = -1; }
+                else if (nx2 < e->lo){ nx2 = e->lo; e->dir = 1; }
+                else if (tank_tile(S, bw_tileof(nx2 + e->dir*22), bw_tileof(e->y))!=0) e->dir = -e->dir;
+                else e->x = nx2;
+                e->aim = e->dir>0? 0 : PI;
+            } else {
+                float ny2 = e->y + (e->dir>0? sp : -sp)*dt;
+                if (ny2 > e->hi){ ny2 = e->hi; e->dir = -2; }
+                else if (ny2 < e->lo){ ny2 = e->lo; e->dir = 2; }
+                else if (tank_tile(S, bw_tileof(e->x), bw_tileof(ny2 + (e->dir>0? 22 : -22)))!=0) e->dir = -e->dir;
+                else e->y = ny2;
+                e->aim = e->dir>0? PI/2 : -PI/2;
+            }
+            if (d2 < 30*30) tank_hurt(pi, 14);   // don't trade paint with a tank
+            e->ft -= dt;
+            if (e->ft<=0 && d2 < 320*320){
+                e->ft = 1.55f;
+                float ang = fatan2(dy, dx);
+                tank_fire_eshell(S, e->x + fcos(ang)*22, e->y + fsin(ang)*22, ang, 330);
+                sfx(2);
+            }
+        } else if (e->kind==4){   // the fortress core: slow triple shots from the south face
+            e->aim = fatan2(dy, dx);
+            e->ft -= dt;
+            if (e->ft<=0 && d2 < 560*560){
+                float cd = 2.2f - (float)S->tank_lvl*0.04f; if (cd<1.6f) cd=1.6f;
+                e->ft = cd;
+                for (int s2=-1;s2<=1;s2++) tank_fire_eshell(S, e->x, e->y + 42, e->aim + (float)s2*0.22f, 285);
+                sfx(2);
+            }
+        }
+    }
+}
+// THE MISSION CHAIN (Nov 11, Daniel: progression was unclear — now it
+// reads like Jackal: one objective at a time, in order, with the yellow
+// arrow always pointing at it). Phases: 0 rescue, 1 deliver, 2 break
+// the blockade, 3 destroy the fortress core, 4 cross the finish line.
+// The blockade barrier stays shut until the delivery quota is earned
+// AND the gun is dead; the core waits behind it. Bosses in sequence.
+static void tank_objective(int pi){
+    BwSim *S=&BWS[pi]; Buddy *b=&G.bud[pi];
+    if (S->tank_boss_hp<=0){ S->tank_obj=4; S->tank_obj_x=12.5f*BW_TILE; S->tank_obj_y=1.0f*BW_TILE; return; }
+    if (S->tank_deliv >= S->tank_quota){
+        if (S->tank_mid_hp>0){ S->tank_obj=2; S->tank_obj_x=12.5f*BW_TILE; S->tank_obj_y=44*BW_TILE+24;
+            for (int j=0;j<S->tank_en_n;j++) if (S->tank_en[j].kind==5){ S->tank_obj_x=S->tank_en[j].x; S->tank_obj_y=S->tank_en[j].y; break; }
+            return; }
+        S->tank_obj=3; S->tank_obj_x=12.5f*BW_TILE; S->tank_obj_y=3.5f*BW_TILE; return; }
+    if (S->tank_pass>0){ S->tank_obj=1; float bd=1e18f;
+        for (int k2=0;k2<3;k2++){ float px=12.5f*BW_TILE, py=tank_pad_ty(k2)*BW_TILE+48;
+            float dx=b->x-px, dy=b->y-py, d2=dx*dx+dy*dy; if (d2<bd){ bd=d2; S->tank_obj_x=px; S->tank_obj_y=py; } }
+        return; }
+    S->tank_obj=0; float bd=1e18f; int found=0;
+    for (int j=0;j<S->tank_en_n;j++){ TankEn *e=&S->tank_en[j]; if (e->kind!=2) continue;
+        float dx=b->x-e->x, dy=b->y-e->y, d2=dx*dx+dy*dy; if (d2<bd){ bd=d2; S->tank_obj_x=e->x; S->tank_obj_y=e->y; found=1; } }
+    for (int i=0;i<24;i++) if (S->tank_cap_a[i]){
+        float dx=b->x-S->tank_cap_x[i], dy=b->y-S->tank_cap_y[i], d2=dx*dx+dy*dy; if (d2<bd){ bd=d2; S->tank_obj_x=S->tank_cap_x[i]; S->tank_obj_y=S->tank_cap_y[i]; found=1; } }
+    if (!found){ S->tank_obj=1; S->tank_obj_x=12.5f*BW_TILE; S->tank_obj_y=tank_pad_ty(0)*BW_TILE+48; }
+}
+static void tank_update(int pi, float dt, const BwIn *in){
+    BwSim *S=&BWS[pi]; Buddy *b=&G.bud[pi];
+    if (in->exit_){ bw_exit(pi, 0); return; }
+    S->tank_t += dt;
+    tank_objective(pi);
+    if (S->tank_grace>0) S->tank_grace -= dt;
+    if (S->tank_fire_cd>0) S->tank_fire_cd -= dt;
+    if (S->tank_deadt>0){
+        S->tank_deadt -= dt;
+        tank_update_shells(pi, dt);   // the world keeps simmering while you burn
+        if (S->tank_deadt<=0){
+            if (S->tank_lives<=0){ bw_exit(pi, 0); return; }
+            b->x = 12.5f*BW_TILE; b->y = S->tank_respawn_y;
+            S->tank_hull = 100; S->tank_grace = 1.5f; S->tank_fx=0; S->tank_fy=-1;
+            for (int i=0;i<32;i++) S->tank_es_a[i]=0;   // no welcome-back volley
+        }
+        return;
+    }
+    if (S->tank_cleart>0){
+        S->tank_cleart += dt;
+        b->y -= 60*dt; if (b->y<24) b->y=24;   // rolling over the line
+        if (S->tank_cleart>1.6f){
+            int lvl = S->tank_lvl;
+            if (S->tank_pass>0){ b->xp += 6*S->tank_pass; S->tank_score += 150*S->tank_pass; }   // whoever's still aboard gets flown out
+            b->xp += 10 + 4*lvl;
+            if (lvl > b->tank_done){ b->tank_done = lvl; }
+            do_save();
+            tank_load_level(pi, lvl+1);
+            { char *q=S->note; q=sappend(q, "LEVEL "); q=sapp_int(q, lvl+1); q=sappend(q, " - THEY'RE READY FOR YOU"); *q=0; }
+            S->note_t=2.8f;
+        }
+        return;
+    }
+    // --- drive: 8-way, facing is wherever you last drove ---
+    float mx=0, my=0; int k=in->keys;
+    if (k&K_UP) my-=1; if (k&K_DOWN) my+=1; if (k&K_LEFT) mx-=1; if (k&K_RIGHT) mx+=1;
+    if (mx!=0 || my!=0){
+        float d=fsqrt(mx*mx+my*my); mx/=d; my/=d;
+        S->tank_fx = mx; S->tank_fy = my;
+        b->aim = fatan2(my, mx);
+        float nx = b->x + mx*150.0f*dt;
+        if (!tank_tank_blocked(S, nx, b->y)) b->x = nx;
+        float ny = b->y + my*150.0f*dt;
+        if (!tank_tank_blocked(S, b->x, ny)) b->y = ny;
+        b->walk_ph += dt*9; b->mv_t = 0.15f;
+    }
+    // buildings and turrets are furniture: shove the tank out of their
+    // circles (a push-out slides you along the wall, never a dead stop)
+    for (int j=0;j<S->tank_en_n;j++){
+        TankEn *e=&S->tank_en[j];
+        if (e->kind<0 || e->kind==3) continue;
+        float rr = e->kind==4? 50.0f : e->kind==5? 34.0f : e->kind==2? 26.0f : 20.0f;
+        float dx=b->x-e->x, dy=b->y-e->y;
+        float d2=dx*dx+dy*dy, want=(rr+16)*(rr+16);
+        if (d2<want && d2>0.01f){ float dl=fsqrt(d2); b->x = e->x + dx/dl*(rr+16); b->y = e->y + dy/dl*(rr+16); }
+    }
+    if (b->x < 26) b->x = 26; if (b->x > TANK_W*BW_TILE-26) b->x = TANK_W*BW_TILE-26;
+    if (b->y < 20) b->y = 20; if (b->y > TANK_LEN*BW_TILE-26) b->y = TANK_LEN*BW_TILE-26;
+    // --- the cannon ---
+    if ((in->sel_held || in->sel) && S->tank_fire_cd<=0){
+        S->tank_fire_cd = 0.21f;
+        for (int i=0;i<24;i++) if (!S->tank_sh_a[i]){
+            S->tank_sh_a[i]=1; S->tank_sh_t[i]=0.75f;   // Jackal range: you must roll INTO their range to reach them
+            S->tank_sh_x[i]=b->x + S->tank_fx*26; S->tank_sh_y[i]=b->y + S->tank_fy*26;
+            S->tank_sh_vx[i]=S->tank_fx*520; S->tank_sh_vy[i]=S->tank_fy*520;
+            sfx(4);
+            break;
+        }
+    }
+    tank_update_foes(pi, dt);
+    tank_update_shells(pi, dt);
+    // --- repair pickups: drive over the wrench ---
+    for (int j=0;j<S->tank_en_n;j++){
+        TankEn *e=&S->tank_en[j];
+        if (e->kind!=3) continue;
+        float dx=b->x-e->x, dy=b->y-e->y;
+        if (dx*dx+dy*dy < 26*26){
+            e->kind=-1; S->tank_hull += 30; if (S->tank_hull>100) S->tank_hull=100;
+            scpy(S->note, "PATCHED UP! +30 HULL", 72); S->note_t=2.2f; sfx(11);
+        }
+    }
+    // --- captives: four seats, no standing room ---
+    for (int i=0;i<24;i++) if (S->tank_cap_a[i]){
+        float dx=b->x-S->tank_cap_x[i], dy=b->y-S->tank_cap_y[i];
+        if (dx*dx+dy*dy < 28*28){
+            if (S->tank_pass>=4){ if (S->note_t<=0){ scpy(S->note, "TANK FULL! FIND A HELIPAD.", 72); S->note_t=1.6f; } }
+            else { S->tank_cap_a[i]=0; S->tank_pass++; scpy(S->note, "CAPTIVE ABOARD!", 72); S->note_t=1.8f; sfx(19); }
+        }
+    }
+    // --- helipads: drop-offs, and the respawn point marches north ---
+    for (int k2=0;k2<3;k2++){
+        int pt = tank_pad_ty(k2);
+        float py0 = pt*BW_TILE;
+        if (b->y < py0 + 96 && S->tank_respawn_y > py0 + 72) S->tank_respawn_y = py0 + 72;
+        int ttx = bw_tileof(b->x), tty = bw_tileof(b->y);
+        if (S->tank_pass>0 && ttx>=11 && ttx<=13 && tty>=pt && tty<pt+2){
+            int n = S->tank_pass; S->tank_pass = 0;
+            int was = S->tank_deliv; S->tank_deliv += n;
+            b->xp += 6*n; S->tank_score += 150*n;
+            if (was < S->tank_quota && S->tank_deliv >= S->tank_quota){
+                scpy(S->note, S->tank_mid_hp>0? "QUOTA MET! BREAK THE BLOCKADE UP NORTH." : "QUOTA MET! THE FORTRESS CORE IS NEXT.", 72);
+            } else { char *q=S->note; q=sappend(q, "DELIVERED! +"); q=sapp_int(q, 6*n); q=sappend(q, " XP"); *q=0; }
+            S->note_t=2.4f; sfx(11);
+        }
+    }
+    // --- the finish line, once the core is dead ---
+    if (S->tank_boss_hp<=0 && b->y < 2*BW_TILE){
+        S->tank_cleart = 0.001f;
+        scpy(S->note, "LEVEL CLEAR!", 72); S->note_t=2.6f; sfx(11);
+    }
+}
+static void tank_render(int pi){
+    BwSim *S=&BWS[pi]; Buddy *b=&G.bud[pi];
+    int vx=G.view_x0, vy=G.view_y0, vw2=G.view_w>0? G.view_w : VW, vh2=G.view_h>0? G.view_h : VH;
+    float camx = b->x, half = vw2/2.0f;
+    if (camx < half) camx = half;
+    if (camx > TANK_W*BW_TILE - half) camx = TANK_W*BW_TILE - half;
+    float camy = b->y, halfy = vh2/2.0f;
+    if (camy < halfy) camy = halfy;
+    if (camy > TANK_LEN*BW_TILE - halfy) camy = TANK_LEN*BW_TILE - halfy;
+    G.camx = camx; G.camy = camy;
+    rect_fill(vx, vy, vw2, vh2, COL(26,28,22));
+    int warm = (S->tank_lvl*3)%18;
+    int tx0=bw_tileof(camx - half - BW_TILE), tx1=bw_tileof(camx + half + BW_TILE);
+    int ty0=bw_tileof(camy - halfy - BW_TILE), ty1=bw_tileof(camy + halfy + BW_TILE);
+    for (int ty=ty0; ty<=ty1; ty++) for (int tx=tx0; tx<=tx1; tx++){
+        int x=SX(tx*BW_TILE), y=SY(ty*BW_TILE);
+        int t = tank_tile(S, tx, ty);
+        u32 h = hash2(tx, ty, (u32)S->tank_seed);
+        if (ty<2 && tx>=0 && tx<TANK_W){   // the finish strip
+            rect_fill(x, y, BW_TILE+1, BW_TILE+1, ((tx+ty)&1)? COL(232,232,238) : COL(30,30,36));
+            continue;
+        }
+        if (ty<TANK_GATE_TY && tx>=0 && tx<TANK_W){   // the arena plaza
+            rect_fill(x, y, BW_TILE+1, BW_TILE+1, ((tx+ty)&1)? COL(122,124,130) : COL(112,114,120));
+            if (t==0) continue;
+        } else {   // the field: two-tone scrub, warmed a step per level
+            u32 g = ((tx+ty)&1)? COL(104+warm, 146, 66) : COL(95+warm, 137, 59);
+            rect_fill(x, y, BW_TILE+1, BW_TILE+1, col_shade(g, 0.95f + (float)((h>>20)%10)*0.01f));
+        }
+        if (t==1){   // water
+            rect_fill(x, y, BW_TILE+1, BW_TILE+1, ((tx+ty)&1)? COL(52,110,178) : COL(46,100,168));
+            if (h % 7 == 0){ int wxp = x + (int)((h>>6) % 30) + 6, wyp = y + (int)((h>>11) % 32) + 8;
+                line_thick(wxp, wyp, wxp+7, wyp, 1, COL(150,200,235)); }
+        } else if (t==2){   // concrete
+            rect_fill(x+2, y+2, BW_TILE-4, BW_TILE-4, COL(148,150,156));
+            rect_fill(x+2, y+2, BW_TILE-4, 4, COL(172,174,180));
+            rect_line(x+2, y+2, BW_TILE-4, BW_TILE-4, COL(96,98,104));
+            disc_fill(x+7, y+7, 1, COL(104,106,112)); disc_fill(x+BW_TILE-8, y+BW_TILE-8, 1, COL(104,106,112));
+        } else if (t==3){   // trees
+            rect_fill(x+22, y+26, 4, 12, COL(110,76,44));
+            disc_fill(x+16, y+18, 11, COL(52,116,52)); disc_fill(x+31, y+15, 10, COL(62,130,58));
+            disc_fill(x+24, y+26, 11, COL(44,104,48)); disc_fill(x+19, y+13, 3, COL(120,180,110));
+        } else if (t==4){   // sandbags (cracked once they've taken a hit)
+            rect_fill(x+3, y+22, 20, 10, COL(198,168,110)); rect_fill(x+25, y+22, 20, 10, COL(188,158,102));
+            rect_fill(x+13, y+12, 20, 10, COL(204,176,118)); rect_fill(x+8, y+32, 15, 9, COL(190,160,104));
+            rect_fill(x+26, y+32, 15, 9, COL(196,166,108));
+            if (S->tank_hit[ty*TANK_W+tx]>0){ line_thick(x+10, y+14, x+22, y+26, 1, COL(90,70,40)); line_thick(x+30, y+24, x+38, y+36, 1, COL(90,70,40)); }
+        } else if (t==5){   // the gate: a striped steel band, shut tight
+            rect_fill(x, y+14, BW_TILE+1, 20, COL(58,58,64));
+            for (int s2=0;s2<6;s2++) rect_fill(x+s2*8, y+17, 4, 14, (s2&1)? COL(240,200,60) : COL(24,24,28));
+            rect_fill(x, y+14, BW_TILE+1, 3, COL(90,90,98)); rect_fill(x, y+31, BW_TILE+1, 3, COL(90,90,98));
+        }
+    }
+    // helipads
+    for (int k2=0;k2<3;k2++){
+        int pt = tank_pad_ty(k2);
+        int x=SX(11*BW_TILE), y=SY(pt*BW_TILE), w=3*BW_TILE, hgt=2*BW_TILE;
+        if (x+w<vx || x>vx+vw2 || y+hgt<vy || y>vy+vh2) continue;
+        rect_fill(x, y, w, hgt, COL(52,54,58));
+        rect_line(x+2, y+2, w-4, hgt-4, COL(240,200,60));
+        draw_text_center(x+w/2, y+hgt/2-12, "H", 3, COL(240,200,60));
+    }
+    // entities
+    for (int j=0;j<S->tank_en_n;j++){
+        TankEn *e=&S->tank_en[j];
+        if (e->kind<0) continue;
+        int x=SX(e->x), y=SY(e->y);
+        if (x<vx-70 || x>vx+vw2+70 || y<vy-70 || y>vy+vh2+70) continue;
+        if (e->kind==3){   // the wrench, bobbing on its box
+            int bob = (int)(fsin(S->tank_t*3 + j)*2.0f);
+            shadow_ellipse(x, y+10, 10, 3);
+            rect_fill(x-10, y-8+bob, 20, 16, COL(238,240,244)); rect_line(x-10, y-8+bob, 20, 16, COL(150,60,60));
+            rect_fill(x-2, y-6+bob, 4, 12, COL(200,50,50)); rect_fill(x-6, y-2+bob, 12, 4, COL(200,50,50));
+        } else if (e->kind==2){   // a prison hut
+            shadow_ellipse(x, y+16, 24, 6);
+            rect_fill(x-22, y-8, 44, 26, COL(146,104,62)); rect_line(x-22, y-8, 44, 26, COL(96,66,36));
+            tri_fill(x, y-24, x-26, y-8, x+26, y-8, COL(120,62,44));
+            rect_fill(x-5, y+2, 10, 16, COL(74,50,30));
+            rect_fill(x+10, y-4, 9, 9, COL(40,36,44));
+            rect_fill(x+12, y-4, 1, 9, COL(190,196,204)); rect_fill(x+15, y-4, 1, 9, COL(190,196,204)); rect_fill(x+18, y-4, 1, 9, COL(190,196,204));
+            if (e->hp<40){ int w = 40*e->hp/40; rect_fill(x-20, y-30, 40, 4, COL(40,20,20)); rect_fill(x-20, y-30, w, 4, COL(240,120,70)); }
+        } else if (e->kind==0){   // a turret: base, dome, a barrel that watches you
+            shadow_ellipse(x, y+10, 16, 5);
+            disc_fill(x, y, 15, COL(104,108,98)); circle_out(x, y, 15, COL(70,72,64));
+            line_thick(x, y, x + (int)(fcos(e->aim)*23), y + (int)(fsin(e->aim)*23), 4, COL(52,54,48));
+            disc_fill(x, y, 8, COL(126,130,118)); disc_fill(x, y, 3, COL(220,60,50));
+            { int mx = 30 + S->tank_lvl*4; if (e->hp<mx){ int w = 28*e->hp/mx; if (w<0) w=0; rect_fill(x-14, y-22, 28, 3, COL(40,20,20)); rect_fill(x-14, y-22, w, 3, COL(240,120,70)); } }
+        } else if (e->kind==1){   // a patrol tank
+            shadow_ellipse(x, y+11, 18, 5);
+            int horiz = (e->dir==1 || e->dir==-1);
+            if (horiz){ rect_fill(x-17, y-12, 34, 7, COL(40,40,44)); rect_fill(x-17, y+5, 34, 7, COL(40,40,44));
+                        rect_fill(x-14, y-8, 28, 16, COL(128,84,60)); }
+            else { rect_fill(x-12, y-17, 7, 34, COL(40,40,44)); rect_fill(x+5, y-17, 7, 34, COL(40,40,44));
+                   rect_fill(x-8, y-14, 16, 28, COL(128,84,60)); }
+            line_thick(x, y, x + (int)(fcos(e->aim)*22), y + (int)(fsin(e->aim)*22), 4, COL(70,50,36));
+            disc_fill(x, y, 6, COL(146,100,70));
+            { int mx = 40 + S->tank_lvl*5; if (e->hp<mx){ int w = 32*e->hp/mx; if (w<0) w=0; rect_fill(x-16, y-22, 32, 3, COL(40,20,20)); rect_fill(x-16, y-22, w, 3, COL(240,120,70)); } }
+        } else if (e->kind==5){   // the blockade gun: a sandbagged bunker squatting on the road
+            shadow_ellipse(x, y+20, 34, 8);
+            rect_fill(x-32, y-16, 64, 34, COL(120,96,58)); rect_line(x-32, y-16, 64, 34, COL(84,66,38));
+            rect_fill(x-32, y-16, 64, 7, COL(198,168,110)); rect_fill(x-32, y+11, 64, 7, COL(198,168,110));
+            line_thick(x-8, y+6, x-8 + (int)(fcos(e->aim)*26), y+6 + (int)(fsin(e->aim)*26), 4, COL(52,54,48));
+            line_thick(x+8, y+6, x+8 + (int)(fcos(e->aim)*26), y+6 + (int)(fsin(e->aim)*26), 4, COL(52,54,48));
+            disc_fill(x, y-4, 9, COL(126,130,118)); disc_fill(x, y-4, 3, COL(220,60,50));
+            draw_text_center(x, y-30, "BLOCKADE", 1, COL(255,220,150));
+            if (S->tank_mid_max>0 && e->hp<S->tank_mid_max){ int w = 56*e->hp/S->tank_mid_max; if (w<0) w=0; rect_fill(x-28, y+22, 56, 4, COL(40,20,20)); rect_fill(x-28, y+22, w, 4, COL(240,120,70)); }
+        } else if (e->kind==4){   // the fortress core
+            shadow_ellipse(x, y+40, 48, 12);
+            rect_fill(x-46, y-42, 92, 84, COL(96,100,108)); rect_line(x-46, y-42, 92, 84, COL(60,62,68));
+            rect_fill(x-46, y-42, 92, 8, COL(120,124,132)); rect_fill(x-46, y+6, 92, 4, COL(74,76,84));
+            disc_fill(x-34, y-30, 6, COL(70,72,78)); disc_fill(x+34, y-30, 6, COL(70,72,78));
+            disc_fill(x-34, y+30, 6, COL(70,72,78)); disc_fill(x+34, y+30, 6, COL(70,72,78));
+            line_thick(x, y+10, x + (int)(fcos(e->aim)*34), y + 10 + (int)(fsin(e->aim)*34), 6, COL(52,54,60));
+            { float pulse = 0.75f + 0.25f*fsin(S->tank_t*4);
+              disc_fill(x, y, 19, COL(140,60,60)); disc_fill(x, y, (int)(12*pulse)+4, COL(255,90,70));
+              disc_fill(x-4, y-4, 3, COL(255,200,170)); }
+            draw_text_center(x, y-58, "FORTRESS CORE", 1, COL(255,170,150));
+        }
+    }
+    // captives, standing free and waving
+    for (int i=0;i<24;i++) if (S->tank_cap_a[i]){
+        int x=SX(S->tank_cap_x[i]), y=SY(S->tank_cap_y[i]);
+        if (x<vx-30 || x>vx+vw2+30 || y<vy-30 || y>vy+vh2+30) continue;
+        shadow_ellipse(x, y+8, 7, 2);
+        rect_fill(x-3, y-4, 7, 10, COL(240,140,40));   // the orange suit
+        disc_fill(x, y-8, 4, COL(238,196,150));
+        int wv = (int)(fsin(G.anim_t*7 + i*1.3f)*4.0f);
+        line_thick(x+3, y-3, x+8+wv, y-10, 2, COL(238,196,150));
+        line_thick(x-3, y-3, x-6, y+2, 2, COL(238,196,150));
+    }
+    // shells
+    for (int i=0;i<24;i++) if (S->tank_sh_a[i]){
+        int x=SX(S->tank_sh_x[i]), y=SY(S->tank_sh_y[i]);
+        disc_fill(x, y, 3, COL(255,240,170)); disc_fill(x, y, 1, COL(255,255,255));
+    }
+    for (int i=0;i<32;i++) if (S->tank_es_a[i]){
+        int x=SX(S->tank_es_x[i]), y=SY(S->tank_es_y[i]);
+        disc_fill(x, y, 3, COL(255,90,60)); disc_fill(x, y, 1, COL(255,180,140));
+    }
+    // your tank (gone while it burns)
+    if (S->tank_deadt<=0 && !(S->tank_grace>0.6f && ((int)(S->tank_t*14)&1))){
+        int x=SX(b->x), y=SY(b->y);
+        float fx=S->tank_fx, fy=S->tank_fy, px=-fy, py=fx;
+        shadow_ellipse(x, y+11, 19, 6);
+        for (int s2=-1;s2<=1;s2+=2){   // treads, marks scrolling with the walk phase
+            float cx2 = x + px*13*s2, cy2 = y + py*13*s2;
+            line_thick((int)(cx2 - fx*15), (int)(cy2 - fy*15), (int)(cx2 + fx*15), (int)(cy2 + fy*15), 7, COL(38,38,42));
+            for (int m=0;m<3;m++){
+                int off = -12 + ((m*10 + (int)(b->walk_ph*8)) % 30);
+                int mxp = (int)(cx2 + fx*off), myp = (int)(cy2 + fy*off);
+                line_thick((int)(mxp - px*3), (int)(myp - py*3), (int)(mxp + px*3), (int)(myp + py*3), 2, COL(74,74,80));
+            }
+        }
+        disc_fill(x, y, 16, COL(96,110,52)); circle_out(x, y, 16, COL(64,74,36));
+        disc_fill(x, y, 12, COL(110,126,60));
+        // the passengers ride behind the turret, heads up
+        for (int p2=0;p2<S->tank_pass;p2++){
+            int hx2 = (int)(x - fx*11 + px*(p2*7 - 10)), hy2 = (int)(y - fy*11 + py*(p2*7 - 10));
+            disc_fill(hx2, hy2, 3, COL(238,196,150));
+        }
+        line_thick((int)(x + fx*6), (int)(y + fy*6), (int)(x + fx*27), (int)(y + fy*27), 4, COL(52,60,34));
+        disc_fill(x, y, 8, COL(80,94,44));
+        disc_fill(x, y, 5, bud_coat(b, COL(199,152,94)));   // the driver's head, out of the hatch
+    }
+    // HUD
+    rect_fill(vx, vy, vw2, 20, COL(16,20,28));
+    { char buf[96]; char *q=buf;
+      q=sappend(q, "LEVEL "); q=sapp_int(q, S->tank_lvl);
+      q=sappend(q, "   SCORE "); q=sapp_int(q, S->tank_score);
+      q=sappend(q, "   LIVES "); q=sapp_int(q, S->tank_lives);
+      q=sappend(q, "   ABOARD "); q=sapp_int(q, S->tank_pass); q=sappend(q, "/4");
+      *q=0; draw_text(vx+8, vy+6, buf, 1, COL(240,244,250)); }
+    { int bw3 = 120, bx = vx+vw2-bw3-10, by = vy+6;
+      draw_text(bx-32, by, "HULL", 1, COL(240,244,250));
+      rect_fill(bx-1, by-1, bw3+2, 9, COL(8,8,12));
+      int hw = S->tank_hull*bw3/100; if (hw<0) hw=0;
+      rect_fill(bx, by, hw, 7, S->tank_hull>50? COL(90,200,90) : S->tank_hull>25? COL(240,190,70) : COL(240,80,70)); }
+    if (S->tank_boss_hp>0 && b->y < 16*BW_TILE){   // the core's health, once you're in its shadow
+        int bw3 = 260, bx = vx+(vw2-bw3)/2, by = vy+26;
+        draw_text_center(vx+vw2/2, by-11, "FORTRESS CORE", 1, COL(255,170,150));
+        rect_fill(bx-1, by-1, bw3+2, 8, COL(8,8,12));
+        int hw = S->tank_boss_max>0? S->tank_boss_hp*bw3/S->tank_boss_max : 0; if (hw<0) hw=0;
+        rect_fill(bx, by, hw, 6, COL(240,80,70));
+    }
+    if (S->tank_mid_hp>0 && b->y < 58*BW_TILE){   // the blockade's health, once you're in its shadow
+        int bw3 = 260, bx = vx+(vw2-bw3)/2, by = vy+26;
+        draw_text_center(vx+vw2/2, by-11, "BLOCKADE GUN", 1, COL(255,220,150));
+        rect_fill(bx-1, by-1, bw3+2, 8, COL(8,8,12));
+        int hw = S->tank_mid_max>0? S->tank_mid_hp*bw3/S->tank_mid_max : 0; if (hw<0) hw=0;
+        rect_fill(bx, by, hw, 6, COL(240,170,70));
+    }
+    // the mission line: one objective, always on screen, always current
+    { const char *ob = S->tank_obj==0? "RESCUE THE CAPTIVES" : S->tank_obj==1? "DELIVER TO A HELIPAD" :
+                       S->tank_obj==2? "BREAK THE BLOCKADE!" : S->tank_obj==3? "DESTROY THE FORTRESS CORE!" : "CROSS THE FINISH LINE!";
+      char buf[96]; char *q=buf; q=sappend(q, "OBJECTIVE: "); q=sappend(q, ob);
+      if (S->tank_obj<=1){ q=sappend(q, "  (DELIVERED "); q=sapp_int(q, S->tank_deliv); q=sappend(q, "/"); q=sapp_int(q, S->tank_quota); q=sappend(q, ")"); }
+      *q=0;
+      rect_fill(vx, vy+38, vw2, 16, COL(16,20,28));
+      draw_text_center(vx+vw2/2, vy+42, buf, 1, COL(255,220,90)); }
+    // the yellow arrow: a bouncing chevron over the target when it's on
+    // screen, a bold pointer pinned to the screen edge when it isn't
+    if (S->tank_deadt<=0){
+        float txp = (float)SX(S->tank_obj_x), typ = (float)SY(S->tank_obj_y);
+        float pxp = (float)SX(b->x), pyp = (float)SY(b->y);
+        int onscr = txp>vx+16 && txp<vx+vw2-16 && typ>vy+104 && typ<vy+vh2-16;
+        if (onscr){ int bob = (int)(fsin(S->tank_t*5)*3.0f); int ay = (int)typ - 42 + bob;
+            tri_fill((int)txp, ay+11, (int)txp-7, ay, (int)txp+7, ay, COL(255,220,90)); }
+        else { float ang = fatan2(typ-pyp, txp-pxp);
+            float ax = txp, ay = typ;
+            if (ax<vx+30) ax=(float)vx+30; if (ax>vx+vw2-30) ax=(float)vx+vw2-30;
+            if (ay<vy+66) ay=(float)vy+66; if (ay>vy+vh2-30) ay=(float)vy+vh2-30;
+            float ca=fcos(ang), sa=fsin(ang), pxx=-sa, pyy=ca;
+            tri_fill((int)(ax+ca*14), (int)(ay+sa*14), (int)(ax-ca*10+pxx*8), (int)(ay-sa*10+pyy*8), (int)(ax-ca*10-pxx*8), (int)(ay-sa*10-pyy*8), COL(24,20,8));
+            tri_fill((int)(ax+ca*11), (int)(ay+sa*11), (int)(ax-ca*8+pxx*6), (int)(ay-sa*8+pyy*6), (int)(ax-ca*8-pxx*6), (int)(ay-sa*8-pyy*6), COL(255,220,90)); }
+    }
+    if (S->tank_cleart>0) draw_text_center(vx+vw2/2, vy+vh2/3, "LEVEL CLEAR!", 2, COL(255,244,180));
+    if (S->note_t>0){
+        rect_fill(vx, vy+vh2-22, vw2, 22, COL(14,14,20));
+        draw_text_center(vx+vw2/2, vy+vh2-15, S->note, 1, COL(255,240,200));
+    }
+}
+
+static void bw_render_modes(int pi){
+    BwSim *S = &BWS[pi];
+    Buddy *b=&G.bud[pi];
+    if (S->bat.active){ bw_render_battle(pi); return; }
+    if (b->bw_mode==2){ bw_render_ent(pi); return; }
+    if (b->bw_mode==3){ plat_render(pi); return; }
+    if (b->bw_mode==4){ craft_render(pi); return; }
+    if (b->bw_mode==5){ tank_render(pi); return; }
+    u32 seed=(u32)b->bw_seed;
+    G.camx=b->x; G.camy=b->y;
+    // the view: full screen solo, or this player's split half in co-op
+    int vx=G.view_x0, vy=G.view_y0, vw2=G.view_w>0? G.view_w : VW, vh2=G.view_h>0? G.view_h : VH;
+    rect_fill(vx, vy, vw2, vh2, COL(84,156,62));
+    int tx0=bw_tileof(b->x - vw2/2 - BW_TILE), tx1=bw_tileof(b->x + vw2/2 + BW_TILE);
+    int ty0=bw_tileof(b->y - vh2/2 - BW_TILE), ty1=bw_tileof(b->y + vh2/2 + BW_TILE);
+    for (int ty=ty0; ty<=ty1; ty++) for (int tx=tx0; tx<=tx1; tx++){
+        int x=SX(tx*BW_TILE), y=SY(ty*BW_TILE);
+        u32 h = hash2(tx, ty, seed ^ 0x7A55u);
+        // palette lift (Nov 3, Daniel: "kinda drab"): a checker you can
+        // actually see, per-tile shade weather, and sunlit patches
+        int site = bw_site_at_xy(b, tx*BW_TILE+24, ty*BW_TILE+24);
+        int ocean = bw_outside_world(tx*BW_TILE+24, ty*BW_TILE+24);
+        { u32 base;
+          if (ocean){
+              // the sea: two blues in a checker, lighter in the
+              // shallows within a tile or so of the shore
+              float wx2 = tx*BW_TILE+24, wy2 = ty*BW_TILE+24;
+              int shallow = wx2 > BW_WX0-84 && wx2 < BW_WX1+84 && wy2 > BW_WY0-84 && wy2 < BW_WY1+84;
+              base = shallow? (((tx+ty)&1)==0? COL(74,146,196) : COL(66,136,186))
+                            : (((tx+ty)&1)==0? COL(36,88,146) : COL(32,80,136));
+              rect_fill(x, y, BW_TILE+1, BW_TILE+1, col_shade(base, 0.94f + (float)((h>>20)%14)*0.01f));
+              if (h % 7 == 0){ int wxp = x + (int)((h>>6) % 30) + 6 + (int)(G.anim_t*6 + (h%40)) % 13 - 6,
+                                  wyp = y + (int)((h>>11) % 32) + 8 + (int)(fsin(G.anim_t*1.3f + (float)(h%9))*1.5f);
+                  line_thick(wxp, wyp, wxp+4, wyp-2, 1, COL(150,200,235)); line_thick(wxp+4, wyp-2, wxp+8, wyp, 1, COL(150,200,235)); }
+              continue;
+          }
+          float road_d = (b->bw_mode==1 && site<0)? bw_road_dist(tx*BW_TILE+24, ty*BW_TILE+24) : 1e9f;
+          if (road_d < 42)  base = road_d<26? (((tx+ty)&1)==0? COL(170,150,98) : COL(160,140,90))    // the worn road itself
+                                            : (((tx+ty)&1)==0? COL(138,166,86) : COL(128,156,78));   // its trampled edge
+          else if (site==0) base = ((tx+ty)&1)==0? COL(182,156,102) : COL(172,146,94);
+          else if (site==1) base = ((tx+ty)&1)==0? COL(132,134,132) : COL(122,124,122);
+          else if (site==2) base = ((tx+ty)&1)==0? COL(178,216,236) : COL(166,204,226);
+          else if (site==3) base = ((tx+ty)&1)==0? COL(102,98,104) : COL(92,88,94);
+          else if (site==4) base = ((tx+ty)&1)==0? COL(126,136,100) : COL(116,126,92);
+          else { base = ((tx+ty)&1)==0? COL(104,178,80) : COL(84,156,62); if (h % 19 == 0) base = COL(126,192,86); }
+          rect_fill(x, y, BW_TILE+1, BW_TILE+1, col_shade(base, 0.94f + (float)((h>>20)%14)*0.01f)); }
+        // terrain grain on the open grass (Daniel, Nov 6): worn dirt
+        // patches and speckle, so the meadow reads as GROUND, not as
+        // one flat green sheet — kept quiet on purpose
+        if (!ocean && site<0){
+            if ((h>>3)%11==0){ int px2 = x + (int)((h>>6)%26)+8, py2 = y + (int)((h>>11)%24)+10;
+                disc_fill(px2, py2, 6, COL(156,138,92)); disc_fill(px2+7, py2+2, 4, COL(148,130,86)); disc_fill(px2-6, py2+3, 4, COL(150,134,90)); }
+            if ((h>>5)%3==0){ pset(x + (int)((h>>7)%40)+4, y + (int)((h>>13)%40)+4, COL(70,138,52));
+                pset(x + (int)((h>>17)%40)+4, y + (int)((h>>23)%40)+4, COL(140,205,105)); }
+        }
+        int lush = bw_lush_at(tx, ty, seed);
+        if (!ocean && site!=1 && site!=2 && site!=3){ // grass tufts, thick where it's lush
+            int tufts = lush==2? (h%5==0? 0 : 4) : lush==1? (h%3==0? 3 : (h%3==1? 2 : 0)) : (h%6==0? 2 : 0);
+            for (int g2=0; g2<tufts; g2++){ u32 hh = hash2(tx*7+g2*13, ty*7-g2*11, seed ^ 0x6A11u);
+                int gx = x + (int)(hh % 38) + 5, gy = y + (int)((hh>>8) % 36) + 7;
+                line_thick(gx, gy, gx-1, gy-5, 1, COL(58,124,46)); line_thick(gx+3, gy, gx+4, gy-4, 1, COL(134,202,100)); } }
+        if (!ocean && (site<0 || site==0) && lush>=1 && h % (lush==2? 9 : 16) == 0){ // a bush: clustered dark discs, one lit top
+            int bx2 = x + (int)((h>>7) % 30) + 9, by2 = y + (int)((h>>13) % 28) + 10;
+            disc_fill(bx2-5, by2+2, 5, COL(44,102,42)); disc_fill(bx2+5, by2+2, 5, COL(44,102,42));
+            disc_fill(bx2, by2-2, 6, COL(52,116,48)); disc_fill(bx2-2, by2-4, 3, COL(86,150,70)); }
+        if (!ocean && site<0 && lush==2 && (h>>5) % 14 == 0){ // mushrooms in the deep green only
+            int mx2 = x + (int)((h>>9) % 32) + 8, my2 = y + (int)((h>>15) % 30) + 9;
+            pset(mx2, my2, COL(240,238,228)); pset(mx2, my2-1, COL(240,238,228));
+            disc_fill(mx2, my2-3, 2, COL(206,64,54)); pset(mx2-1, my2-3, COL(255,240,230));
+            pset(mx2+6, my2+2, COL(240,238,228)); disc_fill(mx2+6, my2, 1, COL(206,64,54)); }
+        if (!ocean && h % (lush==2? 6 : lush==1? 11 : 33) == 0 && (site<0 || site==0)){ // flower clusters, not pinpricks: three petals + a heart
+            static const u32 FLW[4] = { COL(255,216,90), COL(255,150,190), COL(190,160,255), COL(250,250,246) };
+            u32 fc = FLW[(h>>16)&3];
+            int fx2 = x + (int)((h>>6) % 34) + 6, fy2 = y + (int)((h>>11) % 34) + 7;
+            disc_fill(fx2-2, fy2, 1, fc); disc_fill(fx2+2, fy2, 1, fc); disc_fill(fx2, fy2-2, 1, fc);
+            pset(fx2, fy2, COL(255,240,190)); }
+    }
+    // the shoreline (glow-up): a dashed foam line where meadow
+    // meets sea, crawling slowly so the water feels alive
+    { int ph = (int)(G.anim_t*2.0f);
+      int fx0 = SX(BW_WX0), fx1 = SX(BW_WX1), fy0 = SY(BW_WY0), fy1 = SY(BW_WY1);
+      int vy0 = vy, vy1 = vy+vh2, vx0 = vx, vx1 = vx+vw2;
+      if (fx0>=vx0 && fx0<vx1) for (int yy=vy0; yy<vy1; yy+=7) if ((((yy/7)+ph)&1)==0) rect_fill(fx0-1, yy, 2, 4, COL(228,244,252));
+      if (fx1>=vx0 && fx1<vx1) for (int yy=vy0; yy<vy1; yy+=7) if ((((yy/7)+ph)&1)==0) rect_fill(fx1-1, yy, 2, 4, COL(228,244,252));
+      if (fy0>=vy0 && fy0<vy1) for (int xx=vx0; xx<vx1; xx+=7) if ((((xx/7)+ph)&1)==0) rect_fill(xx, fy0-1, 4, 2, COL(228,244,252));
+      if (fy1>=vy0 && fy1<vy1) for (int xx=vx0; xx<vx1; xx+=7) if ((((xx/7)+ph)&1)==0) rect_fill(xx, fy1-1, 4, 2, COL(228,244,252)); }
+    bw_draw_gate();
+    bw_draw_objects(pi, 0);
+    draw_buddy(b);
+    bw_draw_objects(pi, 1);
+    ui_vignette(vx, vy, vw2, vh2);
+    // the buddy card
+    rect_fill(vx+8, vy+8, 168, 46, COL(20,26,20)); rect_line(vx+8, vy+8, 168, 46, COL(198,164,84));
+    { char buf[64]; char *q=buf; q=sappend(q, BUD_ELF[b->name_idx%BUD_NAMES_N]); q=sappend(q, " THE "); q=sappend(q, BUD_NAME[b->species%BUDN]); *q=0;
+      draw_text(vx+14, vy+13, buf, 1, COL(255,244,210)); }
+    { float f = b->maxhp>0? b->hp/b->maxhp : 0; if (f<0) f=0;
+      rect_fill(vx+14, vy+26, 120, 5, COL(40,30,40)); rect_fill(vx+14, vy+26, (int)(120*f), 5, f>0.35f? COL(120,230,90) : COL(255,170,60));
+      char hb[24]; char *q=hb; q=sapp_int(q, (int)b->hp); q=sappend(q, "/"); q=sapp_int(q, (int)b->maxhp); *q=0;
+      draw_text(vx+138, vy+25, hb, 1, COL(230,240,230)); }
+    { float f = b->energy/BUD_ENERGY_MAX; if (f<0) f=0;
+      rect_fill(vx+14, vy+36, 120, 4, COL(40,30,40)); rect_fill(vx+14, vy+36, (int)(120*f), 4, COL(120,200,255));
+      draw_text(vx+138, vy+35, "ENERGY", 1, COL(170,220,255)); }
+    // the context prompt (Daniel, Nov 6): ONE line, only when there is
+    // something to interact with, naming the actual key/button for
+    // the device in hand — never the whole control list
+    { const char *verb = 0;
+      float dx=b->x, dy=b->y+6;
+      if (bw_npc_near(b, 46)>=0) verb = "TALK";
+      else if (bw_term_near(b, 44)>=0) verb = "PRESS THE TERMINAL";
+      else if (bw_sign_near(b, 44)) verb = "READ THE SCRATCHES";
+      else if (bw_hsign_near(b, 44)>=0) verb = "READ THE SIGN";
+      else if (bw_bitling_near(b, 44)) verb = "SAY HI";
+      else if (bw_tool_near(b, 44)>=0) verb = "PICK IT UP";
+      else if (dx*dx+dy*dy < 46*46) verb = "BACK TO THE BUG MALL";
+      else { float tx, ty; if (bw_tent_near(b, 42, &tx, &ty)) verb = "SLEEP (FULL HP + ENERGY)"; }
+      if (verb){ char hb[72]; const char *hint = key_prompt(hb, lbl_int(), verb);
+      int hw2 = text_w(hint, 1);
+      rect_fill(vx + vw2/2 - hw2/2 - 6, vy + vh2-22, hw2+12, 14, COL(20,26,20));
+      draw_text_center(vx + vw2/2, vy + vh2-19, hint, 1, COL(240,248,240)); } }
+    bw_draw_minimap(pi);
+    bw_draw_note(pi);
+    if (S->log_open){
+        static const char *QN[10] = { "MEET ELDER PATCHINA", "CLEAR THE SERVER FARM", "HOUSE CALL FOR A HERMIT", "ZERO-DAY FUNERAL", "MOP'S LOST TOOLS", "THE SUNKEN CACHE", "COLD STORAGE", "SPECIAL DELIVERY", "THE STRAY PROCESS", "READ THE SIGNS" };
+        // a guiding line per quest (Nov 4, Daniel: "more detailed,
+        // clearer — don't give it all away"): shown while ACTIVE only
+        static const char *QD[10] = {
+            "THE ELDER WAITS IN PATCH VILLAGE, NORTH-WEST.",
+            "BONK 3 HACKERS AT THE FARM. THEN MIND THE TERMINALS.",
+            "GLITCH LIVES ALONE AT THE FROZEN LAKE, FAR SOUTH.",
+            "ZED WAITS PAST HIS FENCE. GATES OPEN FOR CRANKS.",
+            "TOOLS GLINT GOLD OUT THERE. THE DIAMOND FINDS ONE.",
+            "THE HOARDER SITS IN THE WESTERN RUINS. 4TH HITS HEAL IT.",
+            "BONK 2 HACKERS ON THE FROZEN LAKE ITSELF.",
+            "CARRY MOP'S PARCEL TO GLITCH AT THE LAKE.",
+            "A STRAY PROCESS WANDERS SOUTH OF PATCH VILLAGE.",
+            "READ SCRATCHED SIGNS BY ROADS AND PASSES. ANY THREE." };
+        int w = vw2<420? vw2-16 : 404;
+        int need = 26 + 4 + 14 + 4*13 + 16;
+        if (b->bw_mode!=1) need = 26 + 14 + 4 + 14 + 4*13 + 16;
+        else for (int q2=0; q2<10; q2++){ int st = bw_qstate_g(b, q2); if (st) need += st==1? 23 : 12; }
+        int h = need; if (h > vh2-8) h = vh2-8; if (h < 150) h = 150;
+        int x = vx + (vw2-w)/2, y = vy + (vh2-h)/2; if (y < vy+4) y = vy+4;
+        rect_fill(x, y, w, h, COL(16,20,18)); rect_line(x, y, w, h, COL(198,164,84));
+        draw_text(x+12, y+8, "QUEST LOG", 1, COL(255,214,64));
+        draw_text(x+w-104, y+8, "F / X - CLOSE", 1, COL(150,170,190));
+        int ry = y + 26;
+        if (b->bw_mode!=1){
+            draw_text(x+12, ry, "NO STORY HERE. JUST MEADOW, TEA, AND VIOLENCE.", 1, COL(200,214,200)); ry += 14;
+        } else for (int q2=0; q2<10; q2++){
+            int st = bw_qstate_g(b, q2);
+            if (st==0) continue;
+            if (ry > y+h-86) break;   // keep room for the backpack below
+            draw_text(x+12, ry, QN[q2], 1, st==2? COL(140,160,140) : COL(255,244,210));
+            char tb[28]; char *tq=tb;
+            if (st==2){ tq=sappend(tq, "DONE"); }
+            else if (q2==1){ tq=sappend(tq, "ACTIVE "); tq=sapp_int(tq, bw_farmkills(b)); tq=sappend(tq, "/3"); }
+            else if (q2==4){ tq=sappend(tq, "ACTIVE "); tq=sapp_int(tq, bw_tools_found(b)); tq=sappend(tq, "/3"); }
+            else if (q2==6){ tq=sappend(tq, "ACTIVE "); tq=sapp_int(tq, bw_lakekills(b)); tq=sappend(tq, "/2"); }
+            else if (q2==9){ tq=sappend(tq, "ACTIVE "); tq=sapp_int(tq, bw_signs_read(b)); tq=sappend(tq, "/3"); }
+            else tq=sappend(tq, "ACTIVE");
+            *tq=0;
+            draw_text(x+w-12-text_w(tb, 1), ry, tb, 1, st==2? COL(120,200,120) : COL(255,200,110));
+            ry += 12;
+            if (st==1){ draw_text(x+24, ry, QD[q2], 1, COL(168,190,205)); ry += 11; }
+        }
+        ry += 4;
+        draw_text(x+12, ry, "BACKPACK (BW ONLY)", 1, COL(255,214,64)); ry += 14;
+        for (int it=0; it<4; it++){
+            if (it==S->log_sel){ rect_fill(x+8, ry-2, w-16, 13, COL(70,58,30)); draw_text(x+12, ry, ">", 1, COL(255,220,90)); }
+            draw_text(x+24, ry, BW_ITEM_NAME[it], 1, b->items[it]>0? COL(240,248,240) : COL(110,110,120));
+            char cb[12]; char *cq=cb; cq=sappend(cq, "x"); cq=sapp_int(cq, b->items[it]); *cq=0;
+            draw_text(x+w-12-text_w(cb, 1), ry, cb, 1, COL(255,210,130));
+            ry += 13;
+        }
+        draw_text_center(x+w/2, y+h-14, "SPACE / A - USE.  ITEMS ALSO WORK MID-BATTLE.", 1, COL(150,170,190));
+    }
+    if (pi==G.my_id && mobile_ui() && !pad_mode() && !S->log_open){
+        const char *hint = G.touch_ctl? "STICK MOVE - TALK TALKS - PICK FOR BATTLES" : "DRAG TO MOVE - TAP TO TALK";
+        int hw2 = text_w(hint, 1);
+        rect_fill(vx + vw2/2 - hw2/2 - 6, vy + vh2-22, hw2+12, 14, COL(20,26,20));
+        draw_text_center(vx + vw2/2, vy + vh2-19, hint, 1, COL(240,248,240));
+    }
+    if (S->sleep_t>0){
+        float d = 1.0f - (S->sleep_t>0.7f? (S->sleep_t-0.7f)/0.7f : S->sleep_t/0.7f);
+        blend_rect(vx, vy, vw2, vh2, COL(6,6,16), (int)(210*d));
+        if (d>0.75f) draw_text_center(vx + vw2/2, vy + vh2/2-4, "Z Z Z", 2, COL(200,210,255));
+    }
+}
+// --- touch controls inside Banzai World (Daniel, Nov 5) ----------------
+// The main game's HUD drew the stick and buttons; the minigames never
+// did, so on a phone they were invisible — and an invisible control
+// scheme reads as a broken one. Same fixed spots as the meadow, with
+// the button captions naming what they DO in this mode.
+static void bw_draw_touch(int pi){
+    if (pi!=G.my_id || !mobile_ui() || pad_mode()) return;
+    Buddy *b=&G.bud[pi]; BwSim *S=&BWS[pi];
+    if (S->bat.active) return;                    // battles run on taps + menus
+    int vw2 = G.view_w>0? G.view_w : VW;
+    if (vw2<VW) return;                           // split view: fixed buttons are full-screen furniture
+    const char *wl = (b->bw_mode==4)? "CRAFT" : (b->bw_mode==2)? "PATCH" : "WALL";
+    if (G.touch_ctl==0){                          // DRAG: the finger steers; one button is furniture enough
+        if (b->bw_mode==3 || b->bw_mode==5 || S->craft_menu) return;
+        tbtn_base(TP_WALL_CX, TP_WALL_CY, 24, COL(62,56,86));
+        { u32 br = COL(232,186,108);
+          rect_fill(TP_WALL_CX-10, TP_WALL_CY-11, 9, 4, br); rect_fill(TP_WALL_CX+1, TP_WALL_CY-11, 9, 4, br);
+          rect_fill(TP_WALL_CX-10, TP_WALL_CY-6, 6, 4, br);  rect_fill(TP_WALL_CX-3, TP_WALL_CY-6, 6, 4, br);
+          rect_fill(TP_WALL_CX+4, TP_WALL_CY-6, 6, 4, br); }
+        draw_text(TP_WALL_CX-text_w(wl,1)/2, TP_WALL_CY+4, wl, 1, COL(255,244,200));
+        return;
+    }
+    // STICK: FIRE + USE + WALL, captioned per mode, plus the stick itself
+    const char *fl = "PICK", *ul = "TALK";
+    int have_wall = 1;
+    if (b->bw_mode==2){ fl="THROW"; ul="OPEN"; }
+    else if (b->bw_mode==3){ fl="JUMP"; ul=0; have_wall=0; }
+    else if (b->bw_mode==4){ fl="SWING"; ul="USE"; }
+    else if (b->bw_mode==5){ fl="FIRE"; ul=0; have_wall=0; }
+    if (!S->craft_menu){
+        tbtn_base(TP_FIRE_CX, TP_FIRE_CY, 34, (IN.tp_held&32)? COL(224,88,62):COL(158,54,46));
+        { u32 lc = COL(255,240,230); int gy = TP_FIRE_CY-6;
+          rect_fill(TP_FIRE_CX-1, gy-10, 3, 6, lc); rect_fill(TP_FIRE_CX-1, gy+5, 3, 6, lc);
+          rect_fill(TP_FIRE_CX-10, gy-1, 6, 3, lc); rect_fill(TP_FIRE_CX+5, gy-1, 6, 3, lc);
+          disc_fill(TP_FIRE_CX, gy, 2, lc); }
+        draw_text(TP_FIRE_CX-text_w(fl,1)/2, TP_FIRE_CY+14, fl, 1, COL(255,240,230));
+        if (ul){
+            tbtn_base(TP_ACT_CX, TP_ACT_CY, 22, COL(56,92,62));
+            { u32 lc = COL(230,255,235); int gy = TP_ACT_CY-3;
+              tri_fill(TP_ACT_CX, gy-8, TP_ACT_CX-6, gy+1, TP_ACT_CX+6, gy+1, lc);
+              rect_fill(TP_ACT_CX-2, gy+1, 5, 5, lc); }
+            draw_text(TP_ACT_CX-text_w(ul,1)/2, TP_ACT_CY+9, ul, 1, COL(230,255,235));
+        }
+        if (have_wall){
+            tbtn_base(TP_WALL_CX, TP_WALL_CY, 24, COL(62,56,86));
+            { u32 br = COL(232,186,108);
+              rect_fill(TP_WALL_CX-10, TP_WALL_CY-11, 9, 4, br); rect_fill(TP_WALL_CX+1, TP_WALL_CY-11, 9, 4, br);
+              rect_fill(TP_WALL_CX-10, TP_WALL_CY-6, 6, 4, br);  rect_fill(TP_WALL_CX-3, TP_WALL_CY-6, 6, 4, br);
+              rect_fill(TP_WALL_CX+4, TP_WALL_CY-6, 6, 4, br); }
+            draw_text(TP_WALL_CX-text_w(wl,1)/2, TP_WALL_CY+4, wl, 1, COL(255,244,200));
+        }
+    }
+    if (IN.joy_on){
+        circle_out(IN.joy_ax, IN.joy_ay, 42, COL(34,31,52));
+        circle_shade(IN.joy_ax, IN.joy_ay, 39, COL(40,36,58));
+        disc_fill(IN.joy_ax, IN.joy_ay, 25, COL(30,27,46));
+        circle_out(IN.joy_kx, IN.joy_ky, 17, COL(198,204,220));
+        circle_shade(IN.joy_kx, IN.joy_ky, 14, COL(198,204,220));
+        disc_fill(IN.joy_kx-5, IN.joy_ky-5, 4, COL(244,246,250));
+    } else if (!S->craft_menu){
+        disc_fill(TP_DPAD_CX, TP_DPAD_CY, 42, COL(24,22,38));
+        circle_out(TP_DPAD_CX, TP_DPAD_CY, 15, COL(52,48,72));
+    }
+}
+static void bw_render(int pi){
+    bw_render_modes(pi);
+    bw_draw_touch(pi);
+    // the Start-menu and its CONTROLS panel, over this player's view
+    BwSim *S = &BWS[pi]; Buddy *b = &G.bud[pi];
+    if (S->bw_menu){
+        int vx=G.view_x0, vy=G.view_y0, vw2=G.view_w>0? G.view_w : VW, vh2=G.view_h>0? G.view_h : VH;
+        if (S->bw_menu==2){ draw_controls_panel(vx, vy, vw2, vh2, b->bw_mode<2? 1 : (b->bw_mode==5? 6 : b->bw_mode)); return; }
+        int pw=300, ph=140, px=vx+(vw2-pw)/2, py=vy+(vh2-ph)/2;
+        blend_rect(vx, vy, vw2, vh2, COL(8,8,14), 120);
+        rect_fill(px, py, pw, ph, COL(16,18,28)); rect_line(px, py, pw, ph, COL(198,164,84));
+        draw_text_center(px+pw/2, py+12, "PAUSED", 2, COL(255,214,64));
+        { static const char *rows[3] = { "RESUME", "CONTROLS", "LEAVE" };
+          for (int i=0;i<3;i++){
+              int ry = py+48+i*26;
+              if (i==S->bw_msel){ rect_fill(px+10, ry-4, pw-20, 19, COL(255,205,40)); draw_text_center(px+pw/2, ry, rows[i], 2, COL(30,26,44)); }
+              else draw_text_center(px+pw/2, ry, rows[i], 2, COL(235,238,245));
+          } }
+        draw_text_center(px+pw/2, py+ph-16, pad_mode()? "STICK/DPAD + A" : (mobile_ui()? "TAP A ROW" : "ARROWS + SPACE"), 1, COL(140,150,170));
+    }
+}
+static void bw_render_battle(int pi){
+    BwSim *S = &BWS[pi];
+    Buddy *b=&G.bud[pi];
+    int vx=G.view_x0, vy=G.view_y0, vw2=G.view_w>0? G.view_w : VW, vh2=G.view_h>0? G.view_h : VH;
+    int band = vh2<300? vh2/2 : 150;
+    rect_fill(vx, vy, vw2, vh2, COL(22,40,28));
+    rect_fill(vx, vy+vh2-band, vw2, band, COL(30,56,34));
+    ellipse_fill(vx+vw2/2, vy+vh2*58/100, vw2*39/100, vh2*12/100, COL(52,92,50));
+    ellipse_fill(vx+vw2/2, vy+vh2*58/100, vw2*26/100, vh2*8/100, COL(66,110,58));
+    // fighters on a stage far from any real map
+    float sx = b->x, sy = b->y, sa = b->aim;
+    G.camx = 20000; G.camy = 20000;
+    // spotlight pools under the fighters (glow-up)
+    { int bxp = SX(20000-112), byp = SY(20000+34), exp2 = SX(20000+118), eyp = SY(20000-24);
+      ellipse_fill(bxp, byp+9, 46, 13, COL(84,128,66)); ellipse_fill(bxp, byp+9, 30, 8, COL(102,148,80));
+      ellipse_fill(exp2, eyp+17, 46, 13, COL(84,128,66)); ellipse_fill(exp2, eyp+17, 30, 8, COL(102,148,80)); }
+    b->x = 20000-112; b->y = 20000+34; b->aim = 0;
+    draw_buddy(b);
+    b->x = sx; b->y = sy; b->aim = sa;
+    if (S->bat.boss) bw_draw_big_hacker(20000+118, 20000-14, S->bat.boss, 0);
+    else bw_draw_hacker(20000+118, 20000-24, S->bat.lvl, (S->bat.phase==2 && S->bat.t>0.85f)? 1.0f : 0.0f, 0);
+    // foe plate
+    rect_fill(vx+14, vy+12, 212, 34, COL(16,20,16)); rect_line(vx+14, vy+12, 212, 34, COL(255,120,110));
+    { char buf[64]; char *q=buf; q=sappend(q, bw_foe_name(S)); q=sappend(q, "  LV "); q=sapp_int(q, S->bat.lvl); *q=0;
+      draw_text(vx+20, vy+17, buf, 1, COL(255,210,200)); }
+    { float f = S->bat.hmax>0? S->bat.hhp/S->bat.hmax : 0; if (f<0) f=0;
+      rect_fill(vx+20, vy+31, 150, 5, COL(40,30,40)); rect_fill(vx+20, vy+31, (int)(150*f), 5, COL(255,120,90));
+      char hb[24]; char *q=hb; q=sapp_int(q, (int)S->bat.hhp); q=sappend(q, "/"); q=sapp_int(q, (int)S->bat.hmax); *q=0;
+      draw_text(vx+174, vy+30, hb, 1, COL(255,225,215)); }
+    // buddy plate (bottom-right of the view, above the command box)
+    { int px0 = vx+vw2-224, py0 = vy+vh2-128-((S->bat.natt>6)? ((S->bat.natt+1)/2-3)*15 : 0); if (py0 < vy+52) py0 = vy+52;
+    rect_fill(px0, py0, 210, 40, COL(16,20,16)); rect_line(px0, py0, 210, 40, COL(198,164,84));
+    { char buf[64]; char *q=buf; q=sappend(q, BUD_ELF[b->name_idx%BUD_NAMES_N]); q=sappend(q, " THE "); q=sappend(q, BUD_NAME[b->species%BUDN]); *q=0;
+      draw_text(px0+6, py0+5, buf, 1, COL(255,244,210)); }
+    { float f = b->maxhp>0? b->hp/b->maxhp : 0; if (f<0) f=0;
+      rect_fill(px0+6, py0+17, 130, 5, COL(40,30,40)); rect_fill(px0+6, py0+17, (int)(130*f), 5, f>0.35f? COL(120,230,90) : COL(255,170,60));
+      char hb[24]; char *q=hb; q=sapp_int(q, (int)b->hp); q=sappend(q, "/"); q=sapp_int(q, (int)b->maxhp); *q=0;
+      draw_text(px0+140, py0+16, hb, 1, COL(230,240,230));
+      float ef = b->energy/BUD_ENERGY_MAX; if (ef<0) ef=0;
+      rect_fill(px0+6, py0+26, 130, 4, COL(40,30,40)); rect_fill(px0+6, py0+26, (int)(130*ef), 4, COL(120,200,255));
+      char eb[24]; char *q2=eb; q2=sapp_int(q2, (int)b->energy); q2=sappend(q2, " EN"); *q2=0;
+      draw_text(px0+140, py0+25, eb, 1, COL(170,220,255)); } }
+    // the bottom box: attack menu or message (taller once items join)
+    int rows = (S->bat.natt+1)/2, bh = 84 + (rows>3? (rows-3)*15 : 0), rstep = rows>3? 15 : 18;
+    rect_fill(vx, vy+vh2-bh, vw2, bh, COL(14,16,22)); rect_line(vx, vy+vh2-bh, vw2, bh, COL(198,164,84));
+    if (S->bat.phase==0){
+        draw_text(vx+16, vy+vh2-bh+6, "CHOOSE AN ATTACK:", 1, COL(255,244,210));
+        for (int i=0;i<S->bat.natt;i++){
+            int mv = S->bat.attacks[i];
+            const char *nm; float cost, mult; bw_attack_info(b, mv, &nm, &cost, &mult);
+            int cxp = vx+16 + (i%2)*(vw2/2-20), cyp = vy+vh2-bh+22 + (i/2)*rstep;
+            int afford = b->energy >= cost;
+            if (i==S->bat.sel) draw_text(cxp, cyp, ">", 1, COL(255,220,90));
+            draw_text(cxp+12, cyp, nm, 1, afford? COL(240,248,240) : COL(110,110,120));
+            if (mv>=6){ char cb[20]; char *q=cb; q=sappend(q, "x"); q=sapp_int(q, b->items[mv-6]); *q=0;
+                draw_text(cxp + vw2/2-130, cyp, cb, 1, COL(255,210,130)); }
+            else if (cost>0){ char cb[20]; char *q=cb; q=sapp_int(q, (int)cost); q=sappend(q, " EN"); *q=0;
+                draw_text(cxp + vw2/2-130, cyp, cb, 1, afford? COL(170,220,255) : COL(110,110,120)); }
+            else if (mv!=5) draw_text(cxp + vw2/2-130, cyp, "FREE", 1, COL(160,230,160));
+        }
+    } else {
+        draw_text(vx+16, vy+vh2-bh+14, S->bat.msg, 1, COL(255,250,235));
+        if (S->bat.msg2[0]) draw_text(vx+16, vy+vh2-bh+32, S->bat.msg2, 1, COL(200,214,235));
+    }
+}
+
+// ===========================================================================
+// PLATFORM: WebAssembly — JS shell provides everything below.
+// ===========================================================================
+#ifdef PLAT_WASM
+__attribute__((import_module("env"), import_name("js_now")))   double js_now(void);
+__attribute__((import_module("env"), import_name("js_note")))  void js_note(int,int,int,int);
+__attribute__((import_module("env"), import_name("js_save")))  void js_save(int, const char*, int);
+__attribute__((import_module("env"), import_name("js_load")))  int js_load(int, char*, int);
+__attribute__((import_module("env"), import_name("js_net_start"))) int js_net_start(int, const char*);
+__attribute__((import_module("env"), import_name("js_net_stop")))  void js_net_stop(void);
+__attribute__((import_module("env"), import_name("js_net_send")))  void js_net_send(const unsigned char*, int, int);
+__attribute__((import_module("env"), import_name("js_net_recv")))  int js_net_recv(unsigned char*, int);
+__attribute__((import_module("env"), import_name("js_net_src")))   int js_net_src(void);
+
+double plat_now(void){ return js_now(); }
+void plat_note(int ch, int note, int vel, int instr){ js_note(ch, note, vel, instr); }
+void plat_save(const char *d, int len){ js_save(0, d, len); }
+int plat_load(char *buf, int cap){ return js_load(0, buf, cap); }
+void plat_save_slot(int slot, const char *d, int len){ js_save(slot, d, len); }
+int plat_load_slot(int slot, char *buf, int cap){ return js_load(slot, buf, cap); }
+int plat_net_start(int mode, const char *addr){ return js_net_start(mode, addr); }
+void plat_net_stop(void){ js_net_stop(); }
+int plat_net_send(const u8 *d, int len, int dest){ js_net_send(d, len, dest); return 0; }
+int plat_net_recv(u8 *buf, int cap, int *src){ int n=js_net_recv(buf, cap); *src=js_net_src(); return n; }
+__attribute__((import_module("env"), import_name("js_open_url"))) void js_open_url(const char*);
+__attribute__((import_module("env"), import_name("js_whale_poll"))) int js_whale_poll(char*, int);
+void plat_open_url(const char *url){   // only ever a buy.stripe.com link from the table above
+    if (url && url[0]=='h' && url[1]=='t' && url[2]=='t' && url[3]=='p' && url[4]=='s') js_open_url(url);
+}
+int plat_whale_poll(char *buf, int cap){ return js_whale_poll(buf, cap); }
+
+// compiler may emit these for struct copies in freestanding builds
+void *memcpy(void *d, const void *s, unsigned long n){ return smemcpy(d, s, (int)n); }
+void *memset(void *d, int v, unsigned long n){ return smemset(d, v, (int)n); }
+void *memmove(void *d, const void *s, unsigned long n){
+    u8 *a=(u8*)d; const u8 *b=(const u8*)s;
+    if (a<b) for (unsigned long i=0;i<n;i++) a[i]=b[i];
+    else for (unsigned long i=n;i>0;i--) a[i-1]=b[i-1];
+    return d;
+}
+
+// exports for the JS shell
+__attribute__((export_name("fb"))) u32 *exp_fb(void){ return fb; }
+/* debug/test hooks */
+__attribute__((export_name("dbg_aim"))) int exp_dbg_aim(void){
+    int id = G.my_id>=0? G.my_id : 0; return (int)(G.p[id].aim*1000); }
+__attribute__((export_name("dbg_plaza"))) int exp_dbg_plaza(void){
+    int n=0; for (int i=0;i<MAXBUGS;i++) if (G.bugs[i].alive){
+        float dx=G.bugs[i].x, dy=G.bugs[i].y; if (dx*dx+dy*dy < 170*170) n++; }
+    return n; }
+/* frame() itself is exported via the linker flag --export=frame */
+__attribute__((export_name("set_raw"))) void exp_set_raw(int lo, int hi){
+    IN.raw = (u64)(u32)lo | ((u64)(u32)hi<<32);   // held physical keys (PK_*)
+}
+__attribute__((export_name("pulse_key"))) void exp_pulse_key(int pk){
+    if (pk>=0 && pk<64) IN.pulse |= (1ULL<<pk);    // one-frame tap (touch ✕ button)
+}
+__attribute__((export_name("press"))) void exp_press(int pk){
+    if (pk>=0 && pk<64) IN.edges_in |= (1ULL<<pk); // a real keydown event
+}
+__attribute__((export_name("act"))) void exp_act(int a, int down){
+    if (a<0 || a>=ACT_COUNT) return;
+    if (down){ if (!((IN.act_held>>a)&1)) IN.act_edges |= (1u<<a); IN.act_held |= (1u<<a); }
+    else IN.act_held &= ~(1u<<a);
+}
+__attribute__((export_name("act2"))) void exp_act2(int a, int down){
+    if (a<0 || a>=ACT_COUNT) return;
+    if (down){ if (!((IN.act2_held>>a)&1)) IN.act2_edges |= (1u<<a); IN.act2_held |= (1u<<a); }
+    else IN.act2_held &= ~(1u<<a);
+}
+__attribute__((export_name("pads"))) void exp_pads(int n){ IN.pad_count = n; }
+__attribute__((export_name("text_mode"))) int exp_text_mode(void){
+    // nonzero while a text field owns typing: 1/2 = the menu's name/IP
+    // fields, 3 = the Whales Only code entry. The web shell watches
+    // this to raise the soft keyboard on touch devices, where no
+    // physical keyboard exists to type with (Daniel, Nov 4).
+    // the menu field only owns typing while the menu is actually up:
+    // edit_field is assigned in menu_input() and nowhere else, so
+    // without this gate a field selected before starting a run kept
+    // "owning" typing for the whole run and the shell raised the soft
+    // keyboard on every gameplay tap (Daniel, Nov 9).
+    if (G.state==GS_MENU && G.edit_field) return G.edit_field;
+    if (whale_code_mode[G.my_id]) return 3;
+    return 0;
+}
+__attribute__((export_name("dbg_peek"))) void exp_dbg_peek(void){ peek_slots(); }
+__attribute__((export_name("dbg_pkbuddy"))) int exp_dbg_pkbuddy(int s){
+    return (s>=1 && s<=3)? pk_bspecies[s] : -99;
+}
+__attribute__((export_name("dbg_pkbname"))) int exp_dbg_pkbname(int s){
+    if (s<1 || s>3 || !pk_bname[s][0]) return -1;
+    for (int i=0;i<BUD_NAMES_N;i++) if (scmp(pk_bname[s], BUD_ELF[i])==0) return i;
+    return -1;
+}
+__attribute__((export_name("dbg_myname"))) char *exp_dbg_myname(void){ return G.my_name; }
+__attribute__((export_name("evt_char"))) void exp_evt_char(int c){
+    if (IN.typed_n<16) IN.typed[IN.typed_n++]=(char)c;
+}
+__attribute__((export_name("set_touch"))) void exp_set_touch(int x, int y, int down){
+    IN.touch_x=x; IN.touch_y=y; IN.touch_down=down; if (down) IN.touch_seen=1;
+}
+__attribute__((export_name("evt_tap"))) void exp_evt_tap(int x, int y){
+    IN.tap_x=x; IN.tap_y=y; IN.tapped=1; IN.touch_seen=1;
+}
+__attribute__((export_name("set_mobile"))) void exp_set_mobile(int on){
+    IN.mobile_boot = on? 1:0;   // touch-first device: hide key-binding UI
+}
+__attribute__((export_name("touch_point"))) void exp_touch_point(int id, int x, int y, int phase){
+    IN.touch_seen=1;
+    if (phase==0){   // finger down: claim a slot, note d-pad zone/buttons
+        for (int i=0;i<6;i++) if (!IN.tp[i].active){
+            IN.tp[i].active=1; IN.tp[i].id=id;
+            IN.tp[i].x=IN.tp[i].x0=x; IN.tp[i].y=IN.tp[i].y0=y;
+            IN.tp[i].age=0; IN.tp[i].moved=0; IN.tp[i].zone=0;
+            if (G.state==GS_PLAY){
+                int z = tp_zone_at(x, y);
+                if (z==9){ IN.tp[i].zone=9; IN.tp_wall_edge=1; }        // WALL: both schemes
+                else if (z==7){ IN.tp[i].zone=7; IN.tp_wpn_edge=1; }   // WPN: both schemes
+                else if (G.touch_ctl==1){
+                    if (z==5 || z==6){                  // a button
+                        IN.tp[i].zone = z;
+                        if (z==6) IN.tp_act_edge=1;
+                    } else {                            // anywhere else: the joystick
+                        IN.tp[i].zone = 8; IN.tp[i].ax = x; IN.tp[i].ay = y;
+                    }
+                }
+            }
+            return;
+        }
+        return;
+    }
+    for (int i=0;i<6;i++) if (IN.tp[i].active && IN.tp[i].id==id){
+        if (phase==1){
+            IN.tp[i].x=x; IN.tp[i].y=y;
+            if (x-IN.tp[i].x0>14 || IN.tp[i].x0-x>14 || y-IN.tp[i].y0>14 || IN.tp[i].y0-y>14) IN.tp[i].moved=1;
+        } else {   // finger up: a quick, still tap (or an unmoved stick touch) is a tap
+            if ((IN.tp[i].zone==0 || IN.tp[i].zone==8) && !IN.tp[i].moved && IN.tp[i].age<0.4f){
+                IN.tap_x=x; IN.tap_y=y; IN.tapped=1;
+            }
+            IN.tp[i].active=0;
+        }
+        return;
+    }
+}
+
+__attribute__((export_name("autostart"))) void exp_autostart(void){
+    // This page was served by a native host's built-in web server: skip
+    // the menu and join that host's game directly. The host is whoever
+    // served the page, so no address or mode choice is needed. Deferred
+    // to the first frame: game_init() has not run yet at shell boot.
+    want_autostart = 1;
+}
+const char *plat_join_addr(void){ return 0; }   // the web build never hosts
+__attribute__((export_name("dbg_state"))) int exp_dbg_state(void){ return G.state; }
+__attribute__((export_name("dbg_piece"))) int exp_dbg_piece(void){ return mus_piece(); }
+__attribute__((export_name("dbg_whale"))) int exp_dbg_whale(void){ return G.whale_own; }
+__attribute__((export_name("dbg_whaleon"))) int exp_dbg_whaleon(void){ return G.whale_on; }
+static char dbg_code_scratch[200];
+__attribute__((export_name("dbg_scratch"))) char *exp_dbg_scratch(void){ return dbg_code_scratch; }
+__attribute__((export_name("dbg_redeem"))) int exp_dbg_redeem(void){
+    int s = whale_redeem(dbg_code_scratch); if (s>=0) whale_grant(s); return s; }
+__attribute__((export_name("dbg_kills"))) int exp_dbg_kills(void){ return G.total_kills; }
+__attribute__((export_name("dbg_bugs"))) int exp_dbg_bugs(void){
+    int n=0; for (int i=0;i<MAXBUGS;i++) if (G.bugs[i].alive) n++; return n; }
+__attribute__((export_name("dbg_bugavgw"))) int exp_dbg_bugavgw(void){
+    float sum=0; int n=0; for (int i=0;i<MAXBUGS;i++) if (G.bugs[i].alive){ sum+=G.bugs[i].w; n++; }
+    return n? (int)(sum/n*10.0f) : 0; }
+__attribute__((export_name("dbg_bugbig"))) int exp_dbg_bugbig(void){
+    int n=0; for (int i=0;i<MAXBUGS;i++) if (G.bugs[i].alive && G.bugs[i].w>60.0f) n++; return n; }
+__attribute__((export_name("dbg_carried"))) int exp_dbg_carried(void){
+    int id = G.my_id>=0? G.my_id : 0; return (int)(G.p[id].carried*10); }
+__attribute__((export_name("dbg_hp"))) int exp_dbg_hp(void){
+    int id = G.my_id>=0? G.my_id : 0; return G.p[id].hp; }
+__attribute__((export_name("dbg_maxbug"))) int exp_dbg_maxbug(void){
+    float m=0; for (int i=0;i<MAXBUGS;i++) if (G.bugs[i].alive && G.bugs[i].w>m) m=G.bugs[i].w; return (int)(m*10); }
+__attribute__((export_name("dbg_walls"))) int exp_dbg_walls(void){
+    int n=0; for (int i=0;i<MAXWALLS;i++) if (G.walls[i].alive==1) n++; return n; }
+__attribute__((export_name("dbg_storesel"))) int exp_dbg_storesel(void){ return G.store_sel; }
+__attribute__((export_name("dbg_pads"))) int exp_dbg_pads(void){ return IN.pad_count; }
+__attribute__((export_name("dbg_menun"))) int exp_dbg_menun(void){ return menu_count(); }
+__attribute__((export_name("dbg_mdiff"))) int exp_dbg_mdiff(void){ return G.difficulty; }
+__attribute__((export_name("dbg_mzen"))) int exp_dbg_mzen(void){ return G.zen; }
+__attribute__((export_name("dbg_meddie"))) int exp_dbg_meddie(void){ return G.eddie; }
+__attribute__((export_name("dbg_coop"))) int exp_dbg_coop(void){ return G.coop_pref; }
+__attribute__((export_name("dbg_p2"))) int exp_dbg_p2(void){ return G.p2_slot; }
+__attribute__((export_name("dbg_p2x"))) int exp_dbg_p2x(void){ return G.p2_slot>=0? (int)G.p[G.p2_slot].x : -99999; }
+__attribute__((export_name("dbg_p2y"))) int exp_dbg_p2y(void){ return G.p2_slot>=0? (int)G.p[G.p2_slot].y : -99999; }
+__attribute__((export_name("dbg_p2hp"))) int exp_dbg_p2hp(void){ return G.p2_slot>=0? G.p[G.p2_slot].hp : -1; }
+__attribute__((export_name("dbg_split"))) int exp_dbg_split(void){ return vsplit; }
+__attribute__((export_name("dbg_orient"))) int exp_dbg_orient(void){ return vorient; }
+__attribute__((export_name("dbg_bowl_tx"))) int exp_dbg_bowl_tx(int pi){ return (int)G.bowl[pi&3].thrower_x; }
+__attribute__((export_name("dbg_kill2"))) int exp_dbg_kill2(void){ if (G.p2_slot>=0) hurt_player(G.p2_slot, 100000.0f); return 0; }
+__attribute__((export_name("dbg_bowl_ph"))) int exp_dbg_bowl_ph(int pi){ Bowl *b=&G.bowl[pi&3]; return b->active? b->phase : -1; }
+__attribute__((export_name("dbg_splitf"))) int exp_dbg_splitf(void){ return (int)(vsplit_f*100); }
+__attribute__((export_name("dbg_store2"))) int exp_dbg_store2(void){ return lstore[1]; }
+__attribute__((export_name("dbg_store1"))) int exp_dbg_store1(void){ return lstore[0]; }
+__attribute__((export_name("dbg_storesel2"))) int exp_dbg_storesel2(void){ return G.store_sel2; }
+__attribute__((export_name("dbg_give2"))) void exp_dbg_give2(int w){
+    if (G.p2_slot>=0 && w>=0 && w<NWEAP) G.p[G.p2_slot].owned[w]++;
+}
+__attribute__((export_name("dbg_zen"))) int exp_dbg_zen(void){ return G.zen_run; }
+__attribute__((export_name("dbg_projs"))) int exp_dbg_projs(void){
+    int n=0; for (int i=0;i<MAXPROJ;i++) if (G.projs[i].alive) n++; return n; }
+__attribute__((export_name("dbg_upg"))) int exp_dbg_upg(int u){
+    int id = G.my_id>=0? G.my_id : 0; return (u>=0 && u<NUPG)? G.p[id].upg[u] : -1; }
+__attribute__((export_name("dbg_setupg"))) void exp_dbg_setupg(int u, int lv){
+    int id = G.my_id>=0? G.my_id : 0; if (u>=0 && u<NUPG && lv>=0) G.p[id].upg[u]=lv; }
+__attribute__((export_name("dbg_wof"))) int exp_dbg_wof(void){
+    int id = G.my_id>=0? G.my_id : 0; return G.p[id].wof>0? 1 : 0; }
+__attribute__((export_name("dbg_speed"))) int exp_dbg_speed(void){
+    int id = G.my_id>=0? G.my_id : 0; return (int)(player_speed(&G.p[id])*10.0f); }
+__attribute__((export_name("dbg_shieldmax"))) int exp_dbg_shieldmax(void){
+    int id = G.my_id>=0? G.my_id : 0; return G.p[id].shield_max; }
+__attribute__((export_name("dbg_spawnbug"))) void exp_dbg_spawnbug(float x, float y){ spawn_bug(x, y); }
+__attribute__((export_name("dbg_aggro"))) int exp_dbg_aggro(void){
+    int n=0; for (int i=0;i<MAXBUGS;i++) if (G.bugs[i].alive && G.bugs[i].aggro>=0) n++;
+    return n; }
+__attribute__((export_name("dbg_bugidx"))) int exp_dbg_bugidx(float x, float y){
+    int best=-1; float bd=1e18f;
+    for (int i=0;i<MAXBUGS;i++) if (G.bugs[i].alive){
+        float dx=G.bugs[i].x-x, dy=G.bugs[i].y-y, d2=dx*dx+dy*dy;
+        if (d2<bd){ bd=d2; best=i; }
+    }
+    return best; }
+__attribute__((export_name("dbg_bugx"))) int exp_dbg_bugx(int i){
+    return (i>=0 && i<MAXBUGS && G.bugs[i].alive)? (int)G.bugs[i].x : -99999; }
+__attribute__((export_name("dbg_bugy"))) int exp_dbg_bugy(int i){
+    return (i>=0 && i<MAXBUGS && G.bugs[i].alive)? (int)G.bugs[i].y : -99999; }
+__attribute__((export_name("dbg_bugaggro"))) int exp_dbg_bugaggro(int i){
+    return (i>=0 && i<MAXBUGS && G.bugs[i].alive)? G.bugs[i].aggro : -99999; }
+__attribute__((export_name("dbg_px"))) int exp_dbg_px(void){
+    int id = G.my_id>=0? G.my_id : 0; return (int)G.p[id].x; }
+__attribute__((export_name("dbg_py"))) int exp_dbg_py(void){
+    int id = G.my_id>=0? G.my_id : 0; return (int)G.p[id].y; }
+__attribute__((export_name("dbg_budy"))) int exp_dbg_budy(void){
+    int id = G.my_id>=0? G.my_id : 0; return G.bud[id].active? (int)G.bud[id].y : -99999; }
+__attribute__((export_name("dbg_rollback"))) int exp_dbg_rollback(void){
+    int id = G.my_id>=0? G.my_id : 0; return G.p[id].rollback; }
+__attribute__((export_name("dbg_touchctl"))) int exp_dbg_touchctl(int v){
+    if (v==0 || v==1) G.touch_ctl=v; return G.touch_ctl; }
+__attribute__((export_name("dbg_beans"))) int exp_dbg_beans(int v){
+    int id = G.my_id>=0? G.my_id : 0;
+    if (v>=0) G.p[id].beans=v; return G.p[id].beans; }
+__attribute__((export_name("dbg_beant"))) int exp_dbg_beant(void){
+    int id = G.my_id>=0? G.my_id : 0; return (int)(G.p[id].bean_t*100); }
+__attribute__((export_name("dbg_batkcd"))) int exp_dbg_batkcd(void){
+    int id = G.my_id>=0? G.my_id : 0; return (int)(G.bud[id].atk_cd*100); }
+__attribute__((export_name("dbg_givestick"))) int exp_dbg_givestick(void){
+    int id = G.my_id>=0? G.my_id : 0; BWS[id].ent_sticks += 3; return BWS[id].ent_sticks; }
+__attribute__((export_name("dbg_threat"))) int exp_dbg_threat(void){
+    compute_threat(); return (int)(G.threat*100); }
+__attribute__((export_name("dbg_region"))) int exp_dbg_region(void){
+    int id = G.my_id>=0? G.my_id : 0;
+    float d = fsqrt(G.p[id].x*G.p[id].x + G.p[id].y*G.p[id].y);
+    return region_at(d); }
+__attribute__((export_name("dbg_beamlen"))) int exp_dbg_beamlen(void){
+    int id = G.my_id>=0? G.my_id : 0; return beam_len[id]; }
+__attribute__((export_name("dbg_zoom"))) int exp_dbg_zoom(void){
+    return (int)(G.zoom*1000); }
+__attribute__((export_name("dbg_beams"))) int exp_dbg_beams(void){
+    int id = G.my_id>=0? G.my_id : 0; return beam_n[id]; }
+__attribute__((export_name("dbg_beamang"))) int exp_dbg_beamang(int k){
+    int id = G.my_id>=0? G.my_id : 0; return (k>=0 && k<MAXCOPIES)? (int)(beam_ang[id][k]*1000) : -9999; }
+__attribute__((export_name("dbg_weapon"))) int exp_dbg_weapon(void){
+    int id = G.my_id>=0? G.my_id : 0; return G.p[id].weapon; }
+__attribute__((export_name("dbg_copies"))) int exp_dbg_copies(int w){
+    int id = G.my_id>=0? G.my_id : 0; return (w>=0 && w<5)? G.p[id].owned[w] : -1; }
+__attribute__((export_name("dbg_feed"))) int exp_dbg_feed(void){
+    int id = G.my_id>=0? G.my_id : 0;
+    for (int i=0;i<5;i++) hat_push(&G.p[id], 2.0f);
+    return G.p[id].stack_n; }
+__attribute__((export_name("dbg_hurt"))) int exp_dbg_hurt(int dmg){
+    int id = G.my_id>=0? G.my_id : 0; hurt_player(id, (float)dmg); return G.p[id].hp; }
+__attribute__((export_name("dbg_bowl_new"))) void exp_dbg_bowl_new(void){ bowl_new_game(G.my_id); }
+__attribute__((export_name("dbg_bowl_roll"))) int exp_dbg_bowl_roll(int k){
+    Bowl *bw=&G.bowl[G.my_id];
+    if (!bw->active) bowl_new_game(G.my_id);
+    int up = bowl_pins_up(bw);
+    if (k>up) k=up; if (k<0) k=0;
+    bw->pins_before = up;
+    int togo = k;   // pin order is irrelevant to the scoring being tested
+    for (int i=0;i<10 && togo>0;i++) if (bw->standing[i]){ bw->standing[i]=0; togo--; }
+    bowl_record(bw, k);
+    return bw->nrolls;
+}
+__attribute__((export_name("dbg_bowl_score"))) int exp_dbg_bowl_score(void){
+    Bowl *bw=&G.bowl[G.my_id];
+    if (bw->game_over) return bw->final;
+    int t=-1; for (int f=0;f<10;f++){ int c=bowl_cum(bw, f); if (c<0) break; t=c; }
+    return t;
+}
+__attribute__((export_name("dbg_bowl_frame"))) int exp_dbg_bowl_frame(void){ return G.bowl[G.my_id].frame*10 + G.bowl[G.my_id].ball; }
+__attribute__((export_name("dbg_bowl_over"))) int exp_dbg_bowl_over(void){ return G.bowl[G.my_id].game_over; }
+__attribute__((export_name("dbg_bowl_pins"))) int exp_dbg_bowl_pins(void){ return bowl_pins_up(&G.bowl[G.my_id]); }
+__attribute__((export_name("dbg_track"))) int exp_dbg_track(void){ return mus_piece(); }
+__attribute__((export_name("dbg_setthreat"))) void exp_dbg_setthreat(int t){ threat_override = t<0? -1 : t*0.1f; }
+__attribute__((export_name("dbg_diff"))) int exp_dbg_diff(void){ return G.diff_run; }
+__attribute__((export_name("dbg_setdiff"))) void exp_dbg_setdiff(int d){ if (d>=0 && d<4) G.diff_run=d; }
+__attribute__((export_name("dbg_bank"))) int exp_dbg_bank(void){
+    int id = G.my_id>=0? G.my_id : 0; return (int)G.p[id].banked; }
+__attribute__((export_name("dbg_hatstand"))) int exp_dbg_hatstand(void){
+    int id = G.my_id>=0? G.my_id : 0; return G.p[id].hatstand; }
+__attribute__((export_name("dbg_mall"))) int exp_dbg_mall(void){
+    int id = G.my_id>=0? G.my_id : 0; return G.p[id].in_mall; }
+__attribute__((export_name("dbg_station"))) int exp_dbg_station(void){ return G.store_station; }
+__attribute__((export_name("dbg_onwall"))) int exp_dbg_onwall(void){
+    int id = G.my_id>=0? G.my_id : 0; return G.p[id].on_wall>=0? 1:0; }
+__attribute__((export_name("dbg_grpmax"))) int exp_dbg_grpmax(void){
+    int m=0; for (int i=0;i<MAXWALLS;i++) if (G.walls[i].alive){
+        int s = G.walls[i].grp>=0? grp_n[G.walls[i].grp] : 1;
+        if (s>m) m=s; }
+    return m; }
+__attribute__((export_name("dbg_pool"))) int exp_dbg_pool(void){
+    for (int i=0;i<MAXWALLS;i++) if (G.walls[i].alive && G.walls[i].grp>=0)
+        return (int)grp_pool[G.walls[i].grp];
+    return 0; }
+__attribute__((export_name("dbg_buddy"))) int exp_dbg_buddy(void){
+    int id = G.my_id>=0? G.my_id : 0; return G.bud[id].active? G.bud[id].species+1 : 0; }
+__attribute__((export_name("dbg_buddyxp"))) int exp_dbg_buddyxp(void){
+    int id = G.my_id>=0? G.my_id : 0; return G.bud[id].xp; }
+__attribute__((export_name("dbg_buddyhp"))) int exp_dbg_buddyhp(void){
+    int id = G.my_id>=0? G.my_id : 0; return (int)G.bud[id].hp; }
+__attribute__((export_name("dbg_budname"))) int exp_dbg_budname(void){
+    int id = G.my_id>=0? G.my_id : 0; return G.bud[id].name_idx; }
+__attribute__((export_name("dbg_budcolor"))) int exp_dbg_budcolor(void){
+    int id = G.my_id>=0? G.my_id : 0; return G.bud[id].color; }
+__attribute__((export_name("dbg_setbudxp"))) void exp_dbg_setbudxp(int v){
+    int id = G.my_id>=0? G.my_id : 0; G.bud[id].xp = v; }
+__attribute__((export_name("dbg_budfaint"))) void exp_dbg_budfaint(void){
+    int id = G.my_id>=0? G.my_id : 0; hurt_buddy(id, 99999.0f); }
+__attribute__((export_name("dbg_budups"))) int exp_dbg_budups(void){
+    int id = G.my_id>=0? G.my_id : 0; Buddy *b=&G.bud[id];
+    return b->up_hp*1000 + b->up_atk*100 + b->up_def*10 + b->skills; }
+__attribute__((export_name("dbg_bwstate"))) int exp_dbg_bwstate(void){ int id = G.my_id>=0? G.my_id : 0; return G.bud[id].in_bw? 1 : 0; }
+__attribute__((export_name("dbg_entroom"))) int exp_dbg_entroom(void){ int id = G.my_id>=0? G.my_id : 0; return BWS[id].ent_room; }
+__attribute__((export_name("dbg_entdoor"))) int exp_dbg_entdoor(void){ int id = G.my_id>=0? G.my_id : 0; return BWS[id].ent_sub? BWS[id].ent_door_sub : BWS[id].ent_door_upto; }
+__attribute__((export_name("dbg_entkey"))) int exp_dbg_entkey(void){ int id = G.my_id>=0? G.my_id : 0; return BWS[id].ent_key; }
+__attribute__((export_name("dbg_entbits"))) int exp_dbg_entbits(void){ int id = G.my_id>=0? G.my_id : 0; return BWS[id].ent_bits; }
+__attribute__((export_name("dbg_entev"))) int exp_dbg_entev(void){ int id = G.my_id>=0? G.my_id : 0; return BWS[id].ent_ev*10 + BWS[id].ent_phase; }
+__attribute__((export_name("dbg_entsub"))) int exp_dbg_entsub(void){ int id = G.my_id>=0? G.my_id : 0; return BWS[id].ent_sub; }
+__attribute__((export_name("dbg_entsubb"))) int exp_dbg_entsubb(void){ int id = G.my_id>=0? G.my_id : 0; return G.bud[id].ent_sub_best; }
+__attribute__((export_name("dbg_enttrig"))) int exp_dbg_enttrig(void){ int id = G.my_id>=0? G.my_id : 0; BwSim *S=&BWS[id]; S->ent_ev = 7; S->ent_phase = 1; S->ent_t = 0.45f; S->ent_passes = 1; return 7; }
+__attribute__((export_name("dbg_entfuse"))) int exp_dbg_entfuse(void){ int id = G.my_id>=0? G.my_id : 0; return BWS[id].ent_fuse_mask; }
+__attribute__((export_name("dbg_entlib"))) int exp_dbg_entlib(void){ int id = G.my_id>=0? G.my_id : 0; return BWS[id].ent_libdone; }
+__attribute__((export_name("dbg_entrec"))) int exp_dbg_entrec(void){ int id = G.my_id>=0? G.my_id : 0; return G.bud[id].ent_best + G.bud[id].ent_done*10000; }
+__attribute__((export_name("dbg_entsticks"))) int exp_dbg_entsticks(void){ int id = G.my_id>=0? G.my_id : 0; return BWS[id].ent_sticks; }
+__attribute__((export_name("dbg_entchase"))) int exp_dbg_entchase(void){ int id = G.my_id>=0? G.my_id : 0; return BWS[id].ent_chase; }
+__attribute__((export_name("dbg_entx"))) int exp_dbg_entx(void){ int id = G.my_id>=0? G.my_id : 0; return (int)G.bud[id].x; }
+__attribute__((export_name("dbg_bwent2"))) void exp_dbg_bwent2(void){ int id = G.my_id>=0? G.my_id : 0; mall_enter(id); bw_enter_mode(id, 2); }
+__attribute__((export_name("dbg_inarcade"))) int exp_dbg_inarcade(void){ int id = G.my_id>=0? G.my_id : 0; return G.p[id].in_arcade; }
+__attribute__((export_name("dbg_arcade"))) void exp_dbg_arcade(void){ int id = G.my_id>=0? G.my_id : 0; if (!G.p[id].in_mall) mall_enter(id); arcade_enter(id); }
+__attribute__((export_name("dbg_cabinet"))) int exp_dbg_cabinet(void){ int id = G.my_id>=0? G.my_id : 0; return cabinet_at(&G.p[id]); }
+__attribute__((export_name("dbg_arcgate"))) int exp_dbg_arcgate(void){ int id = G.my_id>=0? G.my_id : 0; return arcgate[id]; }
+__attribute__((export_name("dbg_jet"))) int exp_dbg_jet(void){ int id = G.my_id>=0? G.my_id : 0; return G.p[id].bean_jet>0? 1 : (G.p[id].jet_fall>0? 2 : 0); }
+__attribute__((export_name("dbg_givebean"))) void exp_dbg_givebean(void){ int id = G.my_id>=0? G.my_id : 0; G.p[id].beans++; }
+__attribute__((export_name("dbg_bwentm"))) void exp_dbg_bwentm(int m){ int id = G.my_id>=0? G.my_id : 0; mall_enter(id); bw_enter_mode(id, m); }
+__attribute__((export_name("dbg_bwmode"))) int exp_dbg_bwmode(void){ int id = G.my_id>=0? G.my_id : 0; return G.bud[id].in_bw? G.bud[id].bw_mode : -1; }
+__attribute__((export_name("dbg_platlvl"))) int exp_dbg_platlvl(void){ int id = G.my_id>=0? G.my_id : 0; return BWS[id].plat_lvl; }
+__attribute__((export_name("dbg_platbits"))) int exp_dbg_platbits(void){ int id = G.my_id>=0? G.my_id : 0; return BWS[id].plat_bits; }
+__attribute__((export_name("dbg_plath"))) int exp_dbg_plath(void){ int id = G.my_id>=0? G.my_id : 0; return BWS[id].plat_hearts; }
+__attribute__((export_name("dbg_platpow"))) int exp_dbg_platpow(void){ int id = G.my_id>=0? G.my_id : 0; return BWS[id].plat_power; }
+__attribute__((export_name("dbg_platdone"))) int exp_dbg_platdone(void){ int id = G.my_id>=0? G.my_id : 0; return G.bud[id].plat_done; }
+__attribute__((export_name("dbg_tanklvl"))) int exp_dbg_tanklvl(void){ int id = G.my_id>=0? G.my_id : 0; return BWS[id].tank_lvl; }
+__attribute__((export_name("dbg_tanky"))) int exp_dbg_tanky(void){ int id = G.my_id>=0? G.my_id : 0; return (int)G.bud[id].y; }
+__attribute__((export_name("dbg_tankpass"))) int exp_dbg_tankpass(void){ int id = G.my_id>=0? G.my_id : 0; return BWS[id].tank_pass; }
+__attribute__((export_name("dbg_tankhull"))) int exp_dbg_tankhull(void){ int id = G.my_id>=0? G.my_id : 0; return BWS[id].tank_hull; }
+__attribute__((export_name("dbg_tankdone"))) int exp_dbg_tankdone(void){ int id = G.my_id>=0? G.my_id : 0; return G.bud[id].tank_done; }
+__attribute__((export_name("dbg_tankshells"))) int exp_dbg_tankshells(void){ int id = G.my_id>=0? G.my_id : 0; int n=0; for (int i=0;i<24;i++) if (BWS[id].tank_sh_a[i]) n++; return n; }
+__attribute__((export_name("dbg_tankobj"))) int exp_dbg_tankobj(void){ int id = G.my_id>=0? G.my_id : 0; return BWS[id].tank_obj; }
+__attribute__((export_name("dbg_tankdeliv"))) int exp_dbg_tankdeliv(void){ int id = G.my_id>=0? G.my_id : 0; return BWS[id].tank_deliv; }
+__attribute__((export_name("dbg_tankmid"))) int exp_dbg_tankmid(void){ int id = G.my_id>=0? G.my_id : 0; return BWS[id].tank_mid_hp; }
+__attribute__((export_name("dbg_tankwarp"))) void exp_dbg_tankwarp(int y){ int id = G.my_id>=0? G.my_id : 0; if (G.bud[id].bw_mode==5){ G.bud[id].x = 12.5f*BW_TILE; G.bud[id].y = (float)y; } }
+__attribute__((export_name("dbg_tankboss"))) int exp_dbg_tankboss(void){ int id = G.my_id>=0? G.my_id : 0; return BWS[id].tank_boss_hp; }
+__attribute__((export_name("dbg_tanklives"))) int exp_dbg_tanklives(void){ int id = G.my_id>=0? G.my_id : 0; return BWS[id].tank_lives; }
+__attribute__((export_name("dbg_tankquota"))) void exp_dbg_tankquota(void){ int id = G.my_id>=0? G.my_id : 0; BWS[id].tank_deliv = BWS[id].tank_quota; }
+__attribute__((export_name("dbg_craftmat"))) int exp_dbg_craftmat(void){ int id = G.my_id>=0? G.my_id : 0; Buddy *b=&G.bud[id]; return b->craft_wood + b->craft_stone*1000 + b->craft_fiber*1000000; }
+__attribute__((export_name("dbg_craftcar"))) int exp_dbg_craftcar(void){ int id = G.my_id>=0? G.my_id : 0; return G.bud[id].craft_car; }
+__attribute__((export_name("dbg_craftgear"))) int exp_dbg_craftgear(void){ int id = G.my_id>=0? G.my_id : 0; return G.bud[id].craft_gear; }
+__attribute__((export_name("dbg_craftnode"))) int exp_dbg_craftnode(int tx, int ty){ int id = G.my_id>=0? G.my_id : 0; return craft_node_at(id, tx, ty); }
+__attribute__((export_name("dbg_craftmenu"))) int exp_dbg_craftmenu(void){ int id = G.my_id>=0? G.my_id : 0; return BWS[id].craft_menu; }
+__attribute__((export_name("dbg_pausectl"))) int exp_dbg_pausectl(void){ return G.pause_ctl; }
+__attribute__((export_name("dbg_pay"))) int exp_dbg_pay(void){ return pay_active? (int)pay_left+1 : 0; }
+__attribute__((export_name("dbg_wallhp"))) int exp_dbg_wallhp(void){ float s=0; for (int i=0;i<MAXWALLS;i++) if (G.walls[i].alive==1) s += G.walls[i].maxhp; return (int)(s*10); }
+__attribute__((export_name("dbg_wallstack"))) int exp_dbg_wallstack(void){ int m=0; for (int i=0;i<MAXWALLS;i++) if (G.walls[i].alive==1){ int s=G.walls[i].stack>0? G.walls[i].stack:1; if (s>m) m=s; } return m; }
+__attribute__((export_name("dbg_walllayers"))) int exp_dbg_walllayers(void){ int s=0; for (int i=0;i<MAXWALLS;i++) if (G.walls[i].alive==1) s += G.walls[i].stack>0? G.walls[i].stack:1; return s; }
+__attribute__((export_name("dbg_pausesel"))) int exp_dbg_pausesel(void){ return G.pause_sel; }
+__attribute__((export_name("dbg_bwmenu"))) int exp_dbg_bwmenu(void){ int id = G.my_id>=0? G.my_id : 0; return BWS[id].bw_menu; }
+__attribute__((export_name("dbg_craftsel"))) int exp_dbg_craftsel(void){ int id = G.my_id>=0? G.my_id : 0; return BWS[id].craft_sel; }
+__attribute__((export_name("dbg_craftcat"))) int exp_dbg_craftcat(void){ int id = G.my_id>=0? G.my_id : 0; return BWS[id].craft_cat; }
+__attribute__((export_name("dbg_craftrowid"))) int exp_dbg_craftrowid(void){ int id = G.my_id>=0? G.my_id : 0; int rows[64]; int n = craft_all_rows(&G.bud[id], rows); int s = BWS[id].craft_sel; return (s>=0 && s<n)? rows[s] : -99; }
+__attribute__((export_name("dbg_craftbuilds"))) int exp_dbg_craftbuilds(void){ int id = G.my_id>=0? G.my_id : 0; return G.bud[id].craft_bn; }
+__attribute__((export_name("dbg_craftbuildk"))) int exp_dbg_craftbuildk(int i){ int id = G.my_id>=0? G.my_id : 0; Buddy *b=&G.bud[id]; return (i>=0 && i<b->craft_bn)? b->craft_bk[i] : -1; }
+__attribute__((export_name("dbg_craftnight"))) int exp_dbg_craftnight(void){ int id = G.my_id>=0? G.my_id : 0; return (int)(craft_darkf(&G.bud[id])*100); }
+__attribute__((export_name("dbg_crafttod"))) int exp_dbg_crafttod(void){ int id = G.my_id>=0? G.my_id : 0; return (int)G.bud[id].craft_tod; }
+__attribute__((export_name("dbg_craftsettod"))) void exp_dbg_craftsettod(int v){ int id = G.my_id>=0? G.my_id : 0; G.bud[id].craft_tod = v; }
+__attribute__((export_name("dbg_craftbiome"))) int exp_dbg_craftbiome(int tx, int ty){ int id = G.my_id>=0? G.my_id : 0; return craft_biome_at(&G.bud[id], tx, ty); }
+__attribute__((export_name("dbg_craftfish"))) int exp_dbg_craftfish(void){ int id = G.my_id>=0? G.my_id : 0; return G.bud[id].craft_fish; }
+__attribute__((export_name("dbg_craftsharks"))) int exp_dbg_craftsharks(void){ int id = G.my_id>=0? G.my_id : 0; int n=0; for (int i=0;i<BWS[id].craft_shn;i++) if (BWS[id].craft_sh_hp[i]>0) n++; return n; }
+__attribute__((export_name("dbg_craftbmr"))) int exp_dbg_craftbmr(void){ int id = G.my_id>=0? G.my_id : 0; return BWS[id].craft_bmr_a; }
+__attribute__((export_name("dbg_craftstews"))) int exp_dbg_craftstews(void){ int id = G.my_id>=0? G.my_id : 0; return G.bud[id].craft_stews; }
+__attribute__((export_name("dbg_craftbugs"))) int exp_dbg_craftbugs(void){ int id = G.my_id>=0? G.my_id : 0; return BWS[id].craft_bugn; }
+__attribute__((export_name("dbg_craftdemolish"))) int exp_dbg_craftdemolish(void){ int id = G.my_id>=0? G.my_id : 0; return BWS[id].craft_demolish>0? 1 : 0; }
+__attribute__((export_name("dbg_craftgone"))) int exp_dbg_craftgone(void){ int id = G.my_id>=0? G.my_id : 0; return G.bud[id].craft_gn; }
+__attribute__((export_name("dbg_craftsetm"))) void exp_dbg_craftsetm(int v){ int id = G.my_id>=0? G.my_id : 0; Buddy *b=&G.bud[id]; b->craft_wood = v % 1000; b->craft_stone = (v/1000) % 1000; b->craft_fiber = v / 1000000; }
+__attribute__((export_name("dbg_craftsetcar"))) void exp_dbg_craftsetcar(int v){ int id = G.my_id>=0? G.my_id : 0; G.bud[id].craft_car = v; }
+__attribute__((export_name("dbg_bwaim"))) int exp_dbg_bwaim(void){ int id = G.my_id>=0? G.my_id : 0; return (int)(G.bud[id].aim*1000); }
+__attribute__((export_name("dbg_menusel"))) int exp_dbg_menusel(void){ return G.menu_sel; }
+__attribute__((export_name("dbg_menucount"))) int exp_dbg_menucount(void){ return menu_count(); }
+__attribute__((export_name("dbg_enttile"))) int exp_dbg_enttile(int tx, int ty){ int id = G.my_id>=0? G.my_id : 0; return ent_tile(id, tx, ty); }
+__attribute__((export_name("dbg_entdiag"))) int exp_dbg_entdiag(int room, int which){
+    // test-only: the locked-door roll for a room, computed from a
+    // HYPOTHETICAL bw_seed (the suite plants one through the save's gz
+    // key, then reads the roll back against the live seed) — which=0:
+    // locked(0/1) under the live seed; 1: ent_rnd(room,400)%5 for the
+    // live seed; 2: the live bw_seed itself.
+    int id = G.my_id>=0? G.my_id : 0; Buddy *b=&G.bud[id];
+    if (which==2) return b->bw_seed;
+    if (which==1) return (int)(ent_rnd(b, room, 400) % 5);
+    if (which==3){ float kx, ky; ent_key_pos(id, room, &kx, &ky); return (int)kx + (int)ky*100000; }
+    return ent_door_locked(id, room);
+}
+__attribute__((export_name("dbg_entlant"))) int exp_dbg_entlant(void){ int id = G.my_id>=0? G.my_id : 0; return BWS[id].ent_lant; }
+__attribute__((export_name("dbg_enttypo"))) int exp_dbg_enttypo(void){ int id = G.my_id>=0? G.my_id : 0; return (int)BWS[id].ent_tyx + (int)BWS[id].ent_tyy*100000; }
+__attribute__((export_name("dbg_bwenter"))) void exp_dbg_bwenter(void){
+    int id = G.my_id>=0? G.my_id : 0; mall_enter(id); bw_enter_mode(id, 0); }
+__attribute__((export_name("dbg_bwx"))) int exp_dbg_bwx(void){
+    int id = G.my_id>=0? G.my_id : 0; return (int)G.bud[id].bw_x; }
+__attribute__((export_name("dbg_bwy"))) int exp_dbg_bwy(void){
+    int id = G.my_id>=0? G.my_id : 0; return (int)G.bud[id].bw_y; }
+__attribute__((export_name("dbg_bwgivecrank"))) int exp_dbg_bwgivecrank(void){
+    int id = G.my_id>=0? G.my_id : 0; G.bud[id].story_bits |= (1<<23); return 1; }
+__attribute__((export_name("dbg_bwqtarget"))) int exp_dbg_bwqtarget(int which){
+    int id = G.my_id>=0? G.my_id : 0; float tx=0, ty=0;
+    int has = G.bud[id].in_bw? bw_quest_target(&G.bud[id], &tx, &ty) : 0;
+    if (which==0) return (int)tx; if (which==1) return (int)ty; return has; }
+__attribute__((export_name("dbg_bwseed"))) int exp_dbg_bwseed(void){
+    int id = G.my_id>=0? G.my_id : 0; return G.bud[id].bw_seed; }
+__attribute__((export_name("dbg_bwroam"))) int exp_dbg_bwroam(void){
+    int id = G.my_id>=0? G.my_id : 0; BwSim *S=&BWS[id];
+    int n=0; for (int i=0;i<BW_ROAMN;i++) if (S->roam[i].cell || S->roam[i].x || S->roam[i].y) n++; return n; }
+__attribute__((export_name("dbg_bwbattle"))) int exp_dbg_bwbattle(void){
+    int id = G.my_id>=0? G.my_id : 0; return BWS[id].bat.active? BWS[id].bat.phase+1 : 0; }
+__attribute__((export_name("dbg_bwhhp"))) int exp_dbg_bwhhp(void){
+    int id = G.my_id>=0? G.my_id : 0; return (int)BWS[id].bat.hhp; }
+__attribute__((export_name("dbg_bwchoose"))) void exp_dbg_bwchoose(int n){
+    int id = G.my_id>=0? G.my_id : 0; BwSim *S=&BWS[id];
+    if (S->bat.active && S->bat.phase==0 && n>=0 && n<S->bat.natt){ S->bat.sel=n; bw_battle_pick(id); } }
+__attribute__((export_name("dbg_bwtele_hack"))) void exp_dbg_bwtele_hack(void){
+    int id = G.my_id>=0? G.my_id : 0; Buddy *b=&G.bud[id]; BwSim *S=&BWS[id];
+    for (int i=0;i<BW_ROAMN;i++) if (S->roam[i].cell || S->roam[i].x || S->roam[i].y){
+        b->x=S->roam[i].x; b->y=S->roam[i].y; return; } }
+__attribute__((export_name("dbg_bwtele_tent"))) void exp_dbg_bwtele_tent(void){
+    int id = G.my_id>=0? G.my_id : 0; Buddy *b=&G.bud[id]; u32 seed=(u32)b->bw_seed;
+    int cx0=bw_cellof(b->x), cy0=bw_cellof(b->y);
+    for (int cx=cx0-8; cx<=cx0+8; cx++) for (int cy=cy0-8; cy<=cy0+8; cy++){
+        float ox, oy; if (bw_cell_feat(cx, cy, seed, &ox, &oy, b->bw_mode==1)!=1) continue;
+        b->x = cx*BW_CELL+ox; b->y = cy*BW_CELL+oy + 26; return; } }
+__attribute__((export_name("dbg_bwexit"))) void exp_dbg_bwexit(void){
+    int id = G.my_id>=0? G.my_id : 0; if (G.bud[id].in_bw) bw_exit(id, 0); }
+__attribute__((export_name("dbg_codelen"))) int exp_dbg_codelen(void){
+    int id = G.my_id>=0? G.my_id : 0; return whale_code_len[id]; }
+__attribute__((export_name("dbg_budenergy"))) int exp_dbg_budenergy(void){
+    int id = G.my_id>=0? G.my_id : 0; return (int)G.bud[id].energy; }
+__attribute__((export_name("dbg_setbudenergy"))) void exp_dbg_setbudenergy(int v){
+    int id = G.my_id>=0? G.my_id : 0; G.bud[id].energy = v; }
+__attribute__((export_name("dbg_budrevive"))) int exp_dbg_budrevive(void){
+    int id = G.my_id>=0? G.my_id : 0; return bud_revive_price(&G.bud[id]); }
+__attribute__((export_name("dbg_shield"))) int exp_dbg_shield(void){
+    int id = G.my_id>=0? G.my_id : 0; return G.p[id].shield; }
+__attribute__((export_name("dbg_setshield"))) void exp_dbg_setshield(int v){
+    int id = G.my_id>=0? G.my_id : 0; Player *p=&G.p[id];
+    if (p->shield_max<60) p->shield_max = 60;   // test scaffolding: guarantee headroom to regen into
+    p->shield = v; p->shield_regen_t = 0; shield_frac[id]=0; }
+__attribute__((export_name("dbg_budstage"))) int exp_dbg_budstage(void){
+    int id = G.my_id>=0? G.my_id : 0; return bud_stage[id]; }
+__attribute__((export_name("dbg_enter"))) void exp_dbg_enter(void){
+    int id = G.my_id>=0? G.my_id : 0; mall_enter(id); }
+__attribute__((export_name("dbg_adopt"))) void exp_dbg_adopt(int sp){
+    int id = G.my_id>=0? G.my_id : 0; if (sp>=0 && sp<BUDN) buddy_adopt(id, sp); }
+__attribute__((export_name("dbg_teach"))) void exp_dbg_teach(int bit){
+    int id = G.my_id>=0? G.my_id : 0; if (G.bud[id].active) G.bud[id].skills |= bit; }
+__attribute__((export_name("dbg_setkills"))) void exp_dbg_setkills(int k){
+    int id = G.my_id>=0? G.my_id : 0; G.p[id].kills=k; }
+__attribute__((export_name("dbg_bughp"))) int exp_dbg_bughp(int i){
+    return (i>=0 && i<MAXBUGS && G.bugs[i].alive)? (int)G.bugs[i].hp : -1; }
+__attribute__((export_name("dbg_tp"))) void exp_dbg_tp(int x, int y){
+    int id = G.my_id>=0? G.my_id : 0; G.p[id].x=(float)x; G.p[id].y=(float)y; }
+__attribute__((export_name("dbg_xp"))) void exp_dbg_xp(int n){
+    int id = G.my_id>=0? G.my_id : 0; if (G.bud[id].active) G.bud[id].xp=n; }
+__attribute__((export_name("dbg_fainted"))) int exp_dbg_fainted(void){
+    int id = G.my_id>=0? G.my_id : 0; return G.bud[id].fainted; }
+__attribute__((export_name("dbg_faint"))) void exp_dbg_faint(void){
+    int id = G.my_id>=0? G.my_id : 0;
+    if (G.bud[id].active && !G.bud[id].fainted){ G.bud[id].hp = 0.01f; hurt_buddy(id, 1.0f); } }
+__attribute__((export_name("dbg_mkwall"))) int exp_dbg_mkwall(int x, int y, int horiz){
+    if (placement_closes_loop((float)x, (float)y, horiz)) return 0;
+    for (int i=0;i<MAXWALLS;i++) if (!G.walls[i].alive){
+        Wall *w=&G.walls[i];
+        w->alive=1; w->horiz=horiz; w->x=(float)x; w->y=(float)y; w->hp=w->maxhp=57.0f;
+        w->stack=1; w->grp=-1; w->grp_old=-1; w->endpt=0;
+        walls_recompute_ex(0);
+        return 1; }
+    return -1; }
+// run stats for the shell's share card: "name|heaviest hat kg|kills|seconds|zen"
+static char share_buf[160];
+__attribute__((export_name("share_info"))) const char *exp_share_info(void){
+    int id = G.my_id>=0? G.my_id : 0; Player *p=&G.p[id];
+    char *q=share_buf;
+    q=sappend(q, p->name); *q++='|'; *q=0;
+    q=sapp_int(q, over_have? (int)over_carried : (int)p->heaviest); *q++='|'; *q=0;   // the hat you died in
+    q=sapp_int(q, G.total_kills); *q++='|'; *q=0;
+    q=sapp_int(q, (int)G.time); *q++='|'; *q=0;
+    q=sapp_int(q, G.zen_run); *q=0;
+    return share_buf;
+}
+__attribute__((export_name("dbg_overhat"))) void exp_dbg_overhat(int n){
+    int id = G.my_id>=0? G.my_id : 0; Player *p=&G.p[id];
+    if (n>MAXSTACK) n=MAXSTACK; if (n<0) n=0;
+    p->stack_n=n; p->carried=n*3.0f;
+    for (int i=0;i<n;i++) p->stack[i]=3.0f+(float)(i%5);
+    over_refresh();
+    G.state=GS_OVER; G.gameover_t=0;
+}
+__attribute__((export_name("dbg_budwall"))) int exp_dbg_budwall(void){
+    int id = G.my_id>=0? G.my_id : 0; return G.bud[id].on_wall; }
+__attribute__((export_name("dbg_roamlvl"))) int exp_dbg_roamlvl(void){
+    int id = G.my_id>=0? G.my_id : 0; BwSim *S=&BWS[id]; int m=-1;
+    for (int i=0;i<BW_ROAMN;i++) if (S->roam[i].cell!=0 && S->roam[i].lvl>m) m=S->roam[i].lvl;
+    return m; }
+__attribute__((export_name("dbg_bwtp"))) void exp_dbg_bwtp(int x, int y){
+    int id = G.my_id>=0? G.my_id : 0; Buddy *b=&G.bud[id];
+    b->x = x; b->y = y; b->bw_x = x; b->bw_y = y; }
+__attribute__((export_name("dbg_termord"))) int exp_dbg_termord(void){
+    int id = G.my_id>=0? G.my_id : 0; int o[3]; bw_term_order(&G.bud[id], o);
+    return o[0] + o[1]*3 + o[2]*9; }
+__attribute__((export_name("dbg_boss"))) int exp_dbg_boss(void){
+    int id = G.my_id>=0? G.my_id : 0; return BWS[id].bat.active? BWS[id].bat.boss : -1; }
+__attribute__((export_name("dbg_setq"))) void exp_dbg_setq(int q, int s){
+    int id = G.my_id>=0? G.my_id : 0; if (q>=0 && q<4) bw_qset(&G.bud[id], q, s); }
+__attribute__((export_name("dbg_bwhackhere"))) void exp_dbg_bwhackhere(void){
+    int id = G.my_id>=0? G.my_id : 0; Buddy *b=&G.bud[id]; BwSim *S=&BWS[id];
+    // bring a roamer to the buddy, re-homing it to a hacker cell the
+    // roam_refresh is guaranteed to keep (undefeated, within 640) —
+    // re-homing to the buddy's OWN cell backfired: the win marked that
+    // cell defeated and refresh dropped the next roamer before contact
+    u32 seed=(u32)b->bw_seed;
+    int cx0=bw_cellof(b->x), cy0=bw_cellof(b->y), pin=0, have=0;
+    for (int cx=cx0-3; cx<=cx0+3 && !have; cx++)
+        for (int cy=cy0-3; cy<=cy0+3; cy++){
+            float ox, oy; if (bw_cell_feat(cx, cy, seed, &ox, &oy, b->bw_mode==1)!=2) continue;
+            int key=bw_cell_key(cx, cy);
+            if (bw_defeated_has(S, key)) continue;
+            float wx=cx*BW_CELL+ox, wy=cy*BW_CELL+oy, dx=wx-b->x, dy=wy-b->y;
+            if (dx*dx+dy*dy > 640*640) continue;
+            pin = key; have = 1; break;   // NOTE: cell keys can be negative — a flag, not a sentinel
+        }
+    if (!have) return;
+    for (int i=0;i<BW_ROAMN;i++) if (S->roam[i].cell || S->roam[i].x || S->roam[i].y){
+        S->roam[i].cell = pin;
+        S->roam[i].x = b->x + 12; S->roam[i].y = b->y; return; } }
+__attribute__((export_name("dbg_bwstory"))) void exp_dbg_bwstory(void){
+    int id = G.my_id>=0? G.my_id : 0; bw_enter_mode(id, 1); }
+__attribute__((export_name("dbg_gate"))) int exp_dbg_gate(void){
+    int id = G.my_id>=0? G.my_id : 0; return bwgate[id]; }
+__attribute__((export_name("dbg_log"))) int exp_dbg_log(void){
+    int id = G.my_id>=0? G.my_id : 0; return BWS[id].log_open; }
+__attribute__((export_name("dbg_quest"))) int exp_dbg_quest(void){
+    int id = G.my_id>=0? G.my_id : 0; return G.bud[id].story_bits; }
+__attribute__((export_name("dbg_items"))) int exp_dbg_items(void){
+    int id = G.my_id>=0? G.my_id : 0; Buddy *b=&G.bud[id];
+    return b->items[0] + b->items[1]*10 + b->items[2]*100 + b->items[3]*1000; }
+__attribute__((export_name("dbg_site"))) int exp_dbg_site(void){
+    int id = G.my_id>=0? G.my_id : 0; Buddy *b=&G.bud[id]; return bw_site_at_xy(b, b->x, b->y); }
+__attribute__((export_name("dbg_giveitem"))) void exp_dbg_giveitem(int it){
+    int id = G.my_id>=0? G.my_id : 0; if (it>=0 && it<4 && G.bud[id].items[it]<9) G.bud[id].items[it]++; }
+__attribute__((export_name("dbg_budup"))) void exp_dbg_budup(int n){
+    int id = G.my_id>=0? G.my_id : 0; Buddy *b=&G.bud[id];
+    if (b->active){ b->up_atk=n; b->up_hp=n; buddy_refresh(id); b->hp=b->maxhp; } }
+__attribute__((export_name("dbg_bwtele_site"))) void exp_dbg_bwtele_site(int s){
+    int id = G.my_id>=0? G.my_id : 0; Buddy *b=&G.bud[id];
+    if (s>=0 && s<4){ b->x = BW_SITE_XY[s][0]; b->y = BW_SITE_XY[s][1] + 60; b->bw_x=b->x; b->bw_y=b->y; } }
+__attribute__((export_name("dbg_bwtele_npc"))) void exp_dbg_bwtele_npc(int n){
+    int id = G.my_id>=0? G.my_id : 0; Buddy *b=&G.bud[id];
+    if (n>=0 && n<3){ b->x = BW_NPC_XY[n][0]; b->y = BW_NPC_XY[n][1] + 26; b->bw_x=b->x; b->bw_y=b->y; } }
+__attribute__((export_name("dbg_adopt2"))) void exp_dbg_adopt2(int sp){
+    if (G.p2_slot>=0 && sp>=0 && sp<BUDN) buddy_adopt(G.p2_slot, sp); }
+__attribute__((export_name("dbg_tp2"))) void exp_dbg_tp2(int x, int y){
+    if (G.p2_slot>=0){ G.p[G.p2_slot].x = x; G.p[G.p2_slot].y = y; } }
+__attribute__((export_name("dbg_bwstate2"))) int exp_dbg_bwstate2(void){
+    return (G.p2_slot>=0 && G.bud[G.p2_slot].in_bw)? 1 : 0; }
+__attribute__((export_name("dbg_sq2v"))) int exp_dbg_sq2v(void){ int id = G.my_id>=0? G.my_id : 0; return G.bud[id].story_bits2; }
+__attribute__((export_name("dbg_ridge"))) int exp_dbg_ridge(int x, int y){ return bw_ridge_solid((float)x, (float)y); }
+__attribute__((export_name("dbg_alertmax"))) int exp_dbg_alertmax(void){
+    int id = G.my_id>=0? G.my_id : 0; BwSim *S=&BWS[id]; int m=0;
+    for (int i=0;i<BW_ROAMN;i++){ int a=(int)(S->roam[i].alert*100); if (a>m) m=a; } return m; }
+__attribute__((export_name("dbg_roamdist"))) int exp_dbg_roamdist(void){
+    int id = G.my_id>=0? G.my_id : 0; Buddy *b=&G.bud[id]; BwSim *S=&BWS[id]; int best=-1;
+    for (int i=0;i<BW_ROAMN;i++){ BWHack *h=&S->roam[i]; if (!h->cell && !h->x && !h->y) continue;
+        float dx=b->x-h->x, dy=b->y-h->y; int d=(int)fsqrt(dx*dx+dy*dy); if (best<0 || d<best) best=d; } return best; }
+__attribute__((export_name("dbg_tentcount"))) int exp_dbg_tentcount(void){
+    int id = G.my_id>=0? G.my_id : 0; Buddy *b=&G.bud[id]; u32 seed=(u32)b->bw_seed; int n=0;
+    for (int cx=-10; cx<=10; cx++) for (int cy=-10; cy<=10; cy++){
+        float ox, oy; if (bw_cell_feat(cx, cy, seed, &ox, &oy, b->bw_mode==1)==1) n++; } return n; }
+__attribute__((export_name("dbg_bitdist"))) int exp_dbg_bitdist(void){
+    int id = G.my_id>=0? G.my_id : 0; Buddy *b=&G.bud[id]; float x, y; bw_bitling_pos(&x, &y);
+    float dx=x-b->x, dy=y-b->y; return (int)fsqrt(dx*dx+dy*dy); }
+__attribute__((export_name("dbg_bittp"))) void exp_dbg_bittp(void){
+    int id = G.my_id>=0? G.my_id : 0; Buddy *b=&G.bud[id]; float x, y; bw_bitling_pos(&x, &y); b->x=x; b->y=y; }
+__attribute__((export_name("dbg_hsigntp"))) void exp_dbg_hsigntp(int i){
+    int id = G.my_id>=0? G.my_id : 0; Buddy *b=&G.bud[id]; b->x=BW_HSIGN_XY[i][0]; b->y=BW_HSIGN_XY[i][1]+16; }
+__attribute__((export_name("dbg_bwx2"))) int exp_dbg_bwx2(void){
+    return G.p2_slot>=0? (int)G.bud[G.p2_slot].bw_x : -99999; }
+#endif // PLAT_WASM
+
+// ===========================================================================
+// PLATFORM: Windows — Win32 + GDI + winmm MIDI + Winsock UDP. Single .exe.
+// ===========================================================================
+#ifdef PLAT_WIN32
+#define WIN32_LEAN_AND_MEAN
+#define NOMINMAX
+#include <stdio.h>
+#include <string.h>
+#include <windows.h>
+#include <shellapi.h>
+#include <mmsystem.h>
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#undef IN
+#undef OUT
+#ifdef _MSC_VER
+#pragma comment(lib, "gdi32.lib")
+#pragma comment(lib, "winmm.lib")
+#pragma comment(lib, "ws2_32.lib")
+#pragma comment(lib, "user32.lib")
+#endif
+
+static HWND g_hwnd=0;
+static u64 g_raw=0;
+static LARGE_INTEGER qpf; static int qpf_ok=0;
+double plat_now(void){
+    if (!qpf_ok){ QueryPerformanceFrequency(&qpf); qpf_ok=1; }
+    LARGE_INTEGER t; QueryPerformanceCounter(&t);
+    return (double)t.QuadPart / (double)qpf.QuadPart;
+}
+// --- MIDI ---
+static HMIDIOUT g_midi=0;
+typedef struct { double off; int ch, note; } MidiOff;
+static MidiOff g_offs[160]; static int g_offs_n=0;
+static void midi_prog(int ch, int prog){
+    if (g_midi) midiOutShortMsg(g_midi, 0xC0 | ch | (prog<<8));
+}
+void plat_note(int ch, int note, int vel, int instr){
+    if (!g_midi) return;
+    { static int kz_state = -1;   // WHALES ONLY: KAZOO MODE re-voices the music channels
+      int kz = (G.whale_on & 16384)? 1 : 0;
+      if (kz != kz_state){ kz_state = kz;
+          midi_prog(0, kz? 71 : 80); midi_prog(1, kz? 70 : 38); midi_prog(2, kz? 71 : 81); } }
+    int mc = ch, mn = note;
+    if (ch==3 && instr==3){ mc=9; mn = vel>90? 49 : 42; }        // noise -> drums
+    if (note<0 || note>127) return;
+    midiOutShortMsg(g_midi, 0x90 | mc | (mn<<8) | (vel<<16));
+    if (g_offs_n<160){ g_offs[g_offs_n].off = plat_now() + (ch==1? 0.22 : 0.16);
+        g_offs[g_offs_n].ch=mc; g_offs[g_offs_n].note=mn; g_offs_n++; }
+}
+static void plat_audio_pump(void){
+    double now = plat_now();
+    for (int i=0;i<g_offs_n;i++) if (g_offs[i].off<=now){
+        midiOutShortMsg(g_midi, 0x80 | g_offs[i].ch | (g_offs[i].note<<8));
+        g_offs[i]=g_offs[--g_offs_n]; i--;
+    }
+}
+// --- save file ---
+// Saves live in ONE stable home (%APPDATA%) — they used to be loose
+// files in whatever folder the exe ran from, so a fresh download
+// (TheSurvivalGame(14).exe in Downloads) found a stale set from an
+// older run, or none, and players "lost" progress that was sitting
+// in another folder (Daniel's vanishing buddy, Nov 5). The legacy
+// beside-the-exe file is adopted ONLY when the stable home has no
+// copy yet (the one-time upgrade migration), and is then lifted into
+// the stable home. It must never win just for being newer: a legacy
+// file can only be written by an OLD build, so a Downloads folder
+// full of old exes would otherwise keep rewinding the player's run
+// to whichever stale set was touched last (Daniel, Nov 5 again —
+// the buddy "lost" on Continue was the stable run being replaced
+// by a fresher-mtime legacy set from an older exe in the folder).
+static void win_save_paths(int slot, char *stable, char *legacy){
+    save_slot_name(legacy, slot);
+    const char *app = getenv("APPDATA");
+    if (app && app[0]) snprintf(stable, 1024, "%s\\%s", app, legacy);
+    else { int i=0; while (legacy[i]){ stable[i]=legacy[i]; i++; } stable[i]=0; }
+}
+void plat_save_slot(int slot, const char *d, int len){
+    char sp[1024], lp[64]; win_save_paths(slot, sp, lp);
+    HANDLE h = CreateFileA(sp, GENERIC_WRITE, 0, 0, CREATE_ALWAYS, 0, 0);
+    if (h==INVALID_HANDLE_VALUE) h = CreateFileA(lp, GENERIC_WRITE, 0, 0, CREATE_ALWAYS, 0, 0);   // never lose a save
+    if (h==INVALID_HANDLE_VALUE) return;
+    DWORD wr; WriteFile(h, d, (DWORD)len, &wr, 0); CloseHandle(h);
+}
+int plat_load_slot(int slot, char *buf, int cap){
+    char sp[1024], lp[64]; win_save_paths(slot, sp, lp);
+    WIN32_FILE_ATTRIBUTE_DATA sa, la;
+    int hs = GetFileAttributesExA(sp, GetFileExInfoStandard, &sa)!=0;
+    int hl = GetFileAttributesExA(lp, GetFileExInfoStandard, &la)!=0;
+    const char *use = 0; int import = 0;
+    if (hs) use=sp;                          // the stable home is canonical once it exists
+    else if (hl){ use=lp; import=1; }        // one-time migration only
+    if (!use) return -1;
+    HANDLE h = CreateFileA(use, GENERIC_READ, FILE_SHARE_READ, 0, OPEN_EXISTING, 0, 0);
+    if (h==INVALID_HANDLE_VALUE) return -1;
+    DWORD rd; BOOL ok = ReadFile(h, buf, (DWORD)cap, &rd, 0); CloseHandle(h);
+    if (!ok) return -1;
+    if (import){   // lift the legacy copy into the stable home
+        HANDLE w = CreateFileA(sp, GENERIC_WRITE, 0, 0, CREATE_ALWAYS, 0, 0);
+        if (w!=INVALID_HANDLE_VALUE){ DWORD wr; WriteFile(w, buf, rd, &wr, 0); CloseHandle(w); }
+    }
+    return (int)rd;
+}
+void plat_save(const char *d, int len){ plat_save_slot(0, d, len); }
+int plat_load(char *buf, int cap){ return plat_load_slot(0, buf, cap); }
+void plat_open_url(const char *url){   // Whales Only: only buy.stripe.com links ever reach here
+    if (!url || strncmp(url, "https://buy.stripe.com/", 23)!=0) return;
+    ShellExecuteA(0, "open", url, 0, 0, SW_SHOWNORMAL);
+}
+int plat_whale_poll(char *buf, int cap){   // a whale-code.txt: cwd, else beside the saves in %APPDATA%
+    char sp[1024]; const char *app = getenv("APPDATA");
+    HANDLE h = CreateFileA("whale-code.txt", GENERIC_READ, FILE_SHARE_READ, 0, OPEN_EXISTING, 0, 0);
+    if (h==INVALID_HANDLE_VALUE && app && app[0]){
+        snprintf(sp, sizeof(sp), "%s\\whale-code.txt", app);
+        h = CreateFileA(sp, GENERIC_READ, FILE_SHARE_READ, 0, OPEN_EXISTING, 0, 0);
+    } else sp[0]=0;
+    if (h==INVALID_HANDLE_VALUE) return 0;
+    DWORD rd; BOOL ok = ReadFile(h, buf, (DWORD)(cap-1), &rd, 0); CloseHandle(h);
+    DeleteFileA("whale-code.txt");
+    if (sp[0]) DeleteFileA(sp);
+    if (!ok || rd==0) return 0;
+    buf[rd]=0; return (int)rd;
+}
+// (networking lives in the shared embedded-web-server section at the
+// end of this file: the app serves the web build and browser guests
+// relay straight into the host — there is no separate UDP transport.)
+
+// --- window / input: report physical keys; the core applies bindings ---
+static int vk_pk(int vk){
+    if (vk>='A' && vk<='Z') return vk-'A';
+    if (vk>='0' && vk<='9') return 26+(vk-'0');
+    if (vk>=VK_NUMPAD0 && vk<=VK_NUMPAD9) return 26+(vk-VK_NUMPAD0);
+    switch (vk){
+        case VK_UP: return PK_UP; case VK_DOWN: return PK_DOWN;
+        case VK_LEFT: return PK_LEFT; case VK_RIGHT: return PK_RIGHT;
+        case VK_SPACE: return PK_SPACE; case VK_RETURN: return PK_ENTER;
+        case VK_ESCAPE: return PK_ESC;
+        case VK_SHIFT: case VK_LSHIFT: case VK_RSHIFT: return PK_SHIFT;
+        case VK_BACK: return PK_BACKSPACE;
+    }
+    return -1;
+}
+static void key_bit(int vk, int down){
+    int pk = vk_pk(vk);
+    if (pk>=0){ if (down) g_raw |= (1ULL<<pk); else g_raw &= ~(1ULL<<pk); }
+}
+static LRESULT CALLBACK wndproc(HWND hw, UINT msg, WPARAM wp, LPARAM lp){
+    (void)lp;
+    switch (msg){
+    case WM_DESTROY: PostQuitMessage(0); return 0;
+    case WM_KEYDOWN: { int pk = vk_pk((int)wp);
+        if (pk>=0 && !((g_raw>>pk)&1)) IN.edges_in |= (1ULL<<pk);   // one edge per physical press
+        key_bit((int)wp, 1); return 0; }
+    case WM_KEYUP: key_bit((int)wp, 0); return 0;
+    case WM_CHAR:
+        // typed characters: the game core decides whether a text field
+        // is selected right now; everywhere else they are ignored.
+        if (wp>=32 && wp<127 && IN.typed_n<16) IN.typed[IN.typed_n++]=(char)wp;
+        return 0;
+    }
+    return DefWindowProcA(hw, msg, wp, lp);
+}
+// --- gamepad: XInput, loaded dynamically (no import lib needed) ---
+typedef struct { u32 packet; u16 buttons; u8 lt, rt; short lx, ly, rx, ry; } XIState;
+typedef u32 (__stdcall *XInputGetState_t)(u32, XIState*);
+static XInputGetState_t xi_get=0; static int xi_tried=0;
+static void pad_set(int a, int down){
+    if (down){ if (!((IN.act_held>>a)&1)) IN.act_edges |= (1u<<a); IN.act_held |= (1u<<a); }
+    else IN.act_held &= ~(1u<<a);
+}
+static void pad2_set(int a, int down){
+    if (down){ if (!((IN.act2_held>>a)&1)) IN.act2_edges |= (1u<<a); IN.act2_held |= (1u<<a); }
+    else IN.act2_held &= ~(1u<<a);
+}
+static void win32_pad_apply(XIState *s, int ch){
+    u16 b = s->buttons;
+    void (*set)(int,int) = ch? pad2_set : pad_set;
+    set(ACT_UP,    (b&0x0001) || s->ly>12000);
+    set(ACT_DOWN,  (b&0x0002) || s->ly<-12000);
+    set(ACT_LEFT,  (b&0x0004) || s->lx<-12000);
+    set(ACT_RIGHT, (b&0x0008) || s->lx>12000);
+    set(ACT_FIRE,  (b&0x1000) || s->rt>30);
+    set(ACT_INTERACT, (b&0x2000)!=0);
+    set(ACT_WALL,  (b&0x4000)!=0);
+    set(ACT_WPREV, (b&0x0100)!=0);
+    set(ACT_WNEXT, (b&0x0200)!=0);
+    set(ACT_PAUSE, (b&0x0010)!=0);
+    set(ACT_ESC,   (b&0x0020)!=0);
+    set(ACT_BEAN,  (b&0x8000)!=0);   // Y: the Backfire Bean
+    set(ACT_SPRINT,(b&0x0040) || s->lt>30);
+}
+static void win32_pad_poll(void){
+    if (!xi_tried){ xi_tried=1;
+        HMODULE h = LoadLibraryA("xinput1_4.dll");
+        if (!h) h = LoadLibraryA("xinput1_3.dll");
+        if (h) xi_get = (XInputGetState_t)GetProcAddress(h, "XInputGetState");
+    }
+    if (!xi_get) return;
+    // connected pads in user order: first drives P1, second drives P2
+    int ch=0, count=0;
+    for (int u=0; u<4 && ch<2; u++){
+        XIState s; memset(&s, 0, sizeof(s));
+        if (xi_get(u, &s)!=0) continue;
+        count++;
+        win32_pad_apply(&s, ch++);
+    }
+    IN.pad_count = count;
+}
+int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR cmd, int show){
+    (void)hPrev; (void)cmd;
+    web_server_start();   // serve the game page + relay browser guests
+    WNDCLASSA wc; ZeroMemory(&wc, sizeof(wc));
+    wc.lpfnWndProc=wndproc; wc.hInstance=hInst; wc.lpszClassName="TSGWindow";
+    wc.hCursor=LoadCursorA(0, MAKEINTRESOURCEA(32515)); /* IDC_CROSSHAIR */
+    wc.hbrBackground=(HBRUSH)GetStockObject(BLACK_BRUSH);
+    RegisterClassA(&wc);
+    RECT r={0,0,1280,720}; AdjustWindowRect(&r, WS_OVERLAPPEDWINDOW, 0);
+    g_hwnd = CreateWindowA("TSGWindow", "THE SURVIVAL GAME", WS_OVERLAPPEDWINDOW,
+        CW_USEDEFAULT, CW_USEDEFAULT, r.right-r.left, r.bottom-r.top, 0, 0, hInst, 0);
+    if (!g_hwnd) return 1;
+    ShowWindow(g_hwnd, show);
+    if (midiOutOpen(&g_midi, MIDI_MAPPER, 0, 0, CALLBACK_NULL)==MMSYSERR_NOERROR){
+        midi_prog(0, 80);   // square lead
+        midi_prog(1, 38);   // synth bass
+        midi_prog(2, 81);   // saw arp
+        midi_prog(3, 80);   // sfx lead
+    }
+    BITMAPINFO bmi; ZeroMemory(&bmi, sizeof(bmi));
+    bmi.bmiHeader.biSize=sizeof(BITMAPINFOHEADER);
+    bmi.bmiHeader.biWidth=PW; bmi.bmiHeader.biHeight=-PH;
+    bmi.bmiHeader.biPlanes=1; bmi.bmiHeader.biBitCount=32; bmi.bmiHeader.biCompression=BI_RGB;
+    int running=1;
+    while (running){
+        MSG m;
+        while (PeekMessageA(&m, 0, 0, 0, PM_REMOVE)){
+            if (m.message==WM_QUIT) running=0;
+            TranslateMessage(&m); DispatchMessageA(&m);
+        }
+        if (!running) break;
+        IN.raw = g_raw;
+        win32_pad_poll();
+        frame();
+        plat_audio_pump();
+        HDC dc = GetDC(g_hwnd);
+        RECT rc; GetClientRect(g_hwnd, &rc);
+        SetStretchBltMode(dc, HALFTONE);                 // smooth upscale
+        SetBrushOrgEx(dc, 0, 0, 0);
+        StretchDIBits(dc, 0, 0, rc.right-rc.left, rc.bottom-rc.top,
+                      0, 0, PW, PH, fb, &bmi, DIB_RGB_COLORS, SRCCOPY);
+        ReleaseDC(g_hwnd, dc);
+        Sleep(1);
+    }
+    if (g_midi) midiOutClose(g_midi);
+    plat_net_stop();
+    return 0;
+}
+
+#endif // PLAT_WIN32
+
+// ===========================================================================
+// POSIX shared bits for the Linux and macOS builds: a small software
+// synth (the WebAudio voices, re-implemented in C) and BSD-socket UDP.
+// ===========================================================================
+#if defined(PLAT_LINUX) || defined(PLAT_MAC)
+#define _POSIX_C_SOURCE 200809L
+#define _DEFAULT_SOURCE 1
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <math.h>
+#include <time.h>
+#include <unistd.h>
+#include <fcntl.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <netinet/tcp.h>
+#include <arpa/inet.h>
+#include <pthread.h>
+
+double plat_now(void){
+    struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (double)ts.tv_sec + (double)ts.tv_nsec/1e9;
+}
+
+// --- software synth: square / triangle / noise voices with decay ---
+typedef struct { double t0; float freq, dur, gain; int instr, ch; unsigned seed; } Voice;
+static Voice g_voices[48];
+void plat_note(int ch, int note, int vel, int instr){
+    if (vel<=0 || note<0 || note>127) return;
+    double now = plat_now();
+    for (int i=0;i<48;i++){
+        Voice *v=&g_voices[i];
+        if (v->t0<=0 || now > v->t0 + v->dur){
+            v->t0 = now;
+            v->freq = (float)(440.0 * pow(2.0, (note-69)/12.0));
+            v->dur = (instr==3)? 0.13f : (ch==1? 0.24f : 0.16f);
+            float vv = vel/110.0f; if (vv>1) vv=1;
+            v->gain = vv * (ch==0? 0.30f : 0.36f) * (instr==3? 0.7f : 1.0f);
+            v->instr = instr; v->ch = ch;
+            v->seed = (unsigned)(now*44100.0) + (unsigned)i*777u;
+            return;
+        }
+    }
+}
+// render n mono float samples at 44100 Hz starting at absolute time `now`
+void synth_render(float *out, int n, double now){
+    for (int i=0;i<n;i++) out[i]=0;
+    for (int vi=0; vi<48; vi++){
+        Voice *v=&g_voices[vi]; if (v->t0<=0) continue;
+        for (int i=0;i<n;i++){
+            double t = now + (double)i/44100.0 - v->t0;
+            if (t<0) continue;
+            if (t>=v->dur) break;
+            float s;
+            if (v->instr==3){
+                unsigned sd = v->seed + (unsigned)(t*44100.0);
+                sd = sd*1664525u + 1013904223u;
+                s = ((float)((sd>>9)&0xFFFF)/32768.0f - 1.0f) * (1.0f - (float)(t/v->dur));
+            } else {
+                double ph = t * v->freq; ph -= (double)(long long)ph;
+                if (v->instr==4){   // WHALES ONLY: KAZOO — buzzy square, 29 Hz buzz, a breath of noise
+                    float sq = ph<0.5? 1.0f : -1.0f;
+                    float am = 0.72f + 0.28f*(float)sin(6.2831853*29.0*t);
+                    unsigned sd2 = v->seed + (unsigned)(t*44100.0); sd2 = sd2*1664525u + 1013904223u;
+                    s = sq*am + ((float)((sd2>>9)&0xFFFF)/32768.0f - 1.0f)*0.16f;
+                }
+                else s = (v->instr==1)? (float)(2.0*fabs(2.0*ph-1.0)-1.0) : (ph<0.5? 1.0f : -1.0f);
+                s *= (float)exp(-6.0 * t / v->dur);
+            }
+            out[i] += s * v->gain;
+        }
+    }
+    for (int i=0;i<n;i++){ if (out[i]>1) out[i]=1; else if (out[i]<-1) out[i]=-1; }
+}
+// (networking lives in the shared embedded-web-server section at the
+// end of this file: the app serves the web build and browser guests
+// relay straight into the host — there is no separate UDP transport.)
+
+#endif // PLAT_LINUX || PLAT_MAC
+
+// ===========================================================================
+// PLATFORM: Linux — X11 window, ALSA synth output, stdio save file.
+// ===========================================================================
+#ifdef PLAT_LINUX
+#include <X11/Xlib.h>
+#include <X11/Xutil.h>
+#include <X11/keysym.h>
+#include <alsa/asoundlib.h>
+#include <pthread.h>
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <sys/types.h>
+#include <linux/joystick.h>
+#include <X11/XKBlib.h>
+
+// Saves live in ONE stable home (~/.local/share) — see the Windows
+// backend for why (loose beside-the-exe files lost players' runs).
+// The legacy beside-the-exe file is adopted only when the stable
+// home has no copy yet, and is then lifted into the stable home;
+// it never wins just for being newer (an old build's save set must
+// not rewind the canonical one).
+static void lin_save_paths(int slot, char *stable, char *legacy){
+    save_slot_name(legacy, slot);
+    const char *home = getenv("HOME");
+    if (home && home[0]) snprintf(stable, 1024, "%s/.local/share/%s", home, legacy);
+    else { int i=0; while (legacy[i]){ stable[i]=legacy[i]; i++; } stable[i]=0; }
+}
+static void lin_save_mkdir(void){
+    const char *home = getenv("HOME"); if (!home || !home[0]) return;
+    char p[1024];
+    snprintf(p, sizeof(p), "%s/.local", home); mkdir(p, 0755);
+    snprintf(p, sizeof(p), "%s/.local/share", home); mkdir(p, 0755);
+}
+void plat_save_slot(int slot, const char *d, int len){
+    char sp[1024], lp[64]; lin_save_paths(slot, sp, lp);
+    lin_save_mkdir();
+    FILE *f = fopen(sp, "wb");
+    if (!f) f = fopen(lp, "wb");   // never lose a save
+    if (!f) return;
+    fwrite(d, 1, (size_t)len, f); fclose(f);
+}
+int plat_load_slot(int slot, char *buf, int cap){
+    char sp[1024], lp[64]; lin_save_paths(slot, sp, lp);
+    struct stat ss, ls;
+    int hs = stat(sp, &ss)==0, hl = stat(lp, &ls)==0;
+    const char *use = 0; int import = 0;
+    if (hs) use=sp;                          // the stable home is canonical once it exists
+    else if (hl){ use=lp; import=1; }        // one-time migration only
+    if (!use) return -1;
+    FILE *f = fopen(use, "rb");
+    if (!f) return -1;
+    int n = (int)fread(buf, 1, (size_t)cap, f); fclose(f);
+    if (import){ lin_save_mkdir();
+        FILE *w = fopen(sp, "wb");
+        if (w){ fwrite(buf, 1, (size_t)n, w); fclose(w); } }
+    return n;
+}
+void plat_save(const char *d, int len){ plat_save_slot(0, d, len); }
+int plat_load(char *buf, int cap){ return plat_load_slot(0, buf, cap); }
+void plat_open_url(const char *url){   // Whales Only: only buy.stripe.com links ever reach here
+    if (!url || strncmp(url, "https://buy.stripe.com/", 23)!=0) return;
+    if (fork()==0){ execlp("xdg-open", "xdg-open", url, (char*)0); _exit(1); }
+}
+int plat_whale_poll(char *buf, int cap){   // a whale-code.txt: cwd, else beside the saves
+    char sp[1024]; const char *home = getenv("HOME");
+    FILE *f = fopen("whale-code.txt", "rb");
+    if (!f && home && home[0]){ snprintf(sp, sizeof(sp), "%s/.local/share/whale-code.txt", home); f = fopen(sp, "rb"); }
+    else sp[0]=0;
+    if (!f) return 0;
+    int n = (int)fread(buf, 1, (size_t)(cap-1), f); fclose(f);
+    remove("whale-code.txt");
+    if (sp[0]) remove(sp);
+    if (n<=0) return 0;
+    buf[n]=0; return n;
+}
+
+// --- ALSA output thread: pulls the software synth in blocks ---
+static void *alsa_thread(void *arg){
+    (void)arg;
+    snd_pcm_t *pcm=0;
+    if (snd_pcm_open(&pcm, "default", SND_PCM_STREAM_PLAYBACK, 0)!=0) return 0;
+    if (snd_pcm_set_params(pcm, SND_PCM_FORMAT_S16_LE, SND_PCM_ACCESS_RW_INTERLEAVED,
+                           1, 44100, 1, 120000)!=0){ snd_pcm_close(pcm); return 0; }
+    static float fbuf[1024]; static short sbuf[1024];
+    double rt = plat_now();
+    for (;;){
+        synth_render(fbuf, 1024, rt);
+        rt += 1024/44100.0;
+        for (int i=0;i<1024;i++) sbuf[i] = (short)(fbuf[i]*32767.0f);
+        int w = (int)snd_pcm_writei(pcm, sbuf, 1024);
+        if (w<0) snd_pcm_prepare(pcm);
+    }
+    return 0;
+}
+
+// --- window / input ---
+#define WIN_W 1280
+#define WIN_H 720
+static Display *g_dpy=0;
+static u64 g_raw=0;
+static u32 g_scaled[WIN_W*WIN_H];
+static void blit_scale(void){
+    // bilinear 640x360 -> window size (exactly 2x at the default size)
+    for (int y=0;y<WIN_H;y++){
+        float sy = (y+0.5f)*(float)PH/WIN_H - 0.5f;
+        int y0 = (int)floorf(sy); float fy = sy - y0;
+        if (y0<0){ y0=0; fy=0; } if (y0>PH-2){ y0=PH-2; fy=1; }
+        for (int x=0;x<WIN_W;x++){
+            float sx = (x+0.5f)*(float)PW/WIN_W - 0.5f;
+            int x0 = (int)floorf(sx); float fx = sx - x0;
+            if (x0<0){ x0=0; fx=0; } if (x0>PW-2){ x0=PW-2; fx=1; }
+            u32 c00=fb[y0*PW+x0], c10=fb[y0*PW+x0+1], c01=fb[(y0+1)*PW+x0], c11=fb[(y0+1)*PW+x0+1];
+            int r = (int)((COL_R(c00)*(1-fx)*(1-fy) + COL_R(c10)*fx*(1-fy) + COL_R(c01)*(1-fx)*fy + COL_R(c11)*fx*fy) + 0.5f);
+            int g = (int)((COL_G(c00)*(1-fx)*(1-fy) + COL_G(c10)*fx*(1-fy) + COL_G(c01)*(1-fx)*fy + COL_G(c11)*fx*fy) + 0.5f);
+            int b = (int)((COL_B(c00)*(1-fx)*(1-fy) + COL_B(c10)*fx*(1-fy) + COL_B(c01)*(1-fx)*fy + COL_B(c11)*fx*fy) + 0.5f);
+            g_scaled[y*WIN_W+x] = COL(r, g, b);
+        }
+    }
+}
+static int ks_pk(KeySym ks){
+    if (ks>=XK_a && ks<=XK_z) return (int)(ks-XK_a);
+    if (ks>=XK_A && ks<=XK_Z) return (int)(ks-XK_A);
+    if (ks>=XK_0 && ks<=XK_9) return 26+(int)(ks-XK_0);
+    if (ks>=XK_KP_0 && ks<=XK_KP_9) return 26+(int)(ks-XK_KP_0);
+    switch (ks){
+        case XK_Up: case XK_KP_Up: return PK_UP;
+        case XK_Down: case XK_KP_Down: return PK_DOWN;
+        case XK_Left: case XK_KP_Left: return PK_LEFT;
+        case XK_Right: case XK_KP_Right: return PK_RIGHT;
+        case XK_space: return PK_SPACE;
+        case XK_Return: case XK_KP_Enter: return PK_ENTER;
+        case XK_Escape: return PK_ESC;
+        case XK_Shift_L: case XK_Shift_R: return PK_SHIFT;
+        case XK_BackSpace: return PK_BACKSPACE;
+    }
+    return -1;
+}
+static void key_bit(KeySym ks, int down){
+    int pk = ks_pk(ks);
+    if (pk>=0){ if (down) g_raw |= (1ULL<<pk); else g_raw &= ~(1ULL<<pk); }
+}
+// --- gamepad: /dev/input/js0 (standard joystick API) ---
+static void pad_set(int a, int down){
+    if (down){ if (!((IN.act_held>>a)&1)) IN.act_edges |= (1u<<a); IN.act_held |= (1u<<a); }
+    else IN.act_held &= ~(1u<<a);
+}
+static int js_fd=-1, js_btn[16], js_ax[8], js_retry=0;
+static int js2_fd=-1, js2_btn[16], js2_ax[8], js2_retry=0;
+static void pad2_set(int a, int down){
+    if (down){ if (!((IN.act2_held>>a)&1)) IN.act2_edges |= (1u<<a); IN.act2_held |= (1u<<a); }
+    else IN.act2_held &= ~(1u<<a);
+}
+static int linux_js_drain(int *fdp, const char *path, int *retry, int *btn, int *ax){
+    if (*fdp<0){
+        if (--(*retry)>0) return 0;
+        *retry = 300;
+        *fdp = open(path, O_RDONLY|O_NONBLOCK);
+        if (*fdp<0) return 0;
+    }
+    struct js_event ev;
+    ssize_t r;
+    int alive=1;
+    while ((r=read(*fdp, &ev, sizeof(ev)))==(ssize_t)sizeof(ev)){
+        int type = ev.type & ~JS_EVENT_INIT;
+        if (type==JS_EVENT_BUTTON && ev.number<16) btn[ev.number]=ev.value;
+        else if (type==JS_EVENT_AXIS && ev.number<8) ax[ev.number]=ev.value;
+    }
+    if (r==0) alive=0;
+    if (!alive){ close(*fdp); *fdp=-1; memset(btn,0,16*sizeof(int)); memset(ax,0,8*sizeof(int)); return 0; }
+    return 1;
+}
+static void linux_pad_apply(int *btn, int *ax, int ch){
+    void (*set)(int,int) = ch? pad2_set : pad_set;
+    set(ACT_UP,    ax[1]<-12000 || ax[7]<-12000);
+    set(ACT_DOWN,  ax[1]>12000  || ax[7]>12000);
+    set(ACT_LEFT,  ax[0]<-12000 || ax[6]<-12000);
+    set(ACT_RIGHT, ax[0]>12000  || ax[6]>12000);
+    set(ACT_FIRE,  btn[0] || ax[5]>0);
+    set(ACT_INTERACT, btn[1]!=0);
+    set(ACT_WALL,  btn[2]!=0);
+    set(ACT_WPREV, btn[4]!=0);
+    set(ACT_WNEXT, btn[5]!=0);
+    set(ACT_ESC,   btn[6]!=0);
+    set(ACT_PAUSE, btn[7]!=0);
+    set(ACT_BEAN,  btn[3]!=0);   // Y: the Backfire Bean
+    set(ACT_SPRINT, btn[9] || ax[2]>0);
+}
+static void linux_pad_poll(void){
+    int n=0;
+    if (linux_js_drain(&js_fd, "/dev/input/js0", &js_retry, js_btn, js_ax)){ linux_pad_apply(js_btn, js_ax, 0); n++; }
+    if (linux_js_drain(&js2_fd, "/dev/input/js1", &js2_retry, js2_btn, js2_ax)){ linux_pad_apply(js2_btn, js2_ax, 1); n++; }
+    IN.pad_count = n;
+}
+int main(int argc, char **argv){
+    (void)argc; (void)argv;
+    web_server_start();   // serve the game page + relay browser guests
+    g_dpy = XOpenDisplay(0);
+    if (!g_dpy){ fprintf(stderr, "TheSurvivalGame: cannot open X display\n"); return 1; }
+    // (keyboard auto-repeat arrives as release+press pairs with identical
+    // timestamps; the event loop swallows those pairs, so a held key reads
+    // as held and produces exactly one edge — no XKB mode needed.)
+    int screen = DefaultScreen(g_dpy);
+    Window win = XCreateSimpleWindow(g_dpy, RootWindow(g_dpy, screen), 0, 0, WIN_W, WIN_H, 0, 0, 0);
+    XStoreName(g_dpy, win, "THE SURVIVAL GAME");
+    { XSizeHints h; memset(&h, 0, sizeof(h));
+      h.flags = PMinSize|PMaxSize; h.min_width=WIN_W; h.max_width=WIN_W; h.min_height=WIN_H; h.max_height=WIN_H;
+      XSetWMNormalHints(g_dpy, win, &h); }
+    Atom wm_delete = XInternAtom(g_dpy, "WM_DELETE_WINDOW", 0);
+    XSetWMProtocols(g_dpy, win, &wm_delete, 1);
+    XSelectInput(g_dpy, win, KeyPressMask|KeyReleaseMask|ExposureMask|StructureNotifyMask);
+    XMapWindow(g_dpy, win);
+    GC gc = XCreateGC(g_dpy, win, 0, 0);
+    Visual *vis = DefaultVisual(g_dpy, screen);
+    XImage *img = XCreateImage(g_dpy, vis, (unsigned)DefaultDepth(g_dpy, screen), ZPixmap, 0,
+                               (char*)g_scaled, WIN_W, WIN_H, 32, WIN_W*4);
+    pthread_t th; pthread_create(&th, 0, alsa_thread, 0); pthread_detach(th);
+    int running=1;
+    while (running){
+        while (XPending(g_dpy)){
+            XEvent ev; XNextEvent(g_dpy, &ev);
+            if (ev.type==KeyRelease && XPending(g_dpy)){
+                // auto-repeat pair (release+press, same keycode, same
+                // timestamp): swallow both — the key never really came up
+                XEvent nx; XPeekEvent(g_dpy, &nx);
+                if (nx.type==KeyPress && nx.xkey.keycode==ev.xkey.keycode && nx.xkey.time==ev.xkey.time){
+                    XNextEvent(g_dpy, &nx);
+                    continue;
+                }
+            }
+            if (ev.type==ClientMessage && (Atom)ev.xclient.data.l[0]==wm_delete) running=0;
+            else if (ev.type==KeyPress || ev.type==KeyRelease){
+                int down = (ev.type==KeyPress);
+                char chbuf[8]; KeySym ks=0;
+                int chn = XLookupString(&ev.xkey, chbuf, sizeof(chbuf), &ks, 0);
+                { int pk = ks_pk(ks);
+                  if (down && pk>=0 && !((g_raw>>pk)&1)) IN.edges_in |= (1ULL<<pk); }
+                key_bit(ks, down);
+                if (down && chn>0){
+                    unsigned char c = (unsigned char)chbuf[0];
+                    if (c>=32 && c<127 && IN.typed_n<16) IN.typed[IN.typed_n++]=(char)c;
+                }
+            }
+        }
+        if (!running) break;
+        IN.raw = g_raw;
+        linux_pad_poll();
+        frame();
+        blit_scale();
+        XPutImage(g_dpy, win, gc, img, 0, 0, 0, 0, WIN_W, WIN_H);
+        XFlush(g_dpy);
+        usleep(1000);
+    }
+    plat_net_stop();
+    XCloseDisplay(g_dpy);
+    return 0;
+}
+#endif // PLAT_LINUX
+
+// ===========================================================================
+// PLATFORM: macOS — interface for the pure-C Cocoa host in mac_main.c.
+// That file drives NSApplication through the Objective-C runtime (this
+// build environment has no AppKit headers), renders the framebuffer via
+// CGBitmapContext, and pulls audio from synth_render via AudioQueue.
+// ===========================================================================
+#ifdef PLAT_MAC
+void plat_save_slot(int slot, const char *d, int len){
+    char nm[64]; save_slot_name(nm, slot);
+    char path[1024]; const char *home = getenv("HOME"); if (!home) return;
+    snprintf(path, sizeof(path), "%s/Library/Application Support/%s", home, nm);
+    FILE *f = fopen(path, "wb");
+    if (!f) return;
+    fwrite(d, 1, (size_t)len, f); fclose(f);
+}
+int plat_load_slot(int slot, char *buf, int cap){
+    char nm[64]; save_slot_name(nm, slot);
+    char path[1024]; const char *home = getenv("HOME"); if (!home) return -1;
+    snprintf(path, sizeof(path), "%s/Library/Application Support/%s", home, nm);
+    FILE *f = fopen(path, "rb");
+    if (!f) return -1;
+    int n = (int)fread(buf, 1, (size_t)cap, f); fclose(f);
+    return n;
+}
+void plat_save(const char *d, int len){ plat_save_slot(0, d, len); }
+int plat_load(char *buf, int cap){ return plat_load_slot(0, buf, cap); }
+void plat_open_url(const char *url){   // Whales Only: only buy.stripe.com links ever reach here
+    if (!url || strncmp(url, "https://buy.stripe.com/", 23)!=0) return;
+    if (fork()==0){ execl("/usr/bin/open", "open", url, (char*)0); _exit(1); }
+}
+int plat_whale_poll(char *buf, int cap){   // whale-code.txt: cwd, else beside the saves
+    char path[1024]; const char *home = getenv("HOME");
+    FILE *f = fopen("whale-code.txt", "rb");
+    if (!f && home){ snprintf(path, sizeof(path), "%s/Library/Application Support/whale-code.txt", home);
+                     f = fopen(path, "rb"); }
+    if (!f) return 0;
+    int n = (int)fread(buf, 1, (size_t)(cap-1), f); fclose(f);
+    remove("whale-code.txt");
+    if (home){ snprintf(path, sizeof(path), "%s/Library/Application Support/whale-code.txt", home); remove(path); }
+    if (n<=0) return 0;
+    buf[n]=0; return n;
+}
+u32 *tsg_fb(void){ return fb; }
+void tsg_frame(void){ frame(); }
+double tsg_now(void){ return plat_now(); }
+void tsg_web_start(void){ web_server_start(); }
+void tsg_synth_render(float *out, int n, double now){ synth_render(out, n, now); }
+void tsg_set_raw(int lo, int hi){ IN.raw = (u64)(u32)lo | ((u64)(u32)hi<<32); }
+void tsg_press(int pk){ if (pk>=0 && pk<64) IN.edges_in |= (1ULL<<pk); }
+void tsg_act(int a, int down){
+    if (a<0 || a>=ACT_COUNT) return;
+    if (down){ if (!((IN.act_held>>a)&1)) IN.act_edges |= (1u<<a); IN.act_held |= (1u<<a); }
+    else IN.act_held &= ~(1u<<a);
+}
+void tsg_act2(int a, int down){
+    if (a<0 || a>=ACT_COUNT) return;
+    if (down){ if (!((IN.act2_held>>a)&1)) IN.act2_edges |= (1u<<a); IN.act2_held |= (1u<<a); }
+    else IN.act2_held &= ~(1u<<a);
+}
+void tsg_pads(int n){ IN.pad_count = n; }
+void tsg_char(int c){ if (IN.typed_n<16) IN.typed[IN.typed_n++]=(char)c; }
+#endif // PLAT_MAC
+
+// ===========================================================================
+// PLATFORM (all native builds): the embedded web server + game networking.
+//
+// This is what makes co-op zero-setup: the native app serves the web
+// build of the game over HTTP on port 8379 and relays browser guests
+// straight into the host's simulation over WebSocket. The host player
+// just runs the app; friends open http://<this machine>:8379 in any
+// browser and they are in — no installs, no mode to pick, no separate
+// server to run. plat_net_* below is backed by two thread-safe queues
+// between the game thread and the server thread.
+// ===========================================================================
+#if defined(PLAT_WIN32) || defined(PLAT_LINUX) || defined(PLAT_MAC)
+
+// the web build, generated into webbuild.h by build.py (may be absent
+// when compiling survival.c standalone — then a placeholder is served)
+#if defined(__has_include)
+#  if __has_include("webbuild.h")
+#    include "webbuild.h"
+#    define TSG_HAVE_WEB 1
+#  endif
+#endif
+#ifndef TSG_HAVE_WEB
+static const unsigned char TSG_WEB_HTML[] =
+    "<html><body><h1>THE SURVIVAL GAME</h1>"
+    "<p>The web build is not embedded in this binary.</p></body></html>";
+static const unsigned TSG_WEB_HTML_LEN = sizeof(TSG_WEB_HTML)-1;
+#endif
+
+#define WEB_PORT 8379
+
+// --- socket / thread / mutex shims ---
+#ifdef PLAT_WIN32
+typedef SOCKET sock_t;
+#define SOCK_BAD INVALID_SOCKET
+#define sock_close(s) closesocket(s)
+#define SEND_FLAGS 0
+static CRITICAL_SECTION g_qmtx; static int g_qmtx_ok=0;
+static void qlock(void){ if (!g_qmtx_ok){ InitializeCriticalSection(&g_qmtx); g_qmtx_ok=1; } EnterCriticalSection(&g_qmtx); }
+static void qunlock(void){ LeaveCriticalSection(&g_qmtx); }
+#else
+typedef int sock_t;
+#define SOCK_BAD (-1)
+#define sock_close(s) close(s)
+#define SEND_FLAGS MSG_NOSIGNAL
+static pthread_mutex_t g_qmtx = PTHREAD_MUTEX_INITIALIZER;
+static void qlock(void){ pthread_mutex_lock(&g_qmtx); }
+static void qunlock(void){ pthread_mutex_unlock(&g_qmtx); }
+#endif
+static void server_loop(void);
+#ifdef PLAT_WIN32
+static DWORD WINAPI server_thread_main(LPVOID p){ (void)p; server_loop(); return 0; }
+static void start_server_thread(void){ HANDLE h=CreateThread(0,0,server_thread_main,0,0,0); if (h) CloseHandle(h); }
+#else
+static void *server_thread_main(void *p){ (void)p; server_loop(); return 0; }
+static void start_server_thread(void){ pthread_t t; if (pthread_create(&t,0,server_thread_main,0)==0) pthread_detach(t); }
+#endif
+
+// --- SHA-1 + base64 (for the WebSocket handshake) ---
+typedef struct { unsigned h[5]; unsigned long long len; unsigned char buf[64]; int n; } Sha1;
+static unsigned rol32(unsigned v, int b){ return (v<<b) | (v>>(32-b)); }
+static void sha1_block(Sha1 *s, const unsigned char *p){
+    unsigned w[80];
+    for (int i=0;i<16;i++) w[i]=((unsigned)p[i*4]<<24)|((unsigned)p[i*4+1]<<16)|((unsigned)p[i*4+2]<<8)|(unsigned)p[i*4+3];
+    for (int i=16;i<80;i++) w[i]=rol32(w[i-3]^w[i-8]^w[i-14]^w[i-16],1);
+    unsigned a=s->h[0], b=s->h[1], c=s->h[2], d=s->h[3], e=s->h[4];
+    for (int i=0;i<80;i++){
+        unsigned f,k;
+        if (i<20){ f=(b&c)|((~b)&d); k=0x5A827999u; }
+        else if (i<40){ f=b^c^d; k=0x6ED9EBA1u; }
+        else if (i<60){ f=(b&c)|(b&d)|(c&d); k=0x8F1BBCDCu; }
+        else { f=b^c^d; k=0xCA62C1D6u; }
+        unsigned t=rol32(a,5)+f+e+k+w[i]; e=d; d=c; c=rol32(b,30); b=a; a=t;
+    }
+    s->h[0]+=a; s->h[1]+=b; s->h[2]+=c; s->h[3]+=d; s->h[4]+=e;
+}
+static void sha1_init(Sha1 *s){
+    s->h[0]=0x67452301u; s->h[1]=0xEFCDAB89u; s->h[2]=0x98BADCFEu; s->h[3]=0x10325476u; s->h[4]=0xC3D2E1F0u;
+    s->len=0; s->n=0;
+}
+static void sha1_update(Sha1 *s, const unsigned char *p, int n){
+    s->len += (unsigned)n;
+    while (n>0){
+        int take = 64 - s->n; if (take>n) take=n;
+        memcpy(s->buf + s->n, p, (size_t)take); s->n += take; p += take; n -= take;
+        if (s->n==64){ sha1_block(s, s->buf); s->n=0; }
+    }
+}
+static void sha1_final(Sha1 *s, unsigned char out[20]){
+    unsigned long long bits = s->len * 8;
+    s->buf[s->n++] = 0x80;
+    if (s->n > 56){ while (s->n<64) s->buf[s->n++]=0; sha1_block(s, s->buf); s->n=0; }
+    while (s->n<56) s->buf[s->n++]=0;
+    for (int i=0;i<8;i++) s->buf[56+i] = (unsigned char)(bits >> (56-8*i));
+    sha1_block(s, s->buf);
+    for (int i=0;i<5;i++){
+        out[i*4]=(unsigned char)(s->h[i]>>24); out[i*4+1]=(unsigned char)(s->h[i]>>16);
+        out[i*4+2]=(unsigned char)(s->h[i]>>8); out[i*4+3]=(unsigned char)s->h[i];
+    }
+}
+static void b64_encode(const unsigned char *in, int n, char *out){
+    static const char T[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    int o=0;
+    for (int i=0;i<n;i+=3){
+        int rem = n-i; unsigned v = (unsigned)in[i]<<16;
+        if (rem>1) v |= (unsigned)in[i+1]<<8;
+        if (rem>2) v |= in[i+2];
+        out[o++] = T[(v>>18)&63]; out[o++] = T[(v>>12)&63];
+        out[o++] = rem>1? T[(v>>6)&63] : '=';
+        out[o++] = rem>2? T[v&63] : '=';
+    }
+    out[o]=0;
+}
+
+// --- packet queues between the game thread and the server thread ---
+#define WQ_DEPTH 96
+#define WQ_PKT 8192
+typedef struct { int src; int len; int raw; unsigned char data[WQ_PKT]; } WPkt;
+static WPkt g_inq[WQ_DEPTH];  static int g_inq_h=0, g_inq_t=0;
+static WPkt g_outq[WQ_DEPTH]; static int g_outq_h=0, g_outq_t=0;
+static int q_push(WPkt *q, int *h, int *t, int src, const unsigned char *d, int len, int raw){
+    qlock();
+    int nt = (*t+1) % WQ_DEPTH;
+    if (nt == *h){ qunlock(); return 0; }              // full: drop
+    WPkt *p = &q[*t];
+    if (len > WQ_PKT) len = WQ_PKT;
+    p->src = src; p->len = len; p->raw = raw;
+    if (len > 0) memcpy(p->data, d, (size_t)len);
+    *t = nt;
+    qunlock();
+    return 1;
+}
+static int q_pop(WPkt *q, int *h, int *t, WPkt *out){
+    qlock();
+    if (*h == *t){ qunlock(); return 0; }
+    *out = q[*h];
+    *h = (*h+1) % WQ_DEPTH;
+    qunlock();
+    return 1;
+}
+
+// --- connections ---
+#define MAXCONN 8
+typedef struct {
+    sock_t fd; int used; int upgraded; int token;
+    unsigned char rbuf[8192]; int rlen;
+    unsigned char msg[WQ_PKT]; int mlen;
+} Conn;
+static Conn g_conns[MAXCONN];
+static sock_t g_listen = SOCK_BAD;
+static char g_join_addr[64] = "";
+static unsigned char g_page[sizeof(TSG_WEB_HTML) + 4096];   // sized from the embedded page itself (+ room for the hosted-flag injection) — a fixed 300000 cap silently overflowed when the web build grew past it
+static int g_page_len = 0;
+
+static int send_all(sock_t fd, const unsigned char *d, int len){
+    int sent = 0;
+    while (sent < len){
+        int n = (int)send(fd, (const char*)d + sent, len - sent, SEND_FLAGS);
+        if (n <= 0) return 0;
+        sent += n;
+    }
+    return 1;
+}
+static int ws_frame_build(unsigned char *out, const unsigned char *d, int len){
+    int h = 0;
+    out[h++] = 0x82;                                   // FIN + binary
+    if (len < 126){ out[h++] = (unsigned char)len; }
+    else if (len < 65536){ out[h++] = 126; out[h++] = (unsigned char)(len>>8); out[h++] = (unsigned char)len; }
+    else { out[h++] = 127; for (int i=7;i>=0;i--) out[h++] = (unsigned char)((unsigned long long)len >> (i*8)); }
+    if (len > 0) memcpy(out + h, d, (size_t)len);
+    return h + len;
+}
+static void conn_close(int i){
+    Conn *c = &g_conns[i];
+    if (!c->used) return;
+    if (c->upgraded){
+        unsigned char l = 'L';
+        q_push(g_inq, &g_inq_h, &g_inq_t, c->token, &l, 1, 0);   // tell the game
+    }
+    sock_close(c->fd);
+    c->used = 0; c->upgraded = 0; c->rlen = 0; c->mlen = 0;
+}
+static void conn_http(int i, char *req){
+    Conn *c = &g_conns[i];
+    if (strstr(req, "pgrade: websocket") || strstr(req, "pgrade:WebSocket")){
+        // WebSocket upgrade: answer the handshake, become a game peer
+        const char *kp = strstr(req, "Sec-WebSocket-Key:");
+        char key[128]; key[0]=0;
+        if (kp){
+            kp += strlen("Sec-WebSocket-Key:");
+            while (*kp==' ') kp++;
+            int n=0; while (kp[n] && kp[n]!='\r' && kp[n]!='\n' && n<120){ key[n]=kp[n]; n++; }
+            key[n]=0;
+        }
+        char combo[256];
+        snprintf(combo, sizeof(combo), "%s258EAFA5-E914-47DA-95CA-C5AB0DC85B11", key);
+        Sha1 s; sha1_init(&s); sha1_update(&s, (const unsigned char*)combo, (int)strlen(combo));
+        unsigned char digest[20]; sha1_final(&s, digest);
+        char accept[64]; b64_encode(digest, 20, accept);
+        char resp[512];
+        int rn = snprintf(resp, sizeof(resp),
+            "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\n"
+            "Connection: Upgrade\r\nSec-WebSocket-Accept: %s\r\n\r\n", accept);
+        if (send_all(c->fd, (const unsigned char*)resp, rn)){
+            c->upgraded = 1; c->token = i+1; c->rlen = 0; c->mlen = 0;
+#ifdef PLAT_WIN32
+            { unsigned long nd = 1; setsockopt(c->fd, IPPROTO_TCP, TCP_NODELAY, (const char*)&nd, sizeof(nd)); }
+#else
+            { int nd = 1; setsockopt(c->fd, IPPROTO_TCP, TCP_NODELAY, &nd, sizeof(nd)); }
+#endif
+            return;
+        }
+        conn_close(i);
+        return;
+    }
+    // plain HTTP: serve the game page (with the hosted flag injected)
+    if (g_page_len > 0){
+        char hdr[256];
+        int hn = snprintf(hdr, sizeof(hdr),
+            "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\n"
+            "Content-Length: %d\r\nConnection: close\r\n\r\n", g_page_len);
+        send_all(c->fd, (const unsigned char*)hdr, hn);
+        send_all(c->fd, g_page, g_page_len);
+    } else {
+        const char *nf = "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n";
+        send_all(c->fd, (const unsigned char*)nf, (int)strlen(nf));
+    }
+    sock_close(c->fd);
+    c->used = 0; c->rlen = 0;
+}
+static void conn_read(int i){
+    Conn *c = &g_conns[i];
+    int space = (int)sizeof(c->rbuf) - c->rlen;
+    if (space <= 0){ conn_close(i); return; }
+    int n = (int)recv(c->fd, (char*)c->rbuf + c->rlen, space, 0);
+    if (n <= 0){ conn_close(i); return; }
+    c->rlen += n;
+    if (!c->upgraded){
+        // waiting for a full HTTP request header
+        if (c->rlen >= 4){
+            char tmp[4200];
+            int m = c->rlen < 4100? c->rlen : 4100;
+            memcpy(tmp, c->rbuf, (size_t)m); tmp[m]=0;
+            if (strstr(tmp, "\r\n\r\n")) conn_http(i, tmp);
+            else if (c->rlen > 4096) conn_close(i);
+        }
+        return;
+    }
+    // WebSocket frames
+    for (;;){
+        if (c->rlen < 2) return;
+        unsigned b0 = c->rbuf[0], b1 = c->rbuf[1];
+        int fin = (b0 & 0x80)!=0, opcode = b0 & 0x0F;
+        int masked = (b1 & 0x80)!=0;
+        unsigned long long len = b1 & 0x7F;
+        int hdr = 2;
+        if (len == 126){
+            if (c->rlen < 4) return;
+            len = ((unsigned)c->rbuf[2]<<8) | c->rbuf[3]; hdr = 4;
+        } else if (len == 127){
+            if (c->rlen < 10) return;
+            len = 0; for (int k=0;k<8;k++) len = (len<<8) | c->rbuf[2+k];
+            hdr = 10;
+        }
+        if (len > WQ_PKT){ conn_close(i); return; }
+        if (masked) hdr += 4;
+        if (c->rlen < hdr + (int)len) return;          // incomplete: wait
+        unsigned char *pl = c->rbuf + hdr;
+        if (masked){
+            const unsigned char *mk = c->rbuf + hdr - 4;
+            for (unsigned long long k=0;k<len;k++) pl[k] ^= mk[k&3];
+        }
+        if (opcode == 8){ conn_close(i); return; }     // close
+        else if (opcode == 9){                          // ping -> pong
+            unsigned char fr[16];
+            int h = 0; fr[h++] = 0x8A;
+            if (len < 126){ fr[h++] = (unsigned char)len; if (len > 0) memcpy(fr+h, pl, (size_t)len); h += (int)len; }
+            q_push(g_outq, &g_outq_h, &g_outq_t, c->token, fr, h, 1);
+        } else if (opcode == 0 || opcode == 1 || opcode == 2){
+            if (c->mlen + (int)len <= WQ_PKT){
+                if (len > 0) memcpy(c->msg + c->mlen, pl, (size_t)len);
+                c->mlen += (int)len;
+            }
+            if (fin){
+                if (c->mlen > 0) q_push(g_inq, &g_inq_h, &g_inq_t, c->token, c->msg, c->mlen, 0);
+                c->mlen = 0;
+            }
+        }
+        int consumed = hdr + (int)len;
+        memmove(c->rbuf, c->rbuf + consumed, (size_t)(c->rlen - consumed));
+        c->rlen -= consumed;
+    }
+}
+static void drain_outq(void){
+    WPkt p;
+    static unsigned char frame[WQ_PKT + 16];
+    while (q_pop(g_outq, &g_outq_h, &g_outq_t, &p)){
+        if (p.raw){                                    // pre-framed (pong)
+            if (p.src >= 1 && p.src <= MAXCONN){
+                Conn *c = &g_conns[p.src-1];
+                if (c->used && c->upgraded) send_all(c->fd, p.data, p.len);
+            }
+            continue;
+        }
+        int fl = ws_frame_build(frame, p.data, p.len);
+        if (p.src < 0){                                // broadcast
+            for (int i=0;i<MAXCONN;i++)
+                if (g_conns[i].used && g_conns[i].upgraded)
+                    send_all(g_conns[i].fd, frame, fl);
+        } else if (p.src >= 1 && p.src <= MAXCONN){
+            Conn *c = &g_conns[p.src-1];
+            if (c->used && c->upgraded) send_all(c->fd, frame, fl);
+        }
+    }
+}
+static void server_loop(void){
+    while (g_listen != SOCK_BAD){
+        fd_set rf; FD_ZERO(&rf); FD_SET(g_listen, &rf);
+        sock_t mx = g_listen;
+        for (int i=0;i<MAXCONN;i++) if (g_conns[i].used){
+            FD_SET(g_conns[i].fd, &rf);
+            if (g_conns[i].fd > mx) mx = g_conns[i].fd;
+        }
+        struct timeval tv; tv.tv_sec = 0; tv.tv_usec = 5000;
+        int r = select((int)(mx+1), &rf, 0, 0, &tv);
+        if (r > 0){
+            if (FD_ISSET(g_listen, &rf)){
+                sock_t fd = accept(g_listen, 0, 0);
+                if (fd != SOCK_BAD){
+                    int slot = -1;
+                    for (int i=0;i<MAXCONN;i++) if (!g_conns[i].used){ slot = i; break; }
+                    if (slot < 0){ sock_close(fd); }
+                    else {
+                        Conn *c = &g_conns[slot];
+                        memset(c, 0, sizeof(*c));
+                        c->fd = fd; c->used = 1;
+                        struct timeval to; to.tv_sec = 3; to.tv_usec = 0;
+                        setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, (const char*)&to, sizeof(to));
+                    }
+                }
+            }
+            for (int i=0;i<MAXCONN;i++)
+                if (g_conns[i].used && FD_ISSET(g_conns[i].fd, &rf)) conn_read(i);
+        }
+        drain_outq();
+    }
+}
+void web_server_start(void){
+    static int started = 0;
+    if (started) return;
+    started = 1;
+#ifdef PLAT_WIN32
+    { WSADATA wsa; WSAStartup(MAKEWORD(2,2), &wsa); }
+#endif
+    // build the page to serve: the web build + the hosted flag, so a
+    // browser that loads it joins this machine's game automatically
+    {
+        const char *inject = "<script>window.TSG_HOSTED=1;</script>";
+        const char *body = 0;
+        for (unsigned i=0; i + 7 < TSG_WEB_HTML_LEN; i++)
+            if (memcmp(TSG_WEB_HTML + i, "</body>", 7) == 0){ body = (const char*)TSG_WEB_HTML + i; break; }
+        if (body && TSG_WEB_HTML_LEN + strlen(inject) <= sizeof(g_page)){
+            unsigned pre = (unsigned)(body - (const char*)TSG_WEB_HTML);
+            memcpy(g_page, TSG_WEB_HTML, pre);
+            memcpy(g_page + pre, inject, strlen(inject));
+            memcpy(g_page + pre + strlen(inject), body, TSG_WEB_HTML_LEN - pre);
+            g_page_len = (int)(TSG_WEB_HTML_LEN + strlen(inject));
+        } else {
+            memcpy(g_page, TSG_WEB_HTML, TSG_WEB_HTML_LEN);
+            g_page_len = (int)TSG_WEB_HTML_LEN;
+        }
+    }
+    // find this machine's LAN address (UDP connect trick: no traffic)
+    {
+        sock_t s = socket(AF_INET, SOCK_DGRAM, 0);
+        int got = 0;
+        if (s != SOCK_BAD){
+            struct sockaddr_in dst; memset(&dst, 0, sizeof(dst));
+            dst.sin_family = AF_INET; dst.sin_port = htons(53);
+            dst.sin_addr.s_addr = inet_addr("8.8.8.8");
+            if (connect(s, (struct sockaddr*)&dst, sizeof(dst)) == 0){
+                struct sockaddr_in me; socklen_t ml = (socklen_t)sizeof(me);
+                if (getsockname(s, (struct sockaddr*)&me, &ml) == 0 && me.sin_addr.s_addr){
+                    snprintf(g_join_addr, sizeof(g_join_addr), "%s:%d", inet_ntoa(me.sin_addr), WEB_PORT);
+                    got = 1;
+                }
+            }
+            sock_close(s);
+        }
+        if (!got) snprintf(g_join_addr, sizeof(g_join_addr), "127.0.0.1:%d", WEB_PORT);
+    }
+    g_listen = socket(AF_INET, SOCK_STREAM, 0);
+    if (g_listen == SOCK_BAD){ g_join_addr[0]=0; return; }
+    { int one = 1; setsockopt(g_listen, SOL_SOCKET, SO_REUSEADDR, (const char*)&one, sizeof(one)); }
+    struct sockaddr_in a; memset(&a, 0, sizeof(a));
+    a.sin_family = AF_INET; a.sin_addr.s_addr = INADDR_ANY; a.sin_port = htons(WEB_PORT);
+    if (bind(g_listen, (struct sockaddr*)&a, sizeof(a)) != 0 || listen(g_listen, 8) != 0){
+        sock_close(g_listen); g_listen = SOCK_BAD; g_join_addr[0]=0; return;
+    }
+    start_server_thread();
+}
+const char *plat_join_addr(void){ return g_join_addr; }
+
+// --- plat_net_* on top of the queues ---
+static int g_net_mode = 0;
+int plat_net_start(int mode, const char *addr){
+    (void)addr;
+    if (mode == 1){ g_net_mode = 1; return 0; }        // hosting (server already runs)
+    if (mode == 0){ g_net_mode = 0; return 0; }
+    return -1;                                         // native builds don't join as clients
+}
+void plat_net_stop(void){ g_net_mode = 0; }
+int plat_net_send(const u8 *d, int len, int dest){
+    if (g_net_mode != 1) return -1;
+    return q_push(g_outq, &g_outq_h, &g_outq_t, dest, (const unsigned char*)d, len, 0)? 0 : -1;
+}
+int plat_net_recv(u8 *buf, int cap, int *src){
+    WPkt p;
+    if (!q_pop(g_inq, &g_inq_h, &g_inq_t, &p)) return 0;
+    int n = p.len < cap? p.len : cap;
+    memcpy(buf, p.data, (size_t)n);
+    *src = p.src;
+    return n;
+}
+#endif // native embedded web server
