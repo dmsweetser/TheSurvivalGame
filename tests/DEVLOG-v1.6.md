@@ -13,6 +13,8 @@ Also in 1.6:
 - Quitting any cabinet now drops you back in front of that cabinet, whichever row it stands in. No more materialising across the room.
 - Everything from 1.5 rides along: CASTLE, the speed floor, the Walk of Fame at minimum speed only, and the spider's very serious frown.
 
+- And the view itself went full SNES: the race is now rendered Mode 7-style — the world stays flat, but the camera sits behind your kart and the ground plane stretches out ahead of you: striped grass, red-and-white rumble strips, boost pads lying on the road, a tree line that slides as you steer, and a little circuit map in the corner so you can see the lap coming. Same physics, same rivals, whole new seat.
+
 - One more thing, fresh off the line: HEAD-TO-HEAD, with a WAITING ROOM. Picking the cart now drops you into the waiting room: choose your kart's colour, and in local co-op your partner only joins when they pick the cart on their own side too — nobody gets dragged anywhere. When both of you are in and both hit FIRE, it's one race, two humans, four very confused rivals. The first human home starts an eight-second clock for the other one. Your records stay your own; the bragging is shared. Solo drivers: FIRE starts your race right away.
 
 Tested before it ships: carttest 22/22 (waiting room, solo start, countdown, real driving, a full finish, records saved), cartcoop 24/24 (both players choosing the cart on their own side, the link, both ready, both karts driving, both records saved), arcadetest 24/24, castletest 25/25, mallfix 28/28, and the Linux build smoke-tested clean.

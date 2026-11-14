@@ -15207,6 +15207,7 @@ static void crt_start_race(int pi){
       for (int i = start; i < 6; i++){ while (used[nxt]) nxt++; S->crt_kcol[i] = nxt; used[nxt] = 1; } }
     b->x = CRT_OX + S->crt_x[0]; b->y = CRT_OY + S->crt_y[0];
     b->bw_x = b->x; b->bw_y = b->y; b->aim = S->crt_h[0];
+    { char *q = S->note; q = sappend(q, S->crt_duo >= 0? "HEAD-TO-HEAD! 3 LAPS. UP IS THE GAS - BEAT YOUR FELLOW HUMAN!" : "3 LAPS. UP IS THE GAS - RIDE THE BOOST PADS, WIN!"); *q = 0; S->note_t = 2.4f; }
     if (S->crt_duo >= 0){ Buddy *gb = &G.bud[S->crt_duo];
         gb->x = CRT_OX + S->crt_x[1]; gb->y = CRT_OY + S->crt_y[1];
         gb->bw_x = gb->x; gb->bw_y = gb->y; gb->aim = S->crt_h[1]; }
@@ -15482,54 +15483,174 @@ static void crt_render_view(int sim_pi, int viewer_pi){
         }
         return;
     }
-    rect_fill(vx, vy, vw2, vh2, COL(24, 90, 32));
-    for (int ty = 0; ty < 12; ty++) for (int tx = 0; tx < 20; tx++)
-        if ((tx + ty) & 1) rect_fill(KTX(tx*32), KTY(ty*32), KTS(32) + 1, KTS(32) + 1, COL(30, 104, 38));
-    rect_fill(KTX(142), KTY(102), KTS(356), KTS(156), COL(38, 122, 44));
-    draw_text_center(KTX(320), KTY(168), "SUPER BUDDY CART", 2, COL(46, 140, 52));
-    draw_text_center(KTX(320), KTY(192), "GRAND PRIX", 1, COL(46, 140, 52));
-    for (int pass = 0; pass < 2; pass++)
-        for (int i = 0; i < CRT_N; i++)
-            disc_fill(KTX(CRT_WX[i]), KTY(CRT_WY[i]), KTS(pass? 29 : 32), pass? COL(56, 56, 64) : COL(226, 226, 226));
-    for (int i = 0; i < CRT_N; i += 4)
-        disc_fill(KTX(CRT_WX[i]), KTY(CRT_WY[i]), KTS(2), COL(250, 220, 90));
-    for (int r2 = 0; r2 < 6; r2++) for (int c2 = 0; c2 < 2; c2++)
-        rect_fill(KTX(314 + c2*6), KTY(263 + r2*9), KTS(6) + 1, KTS(9) + 1,
-                  ((r2 + c2) & 1)? COL(16, 14, 24) : COL(245, 245, 245));
-    for (int pd = 0; pd < 3; pd++){
-        int px = KTX(CRT_PAD[pd][0]), py = KTY(CRT_PAD[pd][1]);
-        int horiz = (pd == 0);
-        int pw = horiz? KTS(38) : KTS(18), ph = horiz? KTS(18) : KTS(38);
-        rect_fill(px - pw/2, py - ph/2, pw, ph, COL(240, 130, 40));
-        rect_line(px - pw/2, py - ph/2, pw, ph, COL(255, 220, 120));
-        draw_text_center(px, py - 3, horiz? ">>" : "^^", 1, COL(255, 255, 255));
-    }
+    // ---- the race, SNES-style: the world stays flat, the camera sits
+    // behind your kart, and the ground plane is projected forward —
+    // grass bands, rumble strips and all — from your seat.
     static const u32 KCOL[6] = { COL(230, 60, 50), COL(70, 130, 240), COL(250, 200, 50),
                                  COL(90, 200, 90), COL(200, 90, 220), COL(240, 140, 40) };
-    { int order[6] = { 0, 1, 2, 3, 4, 5 };
-      for (int a = 0; a < 6; a++) for (int c2 = a + 1; c2 < 6; c2++)
-          if (S->crt_y[order[c2]] < S->crt_y[order[a]]){ int t = order[a]; order[a] = order[c2]; order[c2] = t; }
-      for (int oi = 0; oi < 6; oi++){ int i = order[oi];
-        float kx = S->crt_x[i], ky = S->crt_y[i], h = S->crt_h[i];
-        float ch = fcos(h), sh = fsin(h);
-        float nx = kx + ch*16, ny = ky + sh*16;
-        float lx = kx + ch*(-12) - sh*(-10), ly = ky + sh*(-12) + ch*(-10);
-        float rx = kx + ch*(-12) - sh*(10),  ry = ky + sh*(-12) + ch*(10);
-        ellipse_fill(KTX(kx) + KTS(2), KTY(ky) + KTS(3), KTS(13), KTS(7), COL(30, 30, 36));
-        if (S->crt_boost[i] > 0)
-            tri_fill(KTX(lx), KTY(ly), KTX(rx), KTY(ry), KTX(kx - ch*26), KTY(ky - sh*26), COL(255, 160, 60));
-        for (int w2 = 0; w2 < 4; w2++){
-            float wx2 = (w2 < 2)? 9 : -9, wy2 = (w2 % 2 == 0)? 10 : -10;
-            disc_fill(KTX(kx + ch*wx2 - sh*wy2), KTY(ky + sh*wx2 + ch*wy2), KTS(4), COL(16, 14, 24));
+    { float kx = S->crt_x[vk], ky = S->crt_y[vk], kh = S->crt_h[vk];
+      float chx = fcos(kh), chy = fsin(kh);
+      float camx = kx - chx * 40.0f, camy = ky - chy * 40.0f;
+      float F = (float)vw2 * 0.82f;
+      int horizon = vy + (int)(vh2 * 0.40f);
+      // project a world point: returns 0 when it is behind the camera
+      // (the lambda-free C89 way: a tiny macro pair over locals)
+#define CRT_PROJ(wx, wy, outf, outsx, outsy) do { \
+        float dx_ = (wx) - camx, dy_ = (wy) - camy; \
+        float f_ = dx_ * chx + dy_ * chy; \
+        float l_ = dx_ * (-chy) + dy_ * chx; \
+        (outf) = f_; \
+        (outsx) = vx + vw2/2 + (int)(l_ * F / (f_ < 1.0f? 1.0f : f_)); \
+        (outsy) = horizon + (int)(15.0f * F / (f_ < 1.0f? 1.0f : f_)); \
+      } while (0)
+      // sky, a low sun, and a tree line that slides as you steer
+      rect_fill(vx, vy, vw2, horizon - vy + 1, COL(120, 190, 245));
+      rect_fill(vx, vy, vw2, (horizon - vy) / 2, COL(150, 205, 250));
+      disc_fill(vx + vw2 - 90, vy + 44, 20, COL(255, 236, 150));
+      { int slide = (int)(kh * 260.0f);
+        for (int ti = -1; ti < vw2 / 74 + 2; ti++){
+            int txp = vx + ti * 74 - ((slide % 74) + 74) % 74;
+            int th = 16 + ((ti * 37 + (slide / 74) * 13) & 15);
+            tri_fill(txp, horizon, txp + 22, horizon - th - 10, txp + 44, horizon, COL(34, 110, 52));
+            rect_fill(txp + 19, horizon - 6, 6, 6, COL(90, 64, 40));
+        } }
+      rect_fill(vx, horizon, vw2, vy + vh2 - horizon, COL(26, 96, 34));
+      // the road ahead: sample the centreline from your segment forward
+      { int startseg = crt_nearest_full(kx, ky);
+        enum { NS = 46 };
+        int rsx[NS + 1], rsy[NS + 1], lsx[NS + 1], lsy[NS + 1], rrx[NS + 1], rry[NS + 1], lrx[NS + 1], lry[NS + 1];
+        float rf[NS + 1];
+        for (int j = 0; j <= NS; j++){
+            int si = (startseg + j) % CRT_N, sj = (si + 1) % CRT_N;
+            float dxn = CRT_WX[sj] - CRT_WX[si], dyn = CRT_WY[sj] - CRT_WY[si];
+            float dl = fsqrt(dxn*dxn + dyn*dyn); if (dl < 0.001f) dl = 1.0f;
+            float nx = -dyn / dl, ny = dxn / dl;
+            float f1, f2;
+            CRT_PROJ(CRT_WX[si] + nx * 30.0f, CRT_WY[si] + ny * 30.0f, f1, rsx[j], rsy[j]);
+            CRT_PROJ(CRT_WX[si] - nx * 30.0f, CRT_WY[si] - ny * 30.0f, f2, lsx[j], lsy[j]);
+            rf[j] = (f1 + f2) * 0.5f;
+            CRT_PROJ(CRT_WX[si] + nx * 37.0f, CRT_WY[si] + ny * 37.0f, f1, rrx[j], rry[j]);
+            CRT_PROJ(CRT_WX[si] - nx * 37.0f, CRT_WY[si] - ny * 37.0f, f2, lrx[j], lry[j]);
         }
-        tri_fill(KTX(nx), KTY(ny), KTX(lx), KTY(ly), KTX(rx), KTY(ry), KCOL[S->crt_kcol[i]]);
-        { float bx2 = kx + ch*(-3), by2 = ky + sh*(-3);
-          disc_fill(KTX(bx2), KTY(by2), KTS(6), COL(24, 22, 34));
-          disc_fill(KTX(bx2), KTY(by2), KTS(4), i == vk? COL(255, 235, 200) : COL(240, 240, 240)); }
-        disc_fill(KTX(nx - ch*5), KTY(ny - sh*5), KTS(3), COL(255, 255, 255));
-        if (i == vk) draw_text_center(KTX(kx), KTY(ky) - KTS(26), "YOU", 1, COL(255, 255, 255));
-        else if (S->crt_duo >= 0 && i == 1 - vk) draw_text_center(KTX(kx), KTY(ky) - KTS(26), vk == 0? "P2" : "P1", 1, COL(255, 255, 255));
+        for (int j = NS - 1; j >= 0; j--){
+            if (rf[j + 1] < 4.0f) continue;
+            int par = (startseg + j) & 1;
+            if (rsy[j] > horizon) rect_fill(vx, rsy[j], vw2, rsy[j + 1] - rsy[j] + 1, par? COL(30, 104, 38) : COL(24, 90, 32));
+            if (rf[j] < 4.0f) continue;
+            u32 rum = par? COL(226, 226, 226) : COL(205, 50, 45);
+            tri_fill(rrx[j], rry[j], lrx[j], lry[j], lrx[j + 1], lry[j + 1], rum);
+            tri_fill(rrx[j], rry[j], lrx[j + 1], lry[j + 1], rrx[j + 1], rry[j + 1], rum);
+            u32 rd = par? COL(62, 62, 70) : COL(56, 56, 64);
+            tri_fill(rsx[j], rsy[j], lsx[j], lsy[j], lsx[j + 1], lsy[j + 1], rd);
+            tri_fill(rsx[j], rsy[j], lsx[j + 1], lsy[j + 1], rsx[j + 1], rsy[j + 1], rd);
+        }
+        // the checkered start line, when it is in view
+        { float fx, fy, fhx, fhy; crt_point_at(CRT_OFF, 0, &fx, &fy, &fhx, &fhy);
+          float ff; int fsx, fsy; CRT_PROJ(fx, fy, ff, fsx, fsy);
+          float fdx = fx - camx, fdy = fy - camy;
+          float fl = fdx * (-chy) + fdy * chx;
+          if (ff > 8.0f && ff < 620.0f && fl < ff * 1.1f + 50.0f && fl > -(ff * 1.1f + 50.0f)){
+              float nx = -fhy, ny = fhx;
+              for (int c2 = 0; c2 < 8; c2++){
+                  float la = -28.0f + c2 * 7.0f, lb = la + 7.0f;
+                  int ax, ay, bx, by, cx2, cy2, dx2, dy2; float tf;
+                  CRT_PROJ(fx + nx * la, fy + ny * la, tf, ax, ay);
+                  CRT_PROJ(fx + nx * lb, fy + ny * lb, tf, bx, by);
+                  CRT_PROJ(fx + fhx * 8.0f + nx * lb, fy + fhy * 8.0f + ny * lb, tf, cx2, cy2);
+                  CRT_PROJ(fx + fhx * 8.0f + nx * la, fy + fhy * 8.0f + ny * la, tf, dx2, dy2);
+                  u32 cc = (c2 & 1)? COL(16, 14, 24) : COL(245, 245, 245);
+                  tri_fill(ax, ay, bx, by, cx2, cy2, cc);
+                  tri_fill(ax, ay, cx2, cy2, dx2, dy2, cc);
+              }
+          } }
+        // boost pads lying on the road
+        for (int pd = 0; pd < 3; pd++){
+            float pcx = CRT_PAD[pd][0], pcy = CRT_PAD[pd][1];
+            float ff; int psx, psy; CRT_PROJ(pcx, pcy, ff, psx, psy);
+            { float pdx = pcx - camx, pdy = pcy - camy;
+              float pl = pdx * (-chy) + pdy * chx;
+              if (pl > ff * 1.1f + 50.0f || pl < -(ff * 1.1f + 50.0f)) continue; }
+            if (ff < 12.0f || ff > 640.0f) continue;
+            int si = crt_nearest_full(pcx, pcy), sj = (si + 1) % CRT_N;
+            float dxn = CRT_WX[sj] - CRT_WX[si], dyn = CRT_WY[sj] - CRT_WY[si];
+            float dl = fsqrt(dxn*dxn + dyn*dyn); if (dl < 0.001f) dl = 1.0f;
+            float ux = dxn / dl, uy = dyn / dl, nx = -uy, ny = ux;
+            int ax, ay, bx, by, cx2, cy2, dx2, dy2; float tf;
+            CRT_PROJ(pcx + nx * 19.0f - ux * 9.0f, pcy + ny * 19.0f - uy * 9.0f, tf, ax, ay);
+            CRT_PROJ(pcx - nx * 19.0f - ux * 9.0f, pcy - ny * 19.0f - uy * 9.0f, tf, bx, by);
+            CRT_PROJ(pcx - nx * 19.0f + ux * 9.0f, pcy - ny * 19.0f + uy * 9.0f, tf, cx2, cy2);
+            CRT_PROJ(pcx + nx * 19.0f + ux * 9.0f, pcy + ny * 19.0f + uy * 9.0f, tf, dx2, dy2);
+            tri_fill(ax, ay, bx, by, cx2, cy2, COL(240, 130, 40));
+            tri_fill(ax, ay, cx2, cy2, dx2, dy2, COL(240, 130, 40));
+            if (ff < 150.0f) draw_text_center(psx, psy - 4, ">>", 1, COL(255, 255, 255));
+        }
+      }
+    // rival karts as billboards, far to near
+    { float kf[6]; int ksx[6], ksy[6], ord[6];
+      for (int i = 0; i < 6; i++){ ord[i] = i;
+          if (i == vk){ kf[i] = -1.0f; ksx[i] = 0; ksy[i] = 0; continue; }
+          CRT_PROJ(S->crt_x[i], S->crt_y[i], kf[i], ksx[i], ksy[i]); }
+      for (int a = 0; a < 6; a++) for (int c2 = a + 1; c2 < 6; c2++)
+          if (kf[ord[c2]] > kf[ord[a]]){ int t = ord[a]; ord[a] = ord[c2]; ord[c2] = t; }
+      for (int oi = 0; oi < 6; oi++){ int i = ord[oi];
+        if (i == vk || kf[i] < 26.0f || kf[i] > 760.0f) continue;
+        int kw = (int)(17.0f * F / kf[i]); if (kw < 3) kw = 3;
+        if (kw > vw2 * 2 / 5) kw = vw2 * 2 / 5;
+        int kh2 = (int)(kw * 0.66f); if (kh2 < 2) kh2 = 2;
+        int sx = ksx[i], base = ksy[i];
+        if (sx < vx - kw || sx > vx + vw2 + kw) continue;
+        ellipse_fill(sx, base, kw/2 + 1, kh2/4 + 1, COL(20, 40, 22));
+        if (S->crt_boost[i] > 0)
+            tri_fill(sx - kw/4, base, sx + kw/4, base, sx, base + kh2/2 + 2, COL(255, 160, 60));
+        rect_fill(sx - kw/2, base - kh2/2, kw/4 + 1, kh2/2, COL(16, 14, 24));
+        rect_fill(sx + kw/2 - kw/4, base - kh2/2, kw/4 + 1, kh2/2, COL(16, 14, 24));
+        rect_fill(sx - kw/2, base - kh2, kw, kh2 * 3/4, KCOL[S->crt_kcol[i]]);
+        rect_line(sx - kw/2, base - kh2, kw, kh2 * 3/4, COL(16, 14, 24));
+        { int hr = kw/6 + 1;
+          disc_fill(sx, base - kh2 - hr/3, hr, COL(24, 22, 34));
+          disc_fill(sx, base - kh2 - hr/3, hr * 3/4 + 1, COL(255, 235, 200)); }
+        if (S->crt_duo >= 0 && i == 1 - vk){
+            draw_text_center(sx, base - kh2 - kw/3 - 12, vk == 0? "P2" : "P1", 1, COL(255, 255, 255));
+            tri_fill(sx - 5, base - kh2 - kw/3 - 2, sx + 5, base - kh2 - kw/3 - 2, sx, base - kh2 - kw/3 + 5, COL(255, 255, 255));
+        }
       } }
+    // your own kart, big at the bottom of the screen, from behind
+    { int ow = vw2 / 5; if (ow < 110) ow = 110; if (ow > 240) ow = 240;
+      int oh = ow * 5 / 8;
+      int bob = (S->crt_v[vk] > 60.0f)? (int)(fsin(S->crt_t * 26.0f) * 1.6f) : 0;
+      int cxp = vx + vw2/2, base = vy + vh2 - 4 + bob;
+      ellipse_fill(cxp, base, ow/2, oh/6, COL(20, 40, 22));
+      if (S->crt_boost[vk] > 0){
+          u32 fl = ((int)(S->crt_t * 20.0f) & 1)? COL(255, 160, 60) : COL(255, 210, 90);
+          tri_fill(cxp - ow/3, base - 2, cxp - ow/6, base - 2, cxp - ow/4, base + oh/3, fl);
+          tri_fill(cxp + ow/6, base - 2, cxp + ow/3, base - 2, cxp + ow/4, base + oh/3, fl);
+      }
+      rect_fill(cxp - ow/2, base - oh/3, ow/5, oh/3, COL(16, 14, 24));
+      rect_fill(cxp + ow/2 - ow/5, base - oh/3, ow/5, oh/3, COL(16, 14, 24));
+      rect_fill(cxp - ow/2 + ow/10, base - oh, ow * 4/5, oh * 3/4, KCOL[S->crt_kcol[vk]]);
+      rect_line(cxp - ow/2 + ow/10, base - oh, ow * 4/5, oh * 3/4, COL(16, 14, 24));
+      rect_fill(cxp - ow/6, base - oh - oh/8, ow/3, oh/4, COL(24, 22, 34));
+      disc_fill(cxp, base - oh - oh/8, ow/7, COL(70, 48, 32));
+      disc_fill(cxp, base - oh - oh/8 + ow/14, ow/9, COL(255, 235, 200));
+    }
+    // minimap in the corner: the whole flat circuit, SMK-style.
+    // (positioned from the CLIP rect, not the view rect: in split
+    // screen the view origin stays at 0 and the clip does the split,
+    // so a view-relative corner lands in the other player's half)
+    if (clip_x1 - clip_x0 >= 380){
+        int cw2 = clip_x1 - clip_x0;
+        int mw = cw2 >= 470? 100 : 76, mh = cw2 >= 470? 62 : 48, mx0 = clip_x1 - mw - 8, my0 = clip_y0 + 30;
+        rect_fill(mx0, my0, mw, mh, COL(10, 26, 14));
+        rect_line(mx0, my0, mw, mh, COL(120, 160, 120));
+        for (int i = 0; i < CRT_N; i += 2)
+            rect_fill(mx0 + 4 + (int)(CRT_WX[i] * (mw - 8) / 640.0f), my0 + 4 + (int)(CRT_WY[i] * (mh - 8) / 360.0f), 2, 2, COL(120, 130, 120));
+        for (int i = 0; i < 6; i++){
+            u32 dc = (i == vk)? COL(255, 255, 255) : (S->crt_duo >= 0 && i == 1 - vk)? COL(255, 230, 90) : COL(160, 160, 160);
+            rect_fill(mx0 + 3 + (int)(S->crt_x[i] * (mw - 8) / 640.0f), my0 + 3 + (int)(S->crt_y[i] * (mh - 8) / 360.0f), 3, 3, dc);
+        }
+    }
+#undef CRT_PROJ
+    }
     // HUD band
     rect_fill(vx, vy, vw2, 24, COL(10, 12, 16));
     { char buf[96]; char *q = buf;
