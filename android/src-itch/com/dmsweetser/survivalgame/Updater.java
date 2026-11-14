@@ -43,7 +43,12 @@ import java.net.URL;
 // are stock Android and work on Kindle Fire the same way (Silk or any
 // installed browser opens the page).
 public class Updater {
-    private static final String VERSION_URL = "https://tsg-version.dmsweetser.workers.dev/version.json";
+    // The manifest moved from the Cloudflare Worker to GitHub Pages
+    // (Nov 14, 2026): it is a static file on the game's Pages site,
+    // edited by pushing version.json to the repo's gh-pages branch.
+    // The old Worker still answers older installs with its last
+    // manifest; nothing about the check itself changed.
+    private static final String VERSION_URL = "https://dmsweetser.github.io/TheSurvivalGame/version.json";
     private static boolean checked = false;
 
     public static void maybeCheck(final Activity act) {

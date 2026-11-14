@@ -200,17 +200,19 @@ Write it in the game's voice, end with **SQUASH BUGS. WEAR THE
 EVIDENCE.** The 1.4 devlog ("FOLLOW THE YELLOW ARROW") is ready in
 `releases/v1.4-ready/DEVLOG.md`.
 
-### 6.4 Android update server (Cloudflare Worker `tsg-version`)
-- Source: `project/android/update-server/` (`worker.js`, `wrangler.toml`,
-  README with the dashboard route).
-- Live endpoint the APK checks:
-  `https://tsg-version.dmsweetser.workers.dev/version.json`
-- After each itch release: edit `LATEST` in `worker.js` (versionCode,
-  versionName, apkUrl = the APK's file URL on the itch project page,
-  one-line notes), then redeploy (dashboard paste or `wrangler deploy`).
-- **Verify** with `curl https://tsg-version.dmsweetser.workers.dev/version.json`
-  — as of this handover it still serves **1.3**; the 1.4 edit exists
-  locally in `worker.js` but was never deployed (see §9).
+### 6.4 Android update manifest (GitHub Pages since Nov 14, 2026)
+- The APK's launch-time check polls a static file:
+  `https://dmsweetser.github.io/TheSurvivalGame/version.json`
+  (the `gh-pages` branch of the GitHub repo; endpoint hard-coded in
+  `project/android/src-itch/.../Updater.java`).
+- After each release: edit `version.json` on `gh-pages` (versionCode,
+  versionName — matching `project/android/VERSION` — apkUrl = the
+  GitHub release APK URL, one-line notes) and push; Pages redeploys.
+- **Verify** with `curl https://dmsweetser.github.io/TheSurvivalGame/version.json`.
+- Legacy: the Cloudflare Worker `tsg-version`
+  (`project/android/update-server/`) served this before Nov 14, 2026.
+  It still answers pre-1.4 installs with its frozen 1.3 manifest;
+  leave it alone.
 
 ### 6.5 Whales Only (Stripe + issuer Worker)
 - In-game counter in the Bug Mall (old Gallery slot). Seven cosmetic
@@ -280,9 +282,9 @@ Mac build ties in here if Steam ever ships.
   - html md5 `ffe6a211aaa69c078cdd1ab5f5bd3340` (1,456,327 B)
   - exe md5 `ee31a1c9776637dd822b4a02033b5457` (2,635,776 B)
   - linux md5 `602495851ab126269403e074a98c03fe` (3,504,904 B)
-  - mac.zip md5 `8e975ba0ca5ed2f4ffd45cf7fd1dd64b` (1,597,606 B)
-  - apk md5 `80a0cd87925c61ef7f559b739eacc063` (1,225,964 B), versionCode 5 / "1.4"
-  - aab md5 `f2c9d472b2565529e9c7cfbf8b582f0e` (1,218,182 B)
+  - mac.zip md5 `ff55e185f587a6877d35b765c77cdeff` (1,597,606 B)
+  - apk md5 `809040f3a83ca54a72f83d9815eb472c` (1,225,964 B), versionCode 5 / "1.4"
+  - aab md5 `159f3c2d4bf1c6f52644f2739b044941` (1,218,181 B)
 - **Why 1.4 isn't live:** itch's login and the Cloudflare dashboard both
   sit behind a Cloudflare "Verify you are human" check that loops for
   Muse's automated browser (tried Nov 11–12, many routes). To publish:
@@ -290,9 +292,8 @@ Mac build ties in here if Steam ever ships.
   2. Upload the six files from `releases/v1.4-ready/` (browser zip first).
   3. Re-check the browser-play settings (§6.2).
   4. Post the devlog from `releases/v1.4-ready/DEVLOG.md`.
-  5. Then redeploy the `tsg-version` Worker with the 1.4 values already
-     edited into `project/android/update-server/worker.js`, and curl the
-     endpoint to confirm it serves 1.4.
+  5. The Android update manifest needs nothing: it already serves 1.4
+     from GitHub Pages (§6.4).
   Or just tell Muse "take over my browser" — with you clearing the
   human check once, Muse can run the whole publish in that session.
 - **Facebook Instant Games: parked** (your call, Nov 12). Going live

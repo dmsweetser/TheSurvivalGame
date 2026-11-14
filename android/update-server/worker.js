@@ -1,3 +1,9 @@
+// tsg-version — LEGACY (Nov 14, 2026): the update manifest moved to
+// GitHub Pages (https://dmsweetser.github.io/TheSurvivalGame/version.json,
+// a static file on the repo's gh-pages branch) and builds from v1.4 on
+// poll that URL. This Worker is kept only so older installs still get
+// an answer; its manifest is frozen as of the move. Original notes:
+//
 // tsg-version — the update manifest for The Survival Game's
 // itch/direct-download Android build. The APK's launch-time check
 // fetches /version.json from this Worker; if versionCode here beats
