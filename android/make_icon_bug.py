@@ -111,8 +111,11 @@ def draw_bug(d, cx=512, cy=512, scale=1.0):
         pr = er / 2 + 1 * scale
         E(ex - pr + 3 * scale, ey - pr, ex + pr + 3 * scale, ey + pr, fill=OUT)
         E(ex - pr + 1 * scale, ey - pr - 2 * scale, ex - pr + 7 * scale, ey - pr + 4 * scale, fill=WHITE)
+    # the frown — Daniel (Nov 14): thicker and darker so it actually
+    # reads at launcher sizes; the old one (ORANGE_D, width 7, ±10
+    # wide) vanished into the orange head below ~96px.
     my = hy + hr / 2 + 2 * scale
-    L([(hx - 10 * scale, my + 5 * scale), (hx, my), (hx + 10 * scale, my + 5 * scale)], ORANGE_D, 7)
+    L([(hx - 16 * scale, my + 8 * scale), (hx, my), (hx + 16 * scale, my + 8 * scale)], OUT, 14)
     return d
 
 def render(with_bg):
