@@ -59,9 +59,10 @@ function T(name, cond, extra) { if (cond) { pass++; } else { fail++; console.log
     T('every kart has a buddy driver, species varied', allBuddies && sp.size >= 4, 'species=' + [...sp].join(',')); }
   T('racing after the countdown', (await poll('dbg_crtstate', v => v === 1, 8000)) === 1, await call('dbg_crtstate'));
 
-  // drive for real: gas only, down the bottom straight
+  // drive for real: FIRE is the gas now (Nov 14 — the stick only
+  // steers), so hold Space down the bottom straight
   const prog0 = await call('dbg_crtprog');
-  await hold('ArrowUp', 2500);
+  await hold('Space', 2500);
   const prog1 = await call('dbg_crtprog');
   T('the kart drives and gains ground', prog1 > prog0 + 120, prog0 + ' -> ' + prog1);
   const pos = await call('dbg_crtpos');
@@ -70,7 +71,7 @@ function T(name, cond, extra) { if (cond) { pass++; } else { fail++; console.log
 
   // jump to the last straight of lap 3 and drive it home
   await call('dbg_crtskip');
-  await hold('ArrowUp', 1600);
+  await hold('Space', 1600);
   T('finish banner state reached', (await poll('dbg_crtstate', v => v === 2, 6000)) === 2, await call('dbg_crtstate'));
   T('race auto-exits after the banner', (await poll('dbg_bwmode', v => v === -1, 9000)) === -1, await call('dbg_bwmode'));
   T('back in the arcade', (await call('dbg_inarcade')) === 1, await call('dbg_inarcade'));

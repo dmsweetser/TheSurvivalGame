@@ -9849,6 +9849,9 @@ typedef struct {
     int crt_kcol[6];             // kart index -> palette index actually worn this race
     int crt_species[6], crt_dcolidx[6], crt_nameidx[6];   // the DRIVER in each kart: a real Banzai Buddy (species, coat colour, name)
     float crt_line[6], crt_slidet[6];                     // AI racing-line lateral (smoothed); human drift charge time
+    float crt_puffx[20], crt_puffy[20], crt_puffl[20];    // exhaust puffs: position + remaining life (ring buffer)
+    int crt_puffn, crt_prevplace[2], crt_prevlap[2];      // puff ring cursor; last place/lap per human (overtake + final-lap notes)
+    float crt_pufft;                                      // puff spawn timer
     int crt_colsel, crt_colsel2; // waiting-room colour picks (host's own, the guest's)
     int crt_ready;               // waiting-room ready bits: 1 host, 2 guest
     int crt_prevk, crt_gprevk;   // held-key history for waiting-room edge detection
@@ -15289,6 +15292,10 @@ static void crt_start_race(int pi){
     S->crt_state = 0; S->crt_t = 0; S->crt_count = 3.4f; S->crt_fint = 0;
     S->crt_fincount = 0; S->crt_player_place = 0;
     S->crt_hfin[0] = 0; S->crt_hfin[1] = 0; S->crt_endt = -1.0f;
+    for (int q2 = 0; q2 < 20; q2++) S->crt_puffl[q2] = 0;
+    S->crt_puffn = 0; S->crt_pufft = 0;
+    S->crt_prevplace[0] = S->crt_prevplace[1] = 0;
+    S->crt_prevlap[0] = S->crt_prevlap[1] = 0;
     static const float SKILL[5] = { 0.95f, 0.97f, 0.99f, 1.005f, 1.02f };
     static const int SLOT[6] = { 3, 0, 1, 2, 4, 5 };   // your buddy starts 4th: a race, not a parade
     for (int i = 0; i < 6; i++){
@@ -15329,21 +15336,24 @@ static void crt_start_race(int pi){
     }
     b->x = CRT_OX + S->crt_x[0]; b->y = CRT_OY + S->crt_y[0];
     b->bw_x = b->x; b->bw_y = b->y; b->aim = S->crt_h[0];
-    { char *q = S->note; q = sappend(q, S->crt_duo >= 0? "HEAD-TO-HEAD! 3 LAPS. UP IS THE GAS - BEAT YOUR FELLOW HUMAN!" : "3 LAPS. UP IS THE GAS - RIDE THE BOOST PADS, WIN!"); *q = 0; S->note_t = 2.4f; }
+    { char *q = S->note; q = sappend(q, S->crt_duo >= 0? "HEAD-TO-HEAD! 3 LAPS. HOLD FIRE TO GO - BEAT YOUR FELLOW HUMAN!" : "3 LAPS. HOLD FIRE TO GO - RIDE THE BOOST PADS, WIN!"); *q = 0; S->note_t = 2.4f; }
     if (S->crt_duo >= 0){ Buddy *gb = &G.bud[S->crt_duo];
         gb->x = CRT_OX + S->crt_x[1]; gb->y = CRT_OY + S->crt_y[1];
         gb->bw_x = gb->x; gb->bw_y = gb->y; gb->aim = S->crt_h[1]; }
 }
 
 // one kart under human hands (host = kart 0, guest = kart 1)
-static void crt_drive_kart(BwSim *S, int i, int keys, float dt){
+static void crt_drive_kart(BwSim *S, int i, int keys, int go, float dt){
     int bi = crt_nearest_full(S->crt_x[i], S->crt_y[i]);
     float dxl = S->crt_x[i] - CRT_WX[bi], dyl = S->crt_y[i] - CRT_WY[bi];
     int onroad = (dxl*dxl + dyl*dyl) <= 31.0f * 31.0f;
     float vmax = onroad? 168.0f : 62.0f;
     if (S->crt_boost[i] > 0){ S->crt_boost[i] -= dt; vmax *= 1.38f; }
     float v = S->crt_v[i];
-    if (keys & K_UP){
+    // GO is the FIRE button held down (Nov 14, Daniel): the stick is
+    // for steering only — up no longer accelerates. Down still brakes
+    // and reverses; letting go of FIRE coasts.
+    if (go){
         if (v > vmax){ v -= 150.0f * dt; if (v < vmax) v = vmax; }
         else { v += (v < 60.0f? 265.0f : 165.0f) * dt; if (v > vmax) v = vmax; }   // a proper launch, then the usual pull
     } else if (keys & K_DOWN){
@@ -15490,8 +15500,8 @@ static void crt_update(int pi, float dt, const BwIn *in){
     }
     S->crt_t += dt;
     // ---- the human karts: host on kart 0, the co-op guest on kart 1
-    crt_drive_kart(S, 0, in->keys, dt);
-    if (S->crt_duo >= 0) crt_drive_kart(S, 1, crt_gin[pi].keys, dt);
+    crt_drive_kart(S, 0, in->keys, in->sel_held || in->sel, dt);
+    if (S->crt_duo >= 0) crt_drive_kart(S, 1, crt_gin[pi].keys, crt_gin[pi].sel_held || crt_gin[pi].sel, dt);
     // ---- the rivals (one fewer when a guest is driving kart 1)
     for (int i = (S->crt_duo >= 0? 2 : 1); i < 6; i++){
         float tx, ty, hx, hy, t2x, t2y, h2x, h2y;
@@ -15570,6 +15580,37 @@ static void crt_update(int pi, float dt, const BwIn *in){
         }
     }
     crt_places(S);
+    // exhaust puffs from working engines: boosting karts, and the
+    // humans whenever they're moving with intent
+    S->crt_pufft -= dt;
+    for (int q2 = 0; q2 < 20; q2++) if (S->crt_puffl[q2] > 0) S->crt_puffl[q2] -= dt;
+    if (S->crt_pufft <= 0){
+        S->crt_pufft = 0.07f;
+        for (int i = 0; i < 6; i++){
+            int human = (i == 0) || (i == 1 && S->crt_duo >= 0);
+            if (S->crt_boost[i] > 0 || (human && S->crt_v[i] > 30.0f)){
+                int s2 = S->crt_puffn; S->crt_puffn = (S->crt_puffn + 1) % 20;
+                S->crt_puffx[s2] = S->crt_x[i] - fcos(S->crt_h[i]) * 12.0f;
+                S->crt_puffy[s2] = S->crt_y[i] - fsin(S->crt_h[i]) * 12.0f;
+                S->crt_puffl[s2] = 0.45f;
+            }
+        }
+    }
+    // race notes for the humans: a place gained, the final lap
+    for (int h = 0; h < 2; h++){
+        if (h == 1 && S->crt_duo < 0) break;
+        if (S->crt_prevplace[h] && S->crt_place[h] < S->crt_prevplace[h] && !S->crt_finplace[h]){
+            char buf[48]; char *q = buf;
+            q = sappend(q, "UP TO P"); q = sapp_int(q, S->crt_place[h]); q = sappend(q, "!"); *q = 0;
+            scpy(S->note, buf, 72); S->note_t = 1.6f;
+        }
+        S->crt_prevplace[h] = S->crt_place[h];
+        { int lap = (int)(S->crt_prog[h] / CRT_LEN) + 1; if (lap > 3) lap = 3;
+          if (S->crt_prevlap[h] && lap == 3 && S->crt_prevlap[h] < 3 && !S->crt_finplace[h]){
+              scpy(S->note, "FINAL LAP!", 72); S->note_t = 1.8f;
+          }
+          S->crt_prevlap[h] = lap; }
+    }
     // the race closes when every human is home, or the clock runs out
     if (S->crt_endt >= 0) S->crt_endt -= dt;
     { int all_home = S->crt_hfin[0] && (S->crt_duo < 0 || S->crt_hfin[1]);
@@ -15668,6 +15709,7 @@ static void crt_render_view(int sim_pi, int viewer_pi){
           tri_fill(cx - KTS(92), cy - KTS(16), cx - KTS(92), cy + KTS(16), cx - KTS(70), cy, COL(255, 255, 255));
           tri_fill(cx + KTS(92), cy - KTS(16), cx + KTS(92), cy + KTS(16), cx + KTS(70), cy, COL(255, 255, 255));
           draw_text_center(cx, cy + KTS(64), COLNAME[mycol], 2, COL(255, 255, 255)); }
+        draw_text_center(vx + vw2/2, vy + 98, pad_mode()? "IN THE RACE: HOLD A TO GO, STEER WITH THE STICK" : "IN THE RACE: HOLD FIRE TO GO, STEER WITH THE ARROWS", 1, COL(170, 200, 190));
         draw_text_center(vx + vw2/2, vy + vh2 - 104, "LEFT / RIGHT - PICK YOUR COLOUR", 1, COL(200, 230, 200));
         if (S->crt_duo >= 0){
             int imready = (vk == 0)? (S->crt_ready & 1) : (S->crt_ready & 2);
@@ -15708,11 +15750,31 @@ static void crt_render_view(int sim_pi, int viewer_pi){
         (outsx) = vx + vw2/2 + (int)(l_ * F / (f_ < 1.0f? 1.0f : f_)); \
         (outsy) = horizon + (int)(15.0f * F / (f_ < 1.0f? 1.0f : f_)); \
       } while (0)
-      // sky, a low sun, and a tree line that slides as you steer
-      rect_fill(vx, vy, vw2, horizon - vy + 1, COL(120, 190, 245));
-      rect_fill(vx, vy, vw2, (horizon - vy) / 2, COL(150, 205, 250));
+      // sky: a four-band gradient, a haloed sun, drifting clouds,
+      // a far hill line, and the tree line in front of it — all of
+      // it sliding as you steer
+      { int sh = horizon - vy; if (sh < 4) sh = 4;
+        rect_fill(vx, vy, vw2, sh/4 + 1, COL(96, 165, 238));
+        rect_fill(vx, vy + sh/4, vw2, sh/4 + 1, COL(120, 182, 244));
+        rect_fill(vx, vy + sh/2, vw2, sh/4 + 1, COL(146, 200, 248));
+        rect_fill(vx, vy + 3*sh/4, vw2, sh - 3*sh/4 + 1, COL(174, 218, 250)); }
+      disc_fill(vx + vw2 - 90, vy + 44, 31, COL(255, 246, 196));
       disc_fill(vx + vw2 - 90, vy + 44, 20, COL(255, 236, 150));
       { int slide = (int)(kh * 260.0f);
+        for (int ci = 0; ci < 4; ci++){
+            int cw = 54 + (ci * 29) % 40;
+            int cxx = (ci * 317 + 60 - slide * 2 - (int)(S->crt_t * 6.0f)) % (vw2 + 240);
+            if (cxx < 0) cxx += vw2 + 240;
+            int cxp2 = vx + cxx - 120, cyp2 = vy + 14 + (ci * 23) % 30;
+            ellipse_fill(cxp2, cyp2, cw/2, cw/6, COL(248, 251, 255));
+            ellipse_fill(cxp2 + cw/5, cyp2 - cw/10, cw/3, cw/7, COL(255, 255, 255));
+            ellipse_fill(cxp2 - cw/4, cyp2 + 2, cw/3, cw/8, COL(232, 242, 252));
+        }
+        for (int hi2 = -1; hi2 < vw2 / 130 + 2; hi2++){
+            int hxp = vx + hi2 * 130 - ((slide % 130) + 130) % 130;
+            int hh = 20 + (int)(hash2(hi2 + slide / 130, 7, 0x411u) % 22);
+            tri_fill(hxp, horizon, hxp + 65, horizon - hh, hxp + 130, horizon, COL(84, 148, 102));
+        }
         for (int ti = -1; ti < vw2 / 74 + 2; ti++){
             int txp = vx + ti * 74 - ((slide % 74) + 74) % 74;
             int th = 16 + ((ti * 37 + (slide / 74) * 13) & 15);
@@ -15724,6 +15786,7 @@ static void crt_render_view(int sim_pi, int viewer_pi){
       { int startseg = crt_nearest_full(kx, ky);
         enum { NS = 46 };
         int rsx[NS + 1], rsy[NS + 1], lsx[NS + 1], lsy[NS + 1], rrx[NS + 1], rry[NS + 1], lrx[NS + 1], lry[NS + 1];
+        int arx[NS + 1], ary[NS + 1], alx[NS + 1], aly[NS + 1], erx[NS + 1], ery[NS + 1], elx[NS + 1], ely[NS + 1];
         float rf[NS + 1];
         for (int j = 0; j <= NS; j++){
             int si = (startseg + j) % CRT_N, sj = (si + 1) % CRT_N;
@@ -15736,18 +15799,31 @@ static void crt_render_view(int sim_pi, int viewer_pi){
             rf[j] = (f1 + f2) * 0.5f;
             CRT_PROJ(CRT_WX[si] + nx * 37.0f, CRT_WY[si] + ny * 37.0f, f1, rrx[j], rry[j]);
             CRT_PROJ(CRT_WX[si] - nx * 37.0f, CRT_WY[si] - ny * 37.0f, f2, lrx[j], lry[j]);
+            CRT_PROJ(CRT_WX[si] + nx * 45.0f, CRT_WY[si] + ny * 45.0f, f1, arx[j], ary[j]);
+            CRT_PROJ(CRT_WX[si] - nx * 45.0f, CRT_WY[si] - ny * 45.0f, f2, alx[j], aly[j]);
+            CRT_PROJ(CRT_WX[si] + nx * 32.5f, CRT_WY[si] + ny * 32.5f, f1, erx[j], ery[j]);
+            CRT_PROJ(CRT_WX[si] - nx * 32.5f, CRT_WY[si] - ny * 32.5f, f2, elx[j], ely[j]);
         }
         for (int j = NS - 1; j >= 0; j--){
             if (rf[j + 1] < 4.0f) continue;
             int par = (startseg + j) & 1;
             if (rsy[j] > horizon) rect_fill(vx, rsy[j], vw2, rsy[j + 1] - rsy[j] + 1, par? COL(30, 104, 38) : COL(24, 90, 32));
             if (rf[j] < 4.0f) continue;
+            // the manicured apron the track sits in
+            u32 ap = par? COL(46, 130, 54) : COL(41, 121, 49);
+            tri_fill(arx[j], ary[j], alx[j], aly[j], alx[j + 1], aly[j + 1], ap);
+            tri_fill(arx[j], ary[j], alx[j + 1], aly[j + 1], arx[j + 1], ary[j + 1], ap);
             u32 rum = par? COL(226, 226, 226) : COL(205, 50, 45);
             tri_fill(rrx[j], rry[j], lrx[j], lry[j], lrx[j + 1], lry[j + 1], rum);
             tri_fill(rrx[j], rry[j], lrx[j + 1], lry[j + 1], rrx[j + 1], rry[j + 1], rum);
             u32 rd = par? COL(62, 62, 70) : COL(56, 56, 64);
             tri_fill(rsx[j], rsy[j], lsx[j], lsy[j], lsx[j + 1], lsy[j + 1], rd);
             tri_fill(rsx[j], rsy[j], lsx[j + 1], lsy[j + 1], rsx[j + 1], rsy[j + 1], rd);
+            // crisp white edge lines just inside the rumble
+            tri_fill(rsx[j], rsy[j], erx[j], ery[j], erx[j + 1], ery[j + 1], COL(232, 236, 238));
+            tri_fill(rsx[j], rsy[j], erx[j + 1], ery[j + 1], rsx[j + 1], rsy[j + 1], COL(232, 236, 238));
+            tri_fill(elx[j], ely[j], lsx[j], lsy[j], lsx[j + 1], lsy[j + 1], COL(232, 236, 238));
+            tri_fill(elx[j], ely[j], lsx[j + 1], lsy[j + 1], elx[j + 1], ely[j + 1], COL(232, 236, 238));
             if (((startseg + j) % 3) == 0 && rf[j] < 340.0f){
                 // the centre dashes: painted speed, rushing at you
                 float cxj = (rsx[j] + lsx[j]) * 0.5f, cyj = (rsy[j] + lsy[j]) * 0.5f;
@@ -15791,6 +15867,12 @@ static void crt_render_view(int sim_pi, int viewer_pi){
                 }
                 if (ok){
                     for (int p2 = 0; p2 < 2; p2++) rect_fill(gx[p2] - 2, gt[p2], 4, gy[p2] - gt[p2], COL(52, 54, 64));
+                    for (int p2 = 0; p2 < 2; p2++){   // little flags, waving on the poles
+                        int fw = (int)(7.0f * F / gf[p2]); if (fw < 3) fw = 3;
+                        int dir = p2? -1 : 1;
+                        int wob = (int)(fsin(S->crt_t * 7.0f + p2 * 2.1f) * fw * 0.18f);
+                        tri_fill(gx[p2], gt[p2], gx[p2] + dir * fw, gt[p2] + fw/4 + wob, gx[p2], gt[p2] + fw/2, COL(250, 200, 50));
+                    }
                     int bh = (int)(9.0f * F / ff); if (bh < 3) bh = 3;
                     tri_fill(gx[0], gt[0], gx[1], gt[1], gx[1], gt[1] + bh, COL(198, 52, 48));
                     tri_fill(gx[0], gt[0], gx[1], gt[1] + bh, gx[0], gt[0] + bh, COL(198, 52, 48));
@@ -15810,25 +15892,39 @@ static void crt_render_view(int sim_pi, int viewer_pi){
             float dl = fsqrt(dxn*dxn + dyn*dyn); if (dl < 0.001f) dl = 1.0f;
             float ux = dxn / dl, uy = dyn / dl, nx = -uy, ny = ux;
             int ax, ay, bx, by, cx2, cy2, dx2, dy2; float tf;
+            int gx2, gy2, hx2, hy2, ix2, iy2, jx2, jy2;
+            CRT_PROJ(pcx + nx * 22.0f - ux * 12.0f, pcy + ny * 22.0f - uy * 12.0f, tf, gx2, gy2);
+            CRT_PROJ(pcx - nx * 22.0f - ux * 12.0f, pcy - ny * 22.0f - uy * 12.0f, tf, hx2, hy2);
+            CRT_PROJ(pcx - nx * 22.0f + ux * 12.0f, pcy - ny * 22.0f + uy * 12.0f, tf, ix2, iy2);
+            CRT_PROJ(pcx + nx * 22.0f + ux * 12.0f, pcy + ny * 22.0f + uy * 12.0f, tf, jx2, jy2);
+            tri_fill(gx2, gy2, hx2, hy2, ix2, iy2, COL(255, 216, 118));
+            tri_fill(gx2, gy2, ix2, iy2, jx2, jy2, COL(255, 216, 118));
             CRT_PROJ(pcx + nx * 19.0f - ux * 9.0f, pcy + ny * 19.0f - uy * 9.0f, tf, ax, ay);
             CRT_PROJ(pcx - nx * 19.0f - ux * 9.0f, pcy - ny * 19.0f - uy * 9.0f, tf, bx, by);
             CRT_PROJ(pcx - nx * 19.0f + ux * 9.0f, pcy - ny * 19.0f + uy * 9.0f, tf, cx2, cy2);
             CRT_PROJ(pcx + nx * 19.0f + ux * 9.0f, pcy + ny * 19.0f + uy * 9.0f, tf, dx2, dy2);
-            tri_fill(ax, ay, bx, by, cx2, cy2, COL(240, 130, 40));
-            tri_fill(ax, ay, cx2, cy2, dx2, dy2, COL(240, 130, 40));
+            { u32 padc = ((int)(S->crt_t * 6.0f + pd * 1.7f) & 1)? COL(240, 130, 40) : COL(252, 176, 64);
+              tri_fill(ax, ay, bx, by, cx2, cy2, padc);
+              tri_fill(ax, ay, cx2, cy2, dx2, dy2, padc); }
             if (ff < 150.0f) draw_text_center(psx, psy - 4, ">>", 1, COL(255, 255, 255));
         }
       }
     // everything with depth — trackside scenery and rival karts —
     // in one far-to-near pass, so trees occlude and are occluded
     // exactly like the karts they stand beside
-    { enum { MAXIT = 6 + CRT_SCN_N };
+    { enum { MAXIT = 6 + CRT_SCN_N + 20 };
       float itf[MAXIT]; int itk[MAXIT], itx[MAXIT], itsx[MAXIT], itsy[MAXIT], itn = 0;
       for (int sn = 0; sn < CRT_SCN_N; sn++){
           if (CRT_SCX[sn] < -50.0f) continue;
           float f; int sx, sy; CRT_PROJ(CRT_SCX[sn], CRT_SCY[sn], f, sx, sy);
           if (f < 9.0f || f > 880.0f) continue;
           itf[itn] = f; itk[itn] = 1; itx[itn] = sn; itsx[itn] = sx; itsy[itn] = sy; itn++;
+      }
+      for (int q2 = 0; q2 < 20; q2++){
+          if (S->crt_puffl[q2] <= 0) continue;
+          float f; int sx, sy; CRT_PROJ(S->crt_puffx[q2], S->crt_puffy[q2], f, sx, sy);
+          if (f < 6.0f || f > 700.0f) continue;
+          itf[itn] = f; itk[itn] = 3; itx[itn] = q2; itsx[itn] = sx; itsy[itn] = sy; itn++;
       }
       for (int i = 0; i < 6; i++){ if (i == vk) continue;
           float f; int sx, sy; CRT_PROJ(S->crt_x[i], S->crt_y[i], f, sx, sy);
@@ -15842,11 +15938,12 @@ static void crt_render_view(int sim_pi, int viewer_pi){
         float f = itf[oi]; int sx = itsx[oi], base = itsy[oi];
         if (itk[oi] == 1){
             int sn = itx[oi], tp = CRT_SCT[sn];
-            if (tp == 0){   // a tree
+            if (tp == 0){   // a tree (every seventh is in blossom)
                 int th = (int)(30.0f * F / f); if (th < 3) continue;
                 if (sx < vx - th || sx > vx + vw2 + th) continue;
+                ellipse_fill(sx, base, th/4, th/10, COL(22, 84, 30));
                 rect_fill(sx - th/16 - 1, base - th*38/100, th/8 + 2, th*38/100, COL(96, 66, 40));
-                u32 g1 = (sn & 1)? COL(34, 116, 52) : COL(28, 100, 44);
+                u32 g1 = (sn % 7 == 3)? COL(216, 138, 160) : (sn & 1)? COL(34, 116, 52) : COL(28, 100, 44);
                 disc_fill(sx, base - th*52/100, th*30/100, g1);
                 disc_fill(sx, base - th*80/100, th*22/100, col_shade(g1, 1.18f));
             } else if (tp == 1){   // a tire stack
@@ -15867,8 +15964,19 @@ static void crt_render_view(int sim_pi, int viewer_pi){
                     rect_fill(sx - gw/2 + 3 + c3 * 9, base - gh + 5 + r2 * (gh/5), 4, 4, CROWD[h % 5]);
                 }
                 rect_fill(sx - gw/2 - 4, base - gh - gh/6 - 2, gw + 8, gh/6 + 2, COL(64, 70, 88));
+                for (int aw = 0; aw < (gw + 8) / 10; aw++)
+                    if (aw & 1) rect_fill(sx - gw/2 - 4 + aw * 10, base - gh - gh/6 - 2, 10, gh/6 + 2, COL(198, 52, 48));
                 if (gw > 300) draw_text_center(sx, base - gh - gh/6 + gh/12 - 3, "GRAND PRIX", 1, COL(255, 240, 200));
             }
+            continue;
+        }
+        if (itk[oi] == 3){   // an exhaust puff, swelling as it fades
+            int q2 = itx[oi];
+            float lf = S->crt_puffl[q2]; if (lf < 0) lf = 0;
+            int pr = (int)((0.45f - lf) * 30.0f * F / f) + 2;
+            if (pr > 26) pr = 26;
+            disc_fill(sx, base - pr/2, pr, COL(216, 220, 224));
+            disc_fill(sx - pr/3, base - pr, pr/2, COL(240, 243, 245));
             continue;
         }
         int i = itx[oi];
@@ -15883,7 +15991,11 @@ static void crt_render_view(int sim_pi, int viewer_pi){
         rect_fill(sx + kw/2 - kw/4, base - kh2/2, kw/4 + 1, kh2/2, COL(16, 14, 24));
         rect_fill(sx - kw/2, base - kh2, kw, kh2 * 3/4, KCOL[S->crt_kcol[i]]);
         rect_line(sx - kw/2, base - kh2, kw, kh2 * 3/4, COL(16, 14, 24));
-        crt_draw_driver(sx, base - kh2 + kh2/8, kw, S->crt_species[i], crt_coat_for(S->crt_species[i], S->crt_dcolidx[i], i));
+        if (kw >= 8){
+            rect_fill(sx - kw/2 + 2, base - kh2 + 1, kw - 4, kh2/5, col_shade(KCOL[S->crt_kcol[i]], 1.30f));
+            rect_fill(sx - kw/2 + kw/5, base - kh2/4, kw * 3/5, kh2/4, col_shade(KCOL[S->crt_kcol[i]], 0.60f));
+        }
+        crt_draw_driver(sx, base - kh2 + kh2/8 + ((S->crt_v[i] > 60.0f)? (int)(fsin(S->crt_t * 22.0f + i * 1.93f) * kw * 0.012f) : 0), kw, S->crt_species[i], crt_coat_for(S->crt_species[i], S->crt_dcolidx[i], i));
         if (f < 300.0f){
             int ty2 = base - kh2 - kw*42/100 - 10;
             if (S->crt_duo >= 0 && i == 1 - vk)
@@ -15906,6 +16018,8 @@ static void crt_render_view(int sim_pi, int viewer_pi){
       rect_fill(cxp + ow/2 - ow/5, base - oh/3, ow/5, oh/3, COL(16, 14, 24));
       rect_fill(cxp - ow/2 + ow/10, base - oh, ow * 4/5, oh * 3/4, KCOL[S->crt_kcol[vk]]);
       rect_line(cxp - ow/2 + ow/10, base - oh, ow * 4/5, oh * 3/4, COL(16, 14, 24));
+      rect_fill(cxp - ow/2 + ow/10 + 3, base - oh + 2, ow * 4/5 - 6, oh/6, col_shade(KCOL[S->crt_kcol[vk]], 1.30f));
+      rect_fill(cxp - ow/2 + ow/10 + ow/6, base - oh/4, ow * 4/5 - ow/3, oh/4, col_shade(KCOL[S->crt_kcol[vk]], 0.60f));
       crt_draw_driver(cxp, base - oh + oh/8, ow, S->crt_species[vk], crt_coat_for(S->crt_species[vk], S->crt_dcolidx[vk], vk));
     }
     // minimap in the corner: the whole flat circuit, SMK-style.
@@ -15946,9 +16060,18 @@ static void crt_render_view(int sim_pi, int viewer_pi){
         char nb[2] = { (char)('0' + n), 0 };
         draw_text_center(vx + vw2/2, vy + vh2/2 - 66, nb, 8, COL(255, 220, 90));
         draw_text_center(vx + vw2/2, vy + vh2/2 + 22, "GET READY...", 2, COL(255, 255, 255));
+        draw_text_center(vx + vw2/2, vy + vh2/2 + 52, pad_mode()? "HOLD A TO GO - STEER WITH THE STICK" : "HOLD FIRE TO GO - STEER WITH THE ARROWS", 1, COL(200, 230, 200));
     } else if (S->crt_state == 1 && S->crt_t < 0.9f){
         draw_text_center(vx + vw2/2, vy + vh2/2 - 40, "GO!", 6, COL(120, 255, 120));
     } else if (S->crt_state == 2){
+        { float el = 3.4f - S->crt_fint; if (el < 0) el = 0;   // confetti over the finish
+          static const u32 CONF[5] = { COL(250,200,50), COL(230,90,80), COL(120,180,240), COL(120,220,140), COL(240,240,240) };
+          for (int ci = 0; ci < 42; ci++){
+              u32 h1 = hash2(ci, 5, 0xC0F1u);
+              int cxp2 = vx + (int)(h1 % (u32)(vw2 > 4? vw2 : 5));
+              int cyp2 = vy + (int)((h1 / 7u + (u32)(el * (46.0f + (float)(h1 % 30u)))) % (u32)(vh2 > 4? vh2 : 5));
+              rect_fill(cxp2, cyp2, 4, 3, CONF[h1 % 5]);
+          } }
         rect_fill(vx + vw2/2 - 130, vy + vh2/2 - 44, 260, 84, COL(12, 14, 22));
         rect_line(vx + vw2/2 - 130, vy + vh2/2 - 44, 260, 84, COL(250, 200, 50));
         { char buf[64]; char *q = buf;

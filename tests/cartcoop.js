@@ -106,12 +106,13 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   ok((await poll('dbg_crtstate', v => v === 0 || v === 1, 8000)) !== 3, 'both ready: the race is starting');
   ok((await poll('dbg_crtstate', v => v === 1, 8000)) === 1, 'countdown finished, racing');
 
-  // both drive: P1 on the keyboard, P2 on pad dpad-up
-  await page.keyboard.down('ArrowUp');
-  await padSet(12, true);
+  // both drive: FIRE is go for both (Nov 14) — P1 holds Space,
+  // P2 holds pad A (button 0); the sticks only steer
+  await page.keyboard.down('Space');
+  await padSet(0, true);
   await sleep(2600);
-  await page.keyboard.up('ArrowUp');
-  await padSet(12, false);
+  await page.keyboard.up('Space');
+  await padSet(0, false);
   const pg1 = await call('dbg_crtprog'), pg2 = await call('dbg_crtprog2');
   ok(pg1 > 60, 'P1 kart moves on keyboard gas', pg1);
   ok(pg2 > 60, 'P2 kart moves on pad gas', pg2);
@@ -120,14 +121,14 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
 
   // P1 skips home and finishes; the race must stay open for P2
   await call('dbg_crtskip');
-  await page.keyboard.down('ArrowUp'); await sleep(2200); await page.keyboard.up('ArrowUp');
+  await page.keyboard.down('Space'); await sleep(2200); await page.keyboard.up('Space');
   ok((await call('dbg_crtpos')) === 1, 'P1 finished first', await call('dbg_crtpos'));
   ok((await call('dbg_crtstate')) === 1, 'race stays open until P2 is home', await call('dbg_crtstate'));
   ok((await call('dbg_bwstate2')) === 1, 'P2 still racing');
 
   // P2 skips home and finishes second; the race closes for both
   await call('dbg_crtskip2');
-  await padSet(12, true); await sleep(2400); await padSet(12, false);
+  await padSet(0, true); await sleep(2400); await padSet(0, false);
   ok((await poll('dbg_crtstate', v => v === 2, 8000)) === 2, 'race closed once both humans finished');
   ok((await poll('dbg_bwmode', v => v === -1, 9000)) === -1, 'P1 returned to the Arcade');
   ok((await poll('dbg_bwstate2', v => v === 0, 9000)) === 0, 'P2 returned to the Arcade too');
