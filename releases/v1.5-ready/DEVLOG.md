@@ -14,4 +14,6 @@ Also in 1.5:
 
 Tested before it ships: castletest 25/25 (the full escape, key and sword and all), speedfloor 5/5, woftest 12/12, arcadetest 24/24, mallfix 28/28.
 
+- One more cabinet rolled in after those notes: SUPER BUDDY CART. The Arcade grew a second row to hold it — three boxes on the north wall, three on a new island row. Three laps, six racers, boost pads on the straights, and grass that treats your kart like a lawn ornament. Your best finish and best time are kept per buddy, so the trophy has your name on it until you beat it.
+
 SQUASH BUGS. WEAR THE EVIDENCE.

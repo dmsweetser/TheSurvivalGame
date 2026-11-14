@@ -735,6 +735,7 @@ typedef struct {
     float stuck_t, grease_t; int grease_s;   // anti-stuck grease (Nov 10): slide around props
     int tank_done;                    // TANK RESCUE record: deepest level cleared; saved as td
     int cas_best;                     // CASTLE record: best escape score; saved as cb
+    int crt_best_pos, crt_best_time;  // SUPER BUDDY CART records: best finish (0 = none) as cp, best race time in deciseconds as cq
     float roll;                       // the pet rock's rolling angle
     float steady_t;                   // pet rock's ROCK STEADY: unhurtable while > 0
     float tx, ty;                     // render interpolation target (client)
@@ -2078,15 +2079,21 @@ static int station_at(Player *p){
 // in_arcade marking the room for collision, rendering and buddies.
 // ---------------------------------------------------------------------------
 #define ARC_CY (-12000)
-static const int ARC_SX[5] = { -292, -146, 0, 146, 292 };   // cabinet centres along the north wall (cabinets widened Nov 11 so the longest name, SUPER BUDDY RUN at 120px, fits the 128px cabinet; a fifth cabinet, CASTLE, joined Nov 14 and the room grew east-west to hold all five)
-static const char *ARC_NAME[5] = { "ENTRANCES", "SUPER BUDDY RUN", "BUDDY CRAFT", "TANK RESCUE", "CASTLE" };
-static const int ARC_MODE[5] = { 2, 3, 4, 5, 6 };         // the bw_mode each cabinet launches
+// TWO ROWS of cabinets (Nov 14, Daniel — for SUPER BUDDY CART):
+// three against the north wall, three on a freestanding island row
+// mid-room, all facing south. ARC_ROWY is each cabinet's draw-top
+// offset from ARC_CY; the collision band and the interact point
+// derive from it (+8/+40 and +58), exactly as the single row did.
+static const int ARC_SX[6] = { -256, 0, 256, -256, 0, 256 };
+static const int ARC_ROWY[6] = { -166, -166, -166, 44, 44, 44 };
+static const char *ARC_NAME[6] = { "ENTRANCES", "SUPER BUDDY RUN", "BUDDY CRAFT", "TANK RESCUE", "CASTLE", "SUPER BUDDY CART" };
+static const int ARC_MODE[6] = { 2, 3, 4, 5, 6, 7 };         // the bw_mode each cabinet launches
 static int arcgate[MAXP], arcgate_sel[MAXP], arc_cab[MAXP];   // the cabinet panel (per player)
 static int bw_arc_src[MAXP], bw_arc_cab[MAXP];         // pending arcade origin for bw_enter_mode
 static int cabinet_at(Player *p){
     if (!p->in_arcade) return -1;
-    for (int s=0;s<5;s++){
-        float dx=p->x - ARC_SX[s], dy=p->y - (ARC_CY-108);
+    for (int s=0;s<6;s++){
+        float dx=p->x - ARC_SX[s], dy=p->y - (ARC_CY + ARC_ROWY[s] + 58);
         if (dx*dx + dy*dy < 74*74) return s;
     }
     return -1;
@@ -2145,6 +2152,9 @@ static void cas_enter(int pi);
 static void cas_update(int pi, float dt, const BwIn *in);
 static void cas_render(int pi);
 static int cas_solid(int pi, float x, float y);
+static void crt_enter(int pi);
+static void crt_update(int pi, float dt, const BwIn *in);
+static void crt_render(int pi);
 static void bw_draw_note(int pi);
 static void bw_update(int pi, float dt, const BwIn *in);   // ditto, below
 static void bw_fill_p1(BwIn *bin, float dt);   // P1 input pack (touch-unified), below
@@ -2265,8 +2275,8 @@ static void arcade_collide(Player *p){
     if (p->x < -356) p->x = -356; if (p->x > 356) p->x = 356;
     if (p->y < ARC_CY-164) p->y = ARC_CY-164;
     if (p->y > ARC_CY+158) p->y = ARC_CY+158;
-    for (int s=0;s<5;s++){
-        float hx=66, hy0=ARC_CY-158, hy1=ARC_CY-126, rad=11;
+    for (int s=0;s<6;s++){
+        float hx=66, hy0=ARC_CY + ARC_ROWY[s] + 8, hy1=ARC_CY + ARC_ROWY[s] + 40, rad=11;
         if (p->x > ARC_SX[s]-hx-rad && p->x < ARC_SX[s]+hx+rad && p->y > hy0-rad && p->y < hy1+rad){
             float dyr = (hy1+rad) - p->y, dyl = p->y - (hy0-rad);
             float dxr = (ARC_SX[s]+hx+rad) - p->x, dxl = p->x - (ARC_SX[s]-hx-rad);
@@ -4640,7 +4650,7 @@ static void draw_arcade(void){
         rect_fill(tx, tyy, ts, ts, c);
         rect_fill(tx, tyy+ts-2, ts, 1, col_shade(c, 0.85f));
     }
-    draw_text_center(SX(0), SY(ARC_CY+58), "THE ARCADE", 2, COL(140,255,255));
+    draw_text_center(SX(0), SY(ARC_CY+126), "THE ARCADE", 2, COL(140,255,255));
     { u32 wallc = COL(30,24,48);
       rect_fill(SX(-386), SY(ARC_CY-192), (int)(772*cz), (int)(26*cz), wallc);
       rect_fill(SX(-386), SY(ARC_CY-170), (int)(772*cz), 2, COL(120,240,255));
@@ -4653,13 +4663,13 @@ static void draw_arcade(void){
       rect_fill(mx0, my0, mw, mh, COL(52,96,60)); rect_line(mx0, my0, mw, mh, COL(120,240,255));
       draw_text_center(SX(-340), SY(ARC_CY+20), "EXIT", 1, COL(240,255,240)); }
     draw_text_center(SX(0), SY(ARC_CY-186), "ARCADE", 2, COL(255,140,230));
-    static const u32 CABCOL[5] = { COL(240,140,40), COL(84,190,84), COL(70,130,230), COL(200,70,60), COL(120,220,130) };
-    for (int s=0;s<5;s++){
+    static const u32 CABCOL[6] = { COL(240,140,40), COL(84,190,84), COL(70,130,230), COL(200,70,60), COL(120,220,130), COL(250,200,50) };
+    for (int s=0;s<6;s++){
         int cx = SX(ARC_SX[s]);
-        { int py2 = SY(ARC_CY-112);
+        { int py2 = SY(ARC_CY + ARC_ROWY[s] + 54);
           ellipse_fill(cx, py2, (int)(68*cz), (int)(17*cz), COL(60,50,96));
           ellipse_fill(cx, py2, (int)(48*cz), (int)(11*cz), COL(72,60,110)); }
-        int x0=SX(ARC_SX[s]-64), y0=SY(ARC_CY-166), cw=(int)(128*cz), ch=(int)(98*cz);
+        int x0=SX(ARC_SX[s]-64), y0=SY(ARC_CY + ARC_ROWY[s]), cw=(int)(128*cz), ch=(int)(98*cz);
         shadow_ellipse(cx, y0+ch+2, cw/2, 4);
         rect_fill(x0, y0, cw, ch, COL(24,22,38)); rect_line(x0, y0, cw, ch, CABCOL[s]);
         rect_fill(x0, y0, cw, (int)(16*cz), CABCOL[s]);
@@ -4686,7 +4696,7 @@ static void draw_arcade(void){
             disc_fill(sx0+sw/2, sy0+(int)(20*cz), (int)(6*cz), COL(70,80,44));
             rect_fill(sx0+sw/2-(int)(17*cz), sy0+(int)(14*cz), (int)(4*cz), (int)(20*cz), COL(50,54,40));
             rect_fill(sx0+sw/2+(int)(13*cz), sy0+(int)(14*cz), (int)(4*cz), (int)(20*cz), COL(50,54,40));
-        } else {
+        } else if (s==4) {
             // CASTLE: a little stone tower with a flag, DOS-green
             rect_fill(sx0+sw/2-(int)(11*cz), sy0+(int)(16*cz), (int)(22*cz), (int)(22*cz), COL(96,110,96));
             rect_fill(sx0+sw/2-(int)(13*cz), sy0+(int)(12*cz), (int)(5*cz), (int)(6*cz), COL(96,110,96));
@@ -4695,6 +4705,21 @@ static void draw_arcade(void){
             rect_fill(sx0+sw/2-(int)(1*cz), sy0+(int)(24*cz), (int)(3*cz), (int)(14*cz), COL(30,36,30));
             rect_fill(sx0+sw/2-(int)(1*cz), sy0+(int)(2*cz), (int)(2*cz), (int)(10*cz), COL(200,200,210));
             tri_fill(sx0+sw/2+(int)(1*cz), sy0+(int)(2*cz), sx0+sw/2+(int)(1*cz), sy0+(int)(8*cz), sx0+sw/2+(int)(11*cz), sy0+(int)(5*cz), COL(120,220,130));
+        } else {
+            // SUPER BUDDY CART: a little kart under a checkered flag
+            rect_fill(sx0, sy0+sh-(int)(9*cz), sw, (int)(9*cz), COL(52,52,60));
+            rect_fill(sx0, sy0+sh-(int)(5*cz), sw, (int)(2*cz), COL(240,240,240));
+            rect_fill(sx0+sw/2-(int)(16*cz), sy0+(int)(18*cz), (int)(32*cz), (int)(13*cz), COL(230,60,50));
+            disc_fill(sx0+sw/2-(int)(13*cz), sy0+(int)(20*cz), (int)(4*cz), COL(16,14,24));
+            disc_fill(sx0+sw/2+(int)(13*cz), sy0+(int)(20*cz), (int)(4*cz), COL(16,14,24));
+            disc_fill(sx0+sw/2-(int)(13*cz), sy0+(int)(32*cz), (int)(4*cz), COL(16,14,24));
+            disc_fill(sx0+sw/2+(int)(13*cz), sy0+(int)(32*cz), (int)(4*cz), COL(16,14,24));
+            disc_fill(sx0+sw/2, sy0+(int)(22*cz), (int)(6*cz), COL(250,200,50));
+            rect_fill(sx0+sw-(int)(10*cz), sy0+(int)(4*cz), (int)(2*cz), (int)(16*cz), COL(200,200,210));
+            rect_fill(sx0+sw-(int)(8*cz), sy0+(int)(4*cz), (int)(4*cz), (int)(4*cz), COL(240,240,240));
+            rect_fill(sx0+sw-(int)(4*cz), sy0+(int)(4*cz), (int)(4*cz), (int)(4*cz), COL(16,14,24));
+            rect_fill(sx0+sw-(int)(8*cz), sy0+(int)(8*cz), (int)(4*cz), (int)(4*cz), COL(16,14,24));
+            rect_fill(sx0+sw-(int)(4*cz), sy0+(int)(8*cz), (int)(4*cz), (int)(4*cz), COL(240,240,240));
         }
         rect_fill(x0+(int)(8*cz), y0+(int)(76*cz), cw-(int)(16*cz), (int)(14*cz), COL(38,34,56)); rect_line(x0+(int)(8*cz), y0+(int)(76*cz), cw-(int)(16*cz), (int)(14*cz), OUTLINE);
         disc_fill(x0+(int)(24*cz), y0+(int)(83*cz), 3, COL(240,90,80));
@@ -5231,7 +5256,7 @@ static void render_hud(void){
     rect_line(254, 5, 214, 46, COL(84,78,112));
     if (me->in_mall && me->in_arcade){
         draw_text_center(361, 7, "THE ARCADE", 1, COL(255,255,255));
-        draw_text_center(361, 19, "FIVE FINE GAMES", 1, COL(200,210,230));
+        draw_text_center(361, 19, "SIX FINE GAMES", 1, COL(200,210,230));
         draw_text_center(361, 31, "SAFE ZONE - NO BUGS", 1, COL(150,230,150));
     } else if (me->in_mall){
         draw_text_center(361, 7, "THE BUG MALL", 1, COL(255,255,255));
@@ -6153,6 +6178,8 @@ static void do_save(void){
                     *p++=' '; *p=0; p = put_key(p, "pd"); p = put_int(p, bd->plat_done);
                     *p++=' '; *p=0; p = put_key(p, "td"); p = put_int(p, bd->tank_done);
                     *p++=' '; *p=0; p = put_key(p, "cb"); p = put_int(p, bd->cas_best);
+                    *p++=' '; *p=0; p = put_key(p, "cp"); p = put_int(p, bd->crt_best_pos);
+                    *p++=' '; *p=0; p = put_key(p, "cq"); p = put_int(p, bd->crt_best_time);
                     *p++=' '; *p=0; p = put_key(p, "cx"); p = put_int(p, (int)bd->craft_x);
                     *p++=' '; *p=0; p = put_key(p, "cy"); p = put_int(p, (int)bd->craft_y);
                     *p++=' '; *p=0; p = put_key(p, "cm"); p = put_int(p, bd->craft_wood + bd->craft_stone*1000 + bd->craft_fiber*1000000);
@@ -6406,7 +6433,7 @@ static void continue_run(int slot){
                 }
                 // optional key= tokens (bank / hat stand / mall / buddy)
                 { int bsp=0, bxp=0, b1=0, b2=0, b3=0, bsk=0, bfn=0, bnm=-1, bcl=0, bnv=0, bwo=0, bwn=0, ben=100, bgx=0, bgy=56, bgz=0, ber=0, bgf=0;
-                  int bsm=0, bsq=0, bsi=0, bsq2=0, bsb=0, bpd=0, btd=0, bcb=0, bcx=0, bcy=0, bcm=0, bcn=0, bcg=0, bct=0, bcf=0;
+                  int bsm=0, bsq=0, bsi=0, bsq2=0, bsb=0, bpd=0, btd=0, bcb=0, bcp=0, bcq=0, bcx=0, bcy=0, bcm=0, bcn=0, bcg=0, bct=0, bcf=0;
                   int tcw_bn=0, tcw_x[48], tcw_y[48], tcw_k[48], tcw_h[48];
                   int tcd_gn=0, tcd_g[96];
                   while (*q==' '){
@@ -6458,6 +6485,8 @@ static void continue_run(int slot){
                       else if (kk[0]=='p' && kk[1]=='d') bpd=vv;
                       else if (kk[0]=='t' && kk[1]=='d') btd=vv;
                       else if (kk[0]=='c' && kk[1]=='b') bcb=vv;
+                      else if (kk[0]=='c' && kk[1]=='p') bcp=vv;
+                      else if (kk[0]=='c' && kk[1]=='q') bcq=vv;
                       else if (kk[0]=='c' && kk[1]=='x') bcx=vv;
                       else if (kk[0]=='c' && kk[1]=='y') bcy=vv;
                       else if (kk[0]=='c' && kk[1]=='m') bcm=vv;
@@ -6493,6 +6522,8 @@ static void continue_run(int slot){
                       bd->plat_done = bpd<0? 0 : bpd;
                       bd->tank_done = btd<0? 0 : btd;
                       bd->cas_best = bcb<0? 0 : bcb;
+                      bd->crt_best_pos = bcp<0? 0 : bcp;
+                      bd->crt_best_time = bcq<0? 0 : bcq;
                       bd->craft_x = bcx; bd->craft_y = bcy;
                       bd->craft_wood = bcm % 1000; bd->craft_stone = (bcm/1000) % 1000; bd->craft_fiber = bcm / 1000000;
                       bd->craft_car = bcn % 1000; bd->craft_pies = (bcn/1000) % 1000; bd->craft_stews = bcn / 1000000;
@@ -9687,6 +9718,7 @@ static int bw_outside_world(float x, float y){ return x<BW_WX0 || x>BW_WX1 || y<
 static int bw_solid_b(Buddy *b, float x, float y){
     if (b->bw_mode==2) return ent_solid((int)(b - G.bud), x, y);
     if (b->bw_mode==6) return cas_solid((int)(b - G.bud), x, y);
+    if (b->bw_mode==7) return 0;   // SUPER BUDDY CART: grass is the wall
     if (bw_outside_world(x, y)) return 1;
     if (b->bw_mode==1 && bw_ridge_pass_zone(x, y)) return bw_site_solid(b, x, y);
     return bw_solid_xy(x, y, (u32)b->bw_seed) || bw_site_solid(b, x, y)
@@ -9800,6 +9832,16 @@ typedef struct {
     float cas_mx[16], cas_my[16], cas_mwt[16];
     int cas_mtype[16], cas_mhp[16], cas_mroom[16], cas_malive[16];
     unsigned char cas_taken[20];   // item ids: 0-12 treasures, 13 sword, 14 key, 15-16 tonics
+    // SUPER BUDDY CART (bw_mode 7, Nov 14 2026): one race's state.
+    // Kart 0 is the player's buddy; 1-5 are AI rivals. Progress is
+    // px along the centreline relative to the start line (negative
+    // on the grid); places are 1-based, finplace 0 until finished.
+    int crt_state;                 // 0 countdown, 1 racing, 2 finished (player home)
+    float crt_t, crt_count, crt_fint;
+    int crt_fincount, crt_player_place;
+    float crt_x[6], crt_y[6], crt_h[6], crt_v[6], crt_prog[6], crt_boost[6];
+    int crt_seg[6], crt_place[6], crt_finplace[6];
+    float crt_off[6], crt_skill[6];
 } BwSim;
 static BwSim BWS[MAXP];
 static int bw_defeated_has(BwSim *S, int key){ for (int i=0;i<S->defeated_n;i++) if (S->defeated[i]==key) return 1; return 0; }
@@ -10104,6 +10146,7 @@ static void bw_enter_mode(int pi, int mode){
     else if (mode==4){ craft_enter(pi); }
     else if (mode==5){ tank_enter(pi); }
     else if (mode==6){ cas_enter(pi); }
+    else if (mode==7){ crt_enter(pi); }
     else { b->x = b->bw_x; b->y = b->bw_y; }
     b->in_bw = 1;   // the DEV stays parked at the gate in the mall
     if (mode==2){ char *q=S->note; q=sappend(q, "ENTRANCES. A COZY HOTEL. "); q=sappend(q, lbl_int()); q=sappend(q, " OPENS DOORS + DRAWERS. MIND THE ZIP BUG."); *q=0; }
@@ -10111,6 +10154,7 @@ static void bw_enter_mode(int pi, int mode){
     else if (mode==4){ char *q=S->note; q=sappend(q, "BUDDY CRAFT. "); q=sappend(q, lbl_int()); q=sappend(q, " GATHERS + RESTS. "); q=sappend(q, lbl_fire()); q=sappend(q, " SWINGS. "); q=sappend(q, lbl_wall()); q=sappend(q, " CRAFTS."); *q=0; }
     else if (mode==5){ char *q=S->note; q=sappend(q, "TANK RESCUE. "); q=sappend(q, lbl_fire()); q=sappend(q, " FIRES THE CANNON. FREE CAPTIVES, DROP AT PADS."); *q=0; }
     else if (mode==6){ char *q=S->note; q=sappend(q, "CASTLE. TRAPPED! RUN INTO THINGS TO TAKE OR FIGHT. FIND THE KEY, ESCAPE!"); *q=0; }
+    else if (mode==7){ char *q=S->note; q=sappend(q, "SUPER BUDDY CART. 3 LAPS. UP IS THE GAS - STEER, RIDE THE BOOST PADS, WIN!"); *q=0; }
     else if (mode==1 && b->story_bits==(1<<0)) scpy(S->note, "STORY MODE. PATCH VILLAGE LIES NORTH-WEST.", 72);
     else if (mode==1) scpy(S->note, "BACK TO THE STORY. THE MEADOW REMEMBERS.", 72);
     else scpy(S->note, "BANZAI WORLD. WATCH FOR HACKERS.", 72);
@@ -10180,7 +10224,7 @@ static void arc_gate_try(int pi){
 }
 static void arc_gate_draw(int pi, int vx, int vy, int vw2, int vh2){
     Buddy *b=&G.bud[pi];
-    int cab = arc_cab[pi]%5;
+    int cab = arc_cab[pi]%6;
     int w = vw2<340? vw2-16 : 320, h = 132;
     int x = vx + (vw2-w)/2, y = vy + (vh2-h)/2;
     if (y < vy+4) y = vy+4;
@@ -10188,12 +10232,13 @@ static void arc_gate_draw(int pi, int vx, int vy, int vw2, int vh2){
     draw_text_center(x+w/2, y+10, ARC_NAME[cab], 2, COL(140,255,255));
     { char buf[64]; char *q=buf; q=sappend(q, BUD_ELF[b->name_idx%BUD_NAMES_N]); q=sappend(q, " THE "); q=sappend(q, BUD_NAME[b->species%BUDN]); q=sappend(q, " GRABS THE CONTROLS"); *q=0;
       draw_text_center(x+w/2, y+32, buf, 1, COL(200,214,200)); }
-    static const char *DESC[5] = {
+    static const char *DESC[6] = {
         "A COZY HOTEL OF DOORS. HIDE IN THE BUSHES. MIND THE ZIP BUG.",
         "A SIDE-SCROLLING RUN. STOMP BUGS. PLANT THE FLAG.",
         "AN ENDLESS WILD. CHOP, MINE, CRAFT, BUILD.",
         "DRIVE THE TANK. FREE THE CAPTIVES. BREAK THE BOSS.",
-        "TRAPPED IN A CASTLE! 13 TREASURES, ONE KEY, ONE GATE." };
+        "TRAPPED IN A CASTLE! 13 TREASURES, ONE KEY, ONE GATE.",
+        "KART RACING! 3 LAPS, 6 RACERS, ONE VERY SMUG TROPHY." };
     for (int r=0;r<2;r++){
         int ry = y + 52 + r*20;
         const char *nm = r==0? "PLAY" : "LEAVE";
@@ -10208,7 +10253,7 @@ static void arc_gate_draw(int pi, int vx, int vy, int vw2, int vh2){
 }
 static void arc_gate_pick(int pi){
     if (arcgate_sel[pi]==0){
-        int cab = arc_cab[pi]%5;
+        int cab = arc_cab[pi]%6;
         arcgate[pi]=0;
         bw_arc_src[pi]=1; bw_arc_cab[pi]=cab;
         bw_enter_mode(pi, ARC_MODE[cab]);
@@ -10242,13 +10287,13 @@ static void p1_view_rect(int *x, int *y, int *w, int *h){
 static void bw_exit(int pi, int fainted){
     BwSim *S = &BWS[pi];
     Player *p=&G.p[pi]; Buddy *b=&G.bud[pi];
-    if (b->bw_mode==2 || b->bw_mode==3 || b->bw_mode==5 || b->bw_mode==6){ b->bw_x = 0; b->bw_y = 56; }
+    if (b->bw_mode==2 || b->bw_mode==3 || b->bw_mode==5 || b->bw_mode==6 || b->bw_mode==7){ b->bw_x = 0; b->bw_y = 56; }
     else if (b->bw_mode==4){ b->craft_x = b->x; b->craft_y = b->y; }
     else { b->bw_x = b->x; b->bw_y = b->y; }
     S->bat.active = 0;
     S->bw_menu = 0;
     b->in_bw = 0;
-    if (S->from_arcade){ p->x = ARC_SX[S->arc_cab%5]; p->y = ARC_CY-100; }   // back to your cabinet
+    if (S->from_arcade){ int cb2 = S->arc_cab%6; p->x = ARC_SX[cb2]; p->y = ARC_CY + ARC_ROWY[cb2] + 66; }   // back to your cabinet, whichever row it stands in
     else { p->x = BW_SX; p->y = MALL_CY+96; }
     S->from_arcade = 0;
     p->aim = -PI/2;
@@ -10260,7 +10305,7 @@ static void bw_exit(int pi, int fainted){
 // --- the frame ---------------------------------------------------------------
 static void bw_roam_refresh(Buddy *b){
     BwSim *S = &BWS[(int)(b - G.bud)];
-    if (b->bw_mode==2 || b->bw_mode==6) return;
+    if (b->bw_mode==2 || b->bw_mode==6 || b->bw_mode==7) return;
     u32 seed=(u32)b->bw_seed;
     int cx0=bw_cellof(b->x), cy0=bw_cellof(b->y);
     int want_cell[BW_ROAMN]; int nw=0;
@@ -10562,6 +10607,7 @@ static void bw_update(int pi, float dt, const BwIn *in){
     if (b->bw_mode==4){ craft_update(pi, dt, in); return; }
     if (b->bw_mode==5){ tank_update(pi, dt, in); return; }
     if (b->bw_mode==6){ cas_update(pi, dt, in); return; }
+    if (b->bw_mode==7){ crt_update(pi, dt, in); return; }
     float mx=0, my=0; int k=in->keys;
     if (k&K_UP) my-=1; if (k&K_DOWN) my+=1; if (k&K_LEFT) mx-=1; if (k&K_RIGHT) mx+=1;
     if (mx!=0 || my!=0){
@@ -15010,6 +15056,333 @@ static void cas_render(int pi){
 #undef CRS
 }
 
+// ---------------------------------------------------------------------------
+// SUPER BUDDY CART (bw_mode 7, Nov 14 2026, Daniel): a kart racer in
+// the Mario Kart mould, small and honest — one single-screen circuit
+// (a rounded-rectangle loop in a 640x360 logical frame, like CASTLE's
+// rooms), 3 laps, 6 racers: your buddy plus five AI rivals with a
+// little rubber in their bands. Grass is the wall: leave the road
+// and you trudge. Three boost pads reward the racing line. The
+// records (best finish, best time) live on the Buddy as cp / cq.
+// ---------------------------------------------------------------------------
+#define CRT_OX 30000.0f
+#define CRT_OY 20000.0f
+#define CRT_MAXW 168
+static float CRT_WX[CRT_MAXW], CRT_WY[CRT_MAXW], CRT_CUM[CRT_MAXW + 1];
+static int CRT_N = 0;
+static float CRT_LEN = 0, CRT_OFF = 0;
+static float CRT_PAD[3][2];
+static float crt_wrap(float a){
+    if (a > PI) a -= 2*PI; if (a < -PI) a += 2*PI;
+    if (a > PI) a -= 2*PI; if (a < -PI) a += 2*PI;
+    return a;
+}
+static void crt_addpt(float x, float y){
+    if (CRT_N > 0){ float dx = x - CRT_WX[CRT_N-1], dy = y - CRT_WY[CRT_N-1];
+        if (dx*dx + dy*dy < 25) return; }
+    if (CRT_N < CRT_MAXW){ CRT_WX[CRT_N] = x; CRT_WY[CRT_N] = y; CRT_N++; }
+}
+static void crt_line(float x0, float y0, float x1, float y1){
+    float d = fsqrt((x1-x0)*(x1-x0) + (y1-y0)*(y1-y0));
+    int n = (int)(d / 11.0f); if (n < 1) n = 1;
+    for (int i = 0; i < n; i++){ float t = (float)i / (float)n;
+        crt_addpt(x0 + (x1-x0)*t, y0 + (y1-y0)*t); }
+}
+static void crt_arc(float cx, float cy, float a0, float a1){
+    int n = (int)(ffabs(a1-a0) * 70.0f / 11.0f); if (n < 2) n = 2;
+    for (int i = 0; i < n; i++){ float a = a0 + (a1-a0) * (float)i / (float)n;
+        crt_addpt(cx + 70.0f*fcos(a), cy + 70.0f*fsin(a)); }
+}
+static void crt_build(void){
+    if (CRT_N > 0) return;
+    crt_line(180, 290, 460, 290);          // bottom straight (start/finish)
+    crt_arc(460, 220, PI/2, 0);            // bottom-right corner
+    crt_line(530, 220, 530, 140);          // right straight
+    crt_arc(460, 140, 0, -PI/2);           // top-right corner
+    crt_line(460, 70, 180, 70);            // top straight
+    crt_arc(180, 140, -PI/2, -PI);         // top-left corner
+    crt_line(110, 140, 110, 220);          // left straight
+    crt_arc(180, 220, PI, PI/2);           // bottom-left corner, closing the loop
+    CRT_CUM[0] = 0;
+    for (int i = 1; i <= CRT_N; i++){ int a = i-1, b = i % CRT_N;
+        float dx = CRT_WX[b] - CRT_WX[a], dy = CRT_WY[b] - CRT_WY[a];
+        CRT_CUM[i] = CRT_CUM[i-1] + fsqrt(dx*dx + dy*dy); }
+    CRT_LEN = CRT_CUM[CRT_N];
+    { int bi = 0; float bd = 1e18f;        // the start line sits at (320, 290)
+      for (int i = 0; i < CRT_N; i++){ float dx = CRT_WX[i]-320, dy = CRT_WY[i]-290;
+          float d = dx*dx + dy*dy; if (d < bd){ bd = d; bi = i; } }
+      CRT_OFF = CRT_CUM[bi]; }
+    CRT_PAD[0][0] = 320; CRT_PAD[0][1] = 70;
+    CRT_PAD[1][0] = 530; CRT_PAD[1][1] = 180;
+    CRT_PAD[2][0] = 110; CRT_PAD[2][1] = 180;
+}
+static void crt_point_at(float ap, float lat, float *x, float *y, float *hx, float *hy){
+    ap = ap - (float)(int)(ap / CRT_LEN) * CRT_LEN; if (ap < 0) ap += CRT_LEN;
+    int i = 0; while (i < CRT_N-1 && CRT_CUM[i+1] <= ap) i++;
+    int j = (i + 1) % CRT_N;
+    float seg = CRT_CUM[i+1] - CRT_CUM[i];
+    float t = seg > 0? (ap - CRT_CUM[i]) / seg : 0;
+    float px = CRT_WX[i] + (CRT_WX[j] - CRT_WX[i]) * t;
+    float py = CRT_WY[i] + (CRT_WY[j] - CRT_WY[i]) * t;
+    float dx = CRT_WX[j] - CRT_WX[i], dy = CRT_WY[j] - CRT_WY[i];
+    float d = fsqrt(dx*dx + dy*dy); if (d < 0.001f) d = 1; dx /= d; dy /= d;
+    *x = px + (-dy) * lat; *y = py + dx * lat;
+    if (hx) *hx = dx; if (hy) *hy = dy;
+}
+static int crt_nearest_full(float x, float y){
+    int bi = 0; float bd = 1e18f;
+    for (int i = 0; i < CRT_N; i++){ float dx = x - CRT_WX[i], dy = y - CRT_WY[i];
+        float d = dx*dx + dy*dy; if (d < bd){ bd = d; bi = i; } }
+    return bi;
+}
+static void crt_track_prog(BwSim *S, int i){
+    int prev = S->crt_seg[i]; int bi = prev; float bd = 1e18f;
+    for (int k = -16; k <= 16; k++){ int idx = (prev + k) % CRT_N; if (idx < 0) idx += CRT_N;
+        float dx = S->crt_x[i] - CRT_WX[idx], dy = S->crt_y[i] - CRT_WY[idx];
+        float d = dx*dx + dy*dy; if (d < bd){ bd = d; bi = idx; } }
+    float d = CRT_CUM[bi] - CRT_CUM[prev];
+    if (d < -CRT_LEN/2) d += CRT_LEN; else if (d > CRT_LEN/2) d -= CRT_LEN;
+    S->crt_prog[i] += d; S->crt_seg[i] = bi;
+}
+static void crt_places(BwSim *S){
+    for (int i = 0; i < 6; i++){ int pl = 1;
+        for (int j = 0; j < 6; j++){ if (j == i) continue;
+            if (S->crt_finplace[j] && (!S->crt_finplace[i] || S->crt_finplace[j] < S->crt_finplace[i])) pl++;
+            else if (!S->crt_finplace[j] && !S->crt_finplace[i] && S->crt_prog[j] > S->crt_prog[i]) pl++;
+        }
+        S->crt_place[i] = pl; }
+}
+static void crt_enter(int pi){
+    BwSim *S = &BWS[pi]; Buddy *b = &G.bud[pi];
+    crt_build();
+    S->crt_state = 0; S->crt_t = 0; S->crt_count = 3.4f; S->crt_fint = 0;
+    S->crt_fincount = 0; S->crt_player_place = 0;
+    static const float SKILL[5] = { 0.95f, 0.97f, 0.99f, 1.005f, 1.02f };
+    static const int SLOT[6] = { 3, 0, 1, 2, 4, 5 };   // your buddy starts 4th: a race, not a parade
+    for (int i = 0; i < 6; i++){
+        int slot = SLOT[i];
+        float back = 30.0f + (float)(slot / 2) * 26.0f;
+        float lat = (slot % 2 == 0)? -15.0f : 15.0f;
+        float x, y, hx, hy; crt_point_at(CRT_OFF - back, lat, &x, &y, &hx, &hy);
+        S->crt_x[i] = x; S->crt_y[i] = y; S->crt_h[i] = fatan2(hy, hx);
+        S->crt_v[i] = 0; S->crt_prog[i] = -back; S->crt_boost[i] = 0;
+        S->crt_finplace[i] = 0; S->crt_place[i] = slot + 1;
+        S->crt_seg[i] = crt_nearest_full(x, y);
+        S->crt_off[i] = (i == 0)? 0 : ((i % 2 == 0)? -1 : 1) * (7.0f + (float)((i * 37) % 9));
+        S->crt_skill[i] = (i == 0)? 1.0f : SKILL[i-1] * (0.99f + rng_f() * 0.02f);
+    }
+    b->x = CRT_OX + S->crt_x[0]; b->y = CRT_OY + S->crt_y[0];
+    b->bw_x = b->x; b->bw_y = b->y; b->aim = S->crt_h[0];
+}
+static void crt_update(int pi, float dt, const BwIn *in){
+    BwSim *S = &BWS[pi]; Buddy *b = &G.bud[pi];
+    if (S->crt_state == 2){
+        S->crt_fint -= dt;
+        if (S->crt_fint <= 0){
+            int place = S->crt_player_place;
+            int tds = (int)(S->crt_t * 10.0f);
+            if (!b->crt_best_pos || place < b->crt_best_pos) b->crt_best_pos = place;
+            if (!b->crt_best_time || tds < b->crt_best_time) b->crt_best_time = tds;
+            bw_exit(pi, 0);
+            Player *p = &G.p[pi]; char buf[64]; char *q = buf;
+            q = sappend(q, "SUPER BUDDY CART: YOU FINISHED P");
+            q = sapp_int(q, place); q = sappend(q, "!"); *q = 0;
+            spawn_floater(p->x, p->y - 26, buf, COL(255, 220, 120));
+        }
+        return;
+    }
+    if (in->exit_){ bw_exit(pi, 0); return; }
+    if (S->crt_state == 0){
+        float prev = S->crt_count; S->crt_count -= dt;
+        if ((int)prev != (int)S->crt_count && S->crt_count > 0) sfx(6);
+        if (S->crt_count <= 0){ S->crt_state = 1; sfx(19); }
+        return;
+    }
+    S->crt_t += dt;
+    // ---- the player's kart
+    { int i = 0;
+      int bi = crt_nearest_full(S->crt_x[i], S->crt_y[i]);
+      float dxl = S->crt_x[i] - CRT_WX[bi], dyl = S->crt_y[i] - CRT_WY[bi];
+      int onroad = (dxl*dxl + dyl*dyl) <= 31.0f * 31.0f;
+      float vmax = onroad? 168.0f : 62.0f;
+      if (S->crt_boost[i] > 0){ S->crt_boost[i] -= dt; vmax *= 1.38f; }
+      float v = S->crt_v[i];
+      if (in->keys & K_UP){
+          if (v > vmax){ v -= 150.0f * dt; if (v < vmax) v = vmax; }
+          else { v += 175.0f * dt; if (v > vmax) v = vmax; }
+      } else if (in->keys & K_DOWN){
+          v -= 260.0f * dt; if (v < -58.0f) v = -58.0f;
+      } else {
+          if (v > 0){ v -= 90.0f * dt; if (v < 0) v = 0; }
+          else if (v < 0){ v += 90.0f * dt; if (v > 0) v = 0; }
+          if (v > vmax){ v -= 170.0f * dt; if (v < vmax) v = vmax; }
+      }
+      float steer = 0;
+      if (in->keys & K_LEFT) steer -= 1;
+      if (in->keys & K_RIGHT) steer += 1;
+      float sf = v / 55.0f; if (sf > 1) sf = 1; if (sf < -1) sf = -1;
+      S->crt_h[i] = crt_wrap(S->crt_h[i] + steer * 2.75f * sf * dt);
+      S->crt_v[i] = v;
+      S->crt_x[i] += fcos(S->crt_h[i]) * v * dt;
+      S->crt_y[i] += fsin(S->crt_h[i]) * v * dt;
+    }
+    // ---- the five rivals
+    for (int i = 1; i < 6; i++){
+        float tx, ty, hx, hy, t2x, t2y, h2x, h2y;
+        crt_point_at(CRT_OFF + S->crt_prog[i] + 48.0f, S->crt_off[i], &tx, &ty, &hx, &hy);
+        float des = fatan2(ty - S->crt_y[i], tx - S->crt_x[i]);
+        float dh = crt_wrap(des - S->crt_h[i]);
+        float turn = 3.3f * dt; if (dh > turn) dh = turn; if (dh < -turn) dh = -turn;
+        S->crt_h[i] = crt_wrap(S->crt_h[i] + dh);
+        crt_point_at(CRT_OFF + S->crt_prog[i] + 118.0f, S->crt_off[i], &t2x, &t2y, &h2x, &h2y);
+        float curve = ffabs(crt_wrap(fatan2(h2y, h2x) - fatan2(hy, hx)));
+        float tv = 158.0f * S->crt_skill[i] * (1.0f - (curve > 0.5f? 0.30f : curve * 0.30f));
+        float rubber = S->crt_prog[0] - S->crt_prog[i];
+        tv *= (rubber > 160.0f)? 1.05f : (rubber < -160.0f)? 0.95f : 1.0f;
+        { int bi = crt_nearest_full(S->crt_x[i], S->crt_y[i]);
+          float dxl = S->crt_x[i] - CRT_WX[bi], dyl = S->crt_y[i] - CRT_WY[bi];
+          if (dxl*dxl + dyl*dyl > 31.0f * 31.0f) tv *= 0.45f; }
+        if (S->crt_boost[i] > 0){ S->crt_boost[i] -= dt; tv *= 1.30f; }
+        float v = S->crt_v[i];
+        if (v < tv){ v += 130.0f * dt; if (v > tv) v = tv; }
+        else { v -= 210.0f * dt; if (v < tv) v = tv; }
+        S->crt_v[i] = v;
+        S->crt_x[i] += fcos(S->crt_h[i]) * v * dt;
+        S->crt_y[i] += fsin(S->crt_h[i]) * v * dt;
+    }
+    // ---- boost pads
+    for (int i = 0; i < 6; i++) for (int pd = 0; pd < 3; pd++){
+        float dx = S->crt_x[i] - CRT_PAD[pd][0], dy = S->crt_y[i] - CRT_PAD[pd][1];
+        if (dx*dx + dy*dy < 19*19 && S->crt_boost[i] <= 0){
+            S->crt_boost[i] = 0.9f;
+            if (i == 0){ qnote(0, 0, 76, 80, 3); qnote(0.07f, 0, 81, 80, 3); }
+        }
+    }
+    // ---- kart vs kart: soft bumps, nobody spins out
+    for (int i = 0; i < 6; i++) for (int j = i + 1; j < 6; j++){
+        float dx = S->crt_x[j] - S->crt_x[i], dy = S->crt_y[j] - S->crt_y[i];
+        float d2 = dx*dx + dy*dy;
+        if (d2 < 21*21 && d2 > 0.01f){ float d = fsqrt(d2);
+            float push = (21.0f - d) / 2.0f, ux = dx / d, uy = dy / d;
+            S->crt_x[i] -= ux * push; S->crt_y[i] -= uy * push;
+            S->crt_x[j] += ux * push; S->crt_y[j] += uy * push;
+            S->crt_v[i] *= 0.985f; S->crt_v[j] *= 0.985f; }
+    }
+    // ---- bounds, progress, finishes
+    for (int i = 0; i < 6; i++){
+        if (S->crt_x[i] < 18) S->crt_x[i] = 18; if (S->crt_x[i] > 622) S->crt_x[i] = 622;
+        if (S->crt_y[i] < 18) S->crt_y[i] = 18; if (S->crt_y[i] > 342) S->crt_y[i] = 342;
+        crt_track_prog(S, i);
+        if (!S->crt_finplace[i] && S->crt_prog[i] >= 3.0f * CRT_LEN){
+            S->crt_finplace[i] = ++S->crt_fincount;
+            if (i == 0){ S->crt_player_place = S->crt_finplace[i];
+                S->crt_state = 2; S->crt_fint = 3.4f;
+                qnote(0, 0, 60, 90, 6); qnote(0.12f, 0, 64, 90, 6);
+                qnote(0.24f, 0, 67, 90, 6); qnote(0.36f, 0, 72, 110, 10); }
+        }
+    }
+    crt_places(S);
+    b->x = CRT_OX + S->crt_x[0]; b->y = CRT_OY + S->crt_y[0];
+    b->bw_x = b->x; b->bw_y = b->y; b->aim = S->crt_h[0];
+}
+static void crt_render(int pi){
+    BwSim *S = &BWS[pi]; Buddy *b = &G.bud[pi];
+    int vx = G.view_x0, vy = G.view_y0, vw2 = G.view_w>0? G.view_w : VW, vh2 = G.view_h>0? G.view_h : VH;
+    float cs = (float)vw2 / 640.0f; { float csy = (float)vh2 / 360.0f; if (csy < cs) cs = csy; }
+    int ox = vx + (int)((vw2 - 640*cs) / 2), oy = vy + (int)((vh2 - 360*cs) / 2);
+#define KTX(lx) (ox + (int)((lx) * cs))
+#define KTY(ly) (oy + (int)((ly) * cs))
+#define KTS(v) ((int)((v) * cs) < 1 ? 1 : (int)((v) * cs))
+    rect_fill(vx, vy, vw2, vh2, COL(24, 90, 32));
+    for (int ty = 0; ty < 12; ty++) for (int tx = 0; tx < 20; tx++)
+        if ((tx + ty) & 1) rect_fill(KTX(tx*32), KTY(ty*32), KTS(32) + 1, KTS(32) + 1, COL(30, 104, 38));
+    rect_fill(KTX(142), KTY(102), KTS(356), KTS(156), COL(38, 122, 44));
+    draw_text_center(KTX(320), KTY(168), "SUPER BUDDY CART", 2, COL(46, 140, 52));
+    draw_text_center(KTX(320), KTY(192), "GRAND PRIX", 1, COL(46, 140, 52));
+    for (int pass = 0; pass < 2; pass++)
+        for (int i = 0; i < CRT_N; i++)
+            disc_fill(KTX(CRT_WX[i]), KTY(CRT_WY[i]), KTS(pass? 29 : 32), pass? COL(56, 56, 64) : COL(226, 226, 226));
+    for (int i = 0; i < CRT_N; i += 4)
+        disc_fill(KTX(CRT_WX[i]), KTY(CRT_WY[i]), KTS(2), COL(250, 220, 90));
+    for (int r2 = 0; r2 < 6; r2++) for (int c2 = 0; c2 < 2; c2++)
+        rect_fill(KTX(314 + c2*6), KTY(263 + r2*9), KTS(6) + 1, KTS(9) + 1,
+                  ((r2 + c2) & 1)? COL(16, 14, 24) : COL(245, 245, 245));
+    for (int pd = 0; pd < 3; pd++){
+        int px = KTX(CRT_PAD[pd][0]), py = KTY(CRT_PAD[pd][1]);
+        int horiz = (pd == 0);
+        int pw = horiz? KTS(38) : KTS(18), ph = horiz? KTS(18) : KTS(38);
+        rect_fill(px - pw/2, py - ph/2, pw, ph, COL(240, 130, 40));
+        rect_line(px - pw/2, py - ph/2, pw, ph, COL(255, 220, 120));
+        draw_text_center(px, py - 3, horiz? ">>" : "^^", 1, COL(255, 255, 255));
+    }
+    static const u32 KCOL[6] = { COL(230, 60, 50), COL(70, 130, 240), COL(250, 200, 50),
+                                 COL(90, 200, 90), COL(200, 90, 220), COL(240, 140, 40) };
+    { int order[6] = { 0, 1, 2, 3, 4, 5 };
+      for (int a = 0; a < 6; a++) for (int c2 = a + 1; c2 < 6; c2++)
+          if (S->crt_y[order[c2]] < S->crt_y[order[a]]){ int t = order[a]; order[a] = order[c2]; order[c2] = t; }
+      for (int oi = 0; oi < 6; oi++){ int i = order[oi];
+        float kx = S->crt_x[i], ky = S->crt_y[i], h = S->crt_h[i];
+        float ch = fcos(h), sh = fsin(h);
+        float nx = kx + ch*16, ny = ky + sh*16;
+        float lx = kx + ch*(-12) - sh*(-10), ly = ky + sh*(-12) + ch*(-10);
+        float rx = kx + ch*(-12) - sh*(10),  ry = ky + sh*(-12) + ch*(10);
+        ellipse_fill(KTX(kx) + KTS(2), KTY(ky) + KTS(3), KTS(13), KTS(7), COL(30, 30, 36));
+        if (S->crt_boost[i] > 0)
+            tri_fill(KTX(lx), KTY(ly), KTX(rx), KTY(ry), KTX(kx - ch*26), KTY(ky - sh*26), COL(255, 160, 60));
+        for (int w2 = 0; w2 < 4; w2++){
+            float wx2 = (w2 < 2)? 9 : -9, wy2 = (w2 % 2 == 0)? 10 : -10;
+            disc_fill(KTX(kx + ch*wx2 - sh*wy2), KTY(ky + sh*wx2 + ch*wy2), KTS(4), COL(16, 14, 24));
+        }
+        tri_fill(KTX(nx), KTY(ny), KTX(lx), KTY(ly), KTX(rx), KTY(ry), KCOL[i]);
+        { float bx2 = kx + ch*(-3), by2 = ky + sh*(-3);
+          disc_fill(KTX(bx2), KTY(by2), KTS(6), COL(24, 22, 34));
+          disc_fill(KTX(bx2), KTY(by2), KTS(4), i == 0? COL(255, 235, 200) : COL(240, 240, 240)); }
+        disc_fill(KTX(nx - ch*5), KTY(ny - sh*5), KTS(3), COL(255, 255, 255));
+        if (i == 0) draw_text_center(KTX(kx), KTY(ky) - KTS(26), "YOU", 1, COL(255, 255, 255));
+      } }
+    // HUD band
+    rect_fill(vx, vy, vw2, 24, COL(10, 12, 16));
+    { char buf[96]; char *q = buf;
+      int lap = (int)(S->crt_prog[0] / CRT_LEN) + 1; if (lap < 1) lap = 1; if (lap > 3) lap = 3;
+      int tds = (int)(S->crt_t * 10.0f); int sec = (tds / 10) % 60;
+      q = sappend(q, "LAP "); q = sapp_int(q, lap); q = sappend(q, "/3  POS ");
+      q = sapp_int(q, S->crt_place[0]); q = sappend(q, "/6  TIME ");
+      q = sapp_int(q, tds / 600); q = sappend(q, ":");
+      if (sec < 10) q = sappend(q, "0");
+      q = sapp_int(q, sec); q = sappend(q, "."); q = sapp_int(q, tds % 10); *q = 0;
+      draw_text(vx + 10, vy + 8, buf, 1, COL(255, 240, 200)); }
+    draw_text_center(vx + vw2/2, vy + 8, "SUPER BUDDY CART", 1, COL(250, 200, 50));
+    if (b->crt_best_pos){ char buf[48]; char *q = buf;
+        q = sappend(q, "BEST P"); q = sapp_int(q, b->crt_best_pos); *q = 0;
+        draw_text(vx + vw2 - 70, vy + 8, buf, 1, COL(200, 214, 200)); }
+    if (S->crt_state == 0){
+        int n = (int)(S->crt_count + 0.999f); if (n < 1) n = 1; if (n > 3) n = 3;
+        char nb[2] = { (char)('0' + n), 0 };
+        draw_text_center(vx + vw2/2, vy + vh2/2 - 66, nb, 8, COL(255, 220, 90));
+        draw_text_center(vx + vw2/2, vy + vh2/2 + 22, "GET READY...", 2, COL(255, 255, 255));
+    } else if (S->crt_state == 1 && S->crt_t < 0.9f){
+        draw_text_center(vx + vw2/2, vy + vh2/2 - 40, "GO!", 6, COL(120, 255, 120));
+    } else if (S->crt_state == 2){
+        rect_fill(vx + vw2/2 - 130, vy + vh2/2 - 44, 260, 84, COL(12, 14, 22));
+        rect_line(vx + vw2/2 - 130, vy + vh2/2 - 44, 260, 84, COL(250, 200, 50));
+        { char buf[64]; char *q = buf;
+          q = sappend(q, "FINISH!  P"); q = sapp_int(q, S->crt_player_place); *q = 0;
+          draw_text_center(vx + vw2/2, vy + vh2/2 - 32, buf, 3, COL(255, 240, 200)); }
+        { char buf[64]; char *q = buf; int tds = (int)(S->crt_t * 10.0f); int sec = (tds / 10) % 60;
+          q = sappend(q, "TIME "); q = sapp_int(q, tds / 600); q = sappend(q, ":");
+          if (sec < 10) q = sappend(q, "0");
+          q = sapp_int(q, sec); q = sappend(q, "."); q = sapp_int(q, tds % 10); *q = 0;
+          draw_text_center(vx + vw2/2, vy + vh2/2 + 8, buf, 1, COL(200, 214, 200)); }
+    }
+    if (S->note_t > 0){
+        rect_fill(vx, vy + vh2 - 22, vw2, 22, COL(10, 12, 10));
+        draw_text_center(vx + vw2/2, vy + vh2 - 15, S->note, 1, COL(220, 255, 220));
+    }
+#undef KTX
+#undef KTY
+#undef KTS
+}
+
 static void bw_render_modes(int pi){
     BwSim *S = &BWS[pi];
     Buddy *b=&G.bud[pi];
@@ -15019,6 +15392,7 @@ static void bw_render_modes(int pi){
     if (b->bw_mode==4){ craft_render(pi); return; }
     if (b->bw_mode==5){ tank_render(pi); return; }
     if (b->bw_mode==6){ cas_render(pi); return; }
+    if (b->bw_mode==7){ crt_render(pi); return; }
     u32 seed=(u32)b->bw_seed;
     G.camx=b->x; G.camy=b->y;
     // the view: full screen solo, or this player's split half in co-op
@@ -15711,6 +16085,22 @@ __attribute__((export_name("dbg_casmon"))) int exp_dbg_casmon(void){ int id = G.
 __attribute__((export_name("dbg_casbest"))) int exp_dbg_casbest(void){ int id = G.my_id>=0? G.my_id : 0; return G.bud[id].cas_best; }
 __attribute__((export_name("dbg_casx"))) int exp_dbg_casx(void){ int id = G.my_id>=0? G.my_id : 0; return (int)(G.bud[id].x - 20000.0f); }
 __attribute__((export_name("dbg_casy"))) int exp_dbg_casy(void){ int id = G.my_id>=0? G.my_id : 0; return (int)(G.bud[id].y - 20000.0f); }
+__attribute__((export_name("dbg_crtstate"))) int exp_dbg_crtstate(void){ int id = G.my_id>=0? G.my_id : 0; return BWS[id].crt_state; }
+__attribute__((export_name("dbg_crtpos"))) int exp_dbg_crtpos(void){ int id = G.my_id>=0? G.my_id : 0; return BWS[id].crt_place[0]; }
+__attribute__((export_name("dbg_crtlap"))) int exp_dbg_crtlap(void){ int id = G.my_id>=0? G.my_id : 0; int l = (int)(BWS[id].crt_prog[0] / CRT_LEN) + 1; if (l<1) l=1; if (l>3) l=3; return l; }
+__attribute__((export_name("dbg_crtprog"))) int exp_dbg_crtprog(void){ int id = G.my_id>=0? G.my_id : 0; return (int)BWS[id].crt_prog[0]; }
+__attribute__((export_name("dbg_crttime"))) int exp_dbg_crttime(void){ int id = G.my_id>=0? G.my_id : 0; return (int)(BWS[id].crt_t * 10.0f); }
+__attribute__((export_name("dbg_crtbest"))) int exp_dbg_crtbest(void){ int id = G.my_id>=0? G.my_id : 0; return G.bud[id].crt_best_pos; }
+__attribute__((export_name("dbg_crtbesttime"))) int exp_dbg_crtbesttime(void){ int id = G.my_id>=0? G.my_id : 0; return G.bud[id].crt_best_time; }
+__attribute__((export_name("dbg_crtskip"))) int exp_dbg_crtskip(void){ int id = G.my_id>=0? G.my_id : 0; BwSim *S = &BWS[id];
+    if (G.bud[id].bw_mode != 7) return -1;
+    // park the player a short straight from home on the final lap
+    S->crt_state = 1; S->crt_count = 0;
+    S->crt_prog[0] = 3.0f * CRT_LEN - 130.0f;
+    { float x, y, hx, hy; crt_point_at(CRT_OFF + S->crt_prog[0], 0, &x, &y, &hx, &hy);
+      S->crt_x[0] = x; S->crt_y[0] = y; S->crt_h[0] = fatan2(hy, hx); S->crt_v[0] = 120.0f;
+      S->crt_seg[0] = crt_nearest_full(x, y); }
+    return (int)S->crt_prog[0]; }
 __attribute__((export_name("dbg_arcgate"))) int exp_dbg_arcgate(void){ int id = G.my_id>=0? G.my_id : 0; return arcgate[id]; }
 __attribute__((export_name("dbg_jet"))) int exp_dbg_jet(void){ int id = G.my_id>=0? G.my_id : 0; return G.p[id].bean_jet>0? 1 : (G.p[id].jet_fall>0? 2 : 0); }
 __attribute__((export_name("dbg_givebean"))) void exp_dbg_givebean(void){ int id = G.my_id>=0? G.my_id : 0; G.p[id].beans++; }

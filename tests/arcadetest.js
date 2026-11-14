@@ -53,8 +53,9 @@ function T(name, cond, extra) { if (cond) { pass++; } else { fail++; console.log
   T('entered the arcade', (await poll('dbg_inarcade', v => v === 1, 4000)) === 1, await call('dbg_inarcade'));
   T('still in the mall safe zone', (await call('dbg_mall')) === 1, await call('dbg_mall'));
 
-  // cabinet 4: TANK RESCUE (cabinets re-spaced Nov 14 for the fifth box)
-  await call('dbg_tp', 146, -12108); await sleep(200);
+  // cabinet 4: TANK RESCUE — island row, west box since the Nov 14
+  // two-row rework (3 north wall + 3 island, SUPER BUDDY CART sixth)
+  await call('dbg_tp', -256, -11898); await sleep(200);
   T('standing at the tank cabinet', (await call('dbg_cabinet')) === 3, await call('dbg_cabinet'));
   await key('KeyE', 250);
   T('tank cabinet panel opened', (await poll('dbg_arcgate', v => v === 1, 3000)) === 1, await call('dbg_arcgate'));
@@ -81,10 +82,10 @@ function T(name, cond, extra) { if (cond) { pass++; } else { fail++; console.log
   T('quitting the tank returns you to the arcade', (await call('dbg_inarcade')) === 1 && (await call('dbg_bwmode')) === -1,
     'arc=' + (await call('dbg_inarcade')) + ' mode=' + (await call('dbg_bwmode')));
   const ry = await call('dbg_py');
-  T('...right back at the tank cabinet', Math.abs(ry - (-12100)) < 130, 'py=' + ry);
+  T('...right back at the tank cabinet', Math.abs(ry - (-11890)) < 130, 'py=' + ry);
 
-  // cabinet 1: ENTRANCES still launches from its box
-  await call('dbg_tp', -292, -12108); await sleep(200);
+  // cabinet 1: ENTRANCES still launches from its (re-spaced) box
+  await call('dbg_tp', -256, -12108); await sleep(200);
   T('standing at the entrances cabinet', (await call('dbg_cabinet')) === 0, await call('dbg_cabinet'));
   await key('KeyE', 250);
   T('entrances cabinet panel opened', (await poll('dbg_arcgate', v => v === 1, 3000)) === 1, await call('dbg_arcgate'));

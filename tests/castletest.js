@@ -58,7 +58,7 @@ function T(name, cond, extra) { if (cond) { pass++; } else { fail++; console.log
   await call('dbg_tp', 230, -5976); await sleep(200);
   await key('KeyE', 250);
   T('entered the arcade', (await poll('dbg_inarcade', v => v === 1, 4000)) === 1, await call('dbg_inarcade'));
-  await call('dbg_tp', 292, -12108); await sleep(200);
+  await call('dbg_tp', 0, -11898); await sleep(200);
   T('standing at the CASTLE cabinet', (await call('dbg_cabinet')) === 4, await call('dbg_cabinet'));
   await key('KeyE', 250);
   T('castle cabinet panel opened', (await poll('dbg_arcgate', v => v === 1, 3000)) === 1, await call('dbg_arcgate'));
@@ -113,13 +113,13 @@ function T(name, cond, extra) { if (cond) { pass++; } else { fail++; console.log
   T('the key opens the gate (escape!)', ((await call('dbg_casitems')) & 4) === 4,
     'items=' + (await call('dbg_casitems')));
   T('escape ends the run', (await poll('dbg_bwmode', v => v === -1, 6000)) === -1, await call('dbg_bwmode'));
-  T('back in the arcade at the castle cabinet', (await call('dbg_inarcade')) === 1 && Math.abs((await call('dbg_px')) - 292) < 60,
+  T('back in the arcade at the castle cabinet', (await call('dbg_inarcade')) === 1 && Math.abs((await call('dbg_px')) - 0) < 60,
     'arc=' + (await call('dbg_inarcade')) + ' px=' + (await call('dbg_px')));
   const best = await call('dbg_casbest');
   T('the escape score is the saved best', best >= 210, 'best=' + best);
 
   // relaunch and quit with Escape: a clean exit, no fainting
-  await call('dbg_tp', 292, -12108); await sleep(200);
+  await call('dbg_tp', 0, -11898); await sleep(200);
   await key('KeyE', 250);
   await key('Space', 300);
   T('CASTLE relaunched', (await poll('dbg_bwmode', v => v === 6, 4000)) === 6, await call('dbg_bwmode'));
