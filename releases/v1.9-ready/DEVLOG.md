@@ -16,4 +16,12 @@ The karts have drivers now, and the drivers are the Banzai Buddies. All of them.
 - **The enemy has been told to calm down**: slower fire, softer shells, a player cannon that bites harder, and wrenches that patch +40.
 - **GRENADES.** The WALL button (F, or pad X) swaps between the cannon and the grenade pouch. Lobbed, area blast, clears cover, settles arguments. Mind the splash up close. Deliveries and wrench pickups restock the pouch.
 
+**SAME AFTERNOON — FIRE IS GO, AND THE TRACK GOT A MAKEOVER:**
+
+- **New way to drive: hold FIRE to go.** The shoot button is the gas now — the stick (or the arrows) is purely for steering. No more holding up until your thumb files a complaint. Down still brakes and reverses; let go of FIRE and you coast.
+- **The circuit is prettier**: a gradient sky with drifting clouds and a haloed sun, a far hill line behind the trees, blossom trees in the infield, a manicured apron around the asphalt, and crisp white edge lines inside the rumble strips.
+- **The karts got shaded** — sunlit tops, dark skirts, drivers bobbing at speed — and working engines now puff little exhaust clouds. Boost pads pulse and glow.
+- **Race day dressing**: flags waving on the start gantry, a red-and-white awning on the grandstand, and confetti over the finish.
+- **The race talks to you**: gain a place and it says so ("UP TO P1!"), and the final lap gets its own shout.
+
 SQUASH BUGS. WEAR THE EVIDENCE.
