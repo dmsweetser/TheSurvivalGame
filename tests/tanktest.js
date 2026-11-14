@@ -29,11 +29,14 @@ function T(name, cond, extra) { if (cond) { pass++; } else { fail++; console.log
   await call('dbg_adopt', 0);
   T('buddy adopted', (await call('dbg_buddy')) !== 0, await call('dbg_buddy'));
 
-  // straight into the arcade, then the tank cabinet (new centre x=219)
+  // straight into the arcade, then the tank cabinet. Two-row layout
+  // (Nov 14): TANK RESCUE is island-row west — its interact point is
+  // (ARC_SX[3], ARC_CY + ARC_ROWY[3] + 58) = (-256, -11898). The old
+  // single-row spot (219, -12108) now lands on BUDDY CRAFT's point.
   await call('dbg_arcade'); await sleep(300);
   T('in the arcade', (await call('dbg_inarcade')) === 1, await call('dbg_inarcade'));
-  await call('dbg_tp', 219, -12108); await sleep(200);
-  T('standing at the (widened) tank cabinet', (await call('dbg_cabinet')) === 3, await call('dbg_cabinet'));
+  await call('dbg_tp', -256, -11898); await sleep(200);
+  T('standing at the tank cabinet', (await call('dbg_cabinet')) === 3, await call('dbg_cabinet'));
   await key('KeyE', 250);
   T('tank cabinet panel opened', (await poll('dbg_arcgate', v => v === 1, 3000)) === 1, await call('dbg_arcgate'));
   await key('Space', 300);
