@@ -53,13 +53,11 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   // co-op on, run started, P2 in — the co-op row sits just above the
   // NAME field at the menu's bottom; its index shifts with the
   // device in use, so walk to the wrap point and step back one row
-  { let prev = await call('dbg_menusel'), bottom = prev, wrapped = false;
-    for (let i = 0; i < 10; i++) { await key('ArrowDown', 160); const s = await call('dbg_menusel');
-      if (s <= prev) { bottom = prev; wrapped = true; break; } prev = s; }
-    if (wrapped) { for (let i = 0; i < bottom - 1; i++) await key('ArrowDown', 160); }
-    else { await key('ArrowUp', 160); } }
+  // keyboard-flavoured rows: START, HOW TO PLAY, DIFFICULTY, ZEN, EDDIE,
+  // 2P CO-OP, NAME — five downs from the top lands on 2P CO-OP
+  for (let i = 0; i < 5; i++) await key('ArrowDown', 160);
   await key('Space', 300);
-  for (let i = 0; i < 6; i++) await key('ArrowUp', 160);
+  for (let i = 0; i < 5; i++) await key('ArrowUp', 160);
   await key('Space', 500);
   if ((await call('dbg_state')) !== 1) { await key('Enter', 500); }
   ok((await call('dbg_state')) === 1, 'co-op run started');
@@ -116,9 +114,12 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   await holdBtn(1, 15, 750);
   const b2x1 = await call('dbg_bwx2');
   ok(b2x1 > b2x0 + 15, 'P2 buddy roams on pad input', b2x0 + ' -> ' + b2x1);
-  // P2 leaves with pad Start — and the run must NOT pause
-  await btn(1, 9, 180);
-  ok((await poll('dbg_bwstate2', v => v === 0, 5000)) === 0, 'P2 Start leaves Banzai World');
+  // P2 leaves via the BW menu: Start opens it, Down x2 picks LEAVE, A confirms
+  // — and the run must NOT pause
+  await btn(1, 9, 180); await sleep(250);
+  await btn(1, 13, 150); await btn(1, 13, 150);
+  await btn(1, 0, 180);
+  ok((await poll('dbg_bwstate2', v => v === 0, 5000)) === 0, 'P2 leaves Banzai World via the BW menu');
   ok((await call('dbg_state')) === 1, 'run still playing (Start did not pause)', await call('dbg_state'));
 
   console.log('\nsplitbw: ' + pass + ' passed, ' + fail + ' failed');

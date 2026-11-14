@@ -9839,6 +9839,10 @@ typedef struct {
     int crt_state;                 // 0 countdown, 1 racing, 2 finished (player home)
     float crt_t, crt_count, crt_fint;
     int crt_fincount, crt_player_place;
+    int crt_duo;                 // head-to-head kart: the other player's index, -1 solo
+    int crt_guest;               // 0 = not a race guest; else the host's pi + 1 (this sim only ferries input/view)
+    int crt_hfin[2];             // human finish places: [0] host kart, [1] guest kart; 0 until home
+    float crt_endt;              // after the first human finishes, seconds before the race closes (-1 = not armed)
     float crt_x[6], crt_y[6], crt_h[6], crt_v[6], crt_prog[6], crt_boost[6];
     int crt_seg[6], crt_place[6], crt_finplace[6];
     float crt_off[6], crt_skill[6];
@@ -10154,7 +10158,7 @@ static void bw_enter_mode(int pi, int mode){
     else if (mode==4){ char *q=S->note; q=sappend(q, "BUDDY CRAFT. "); q=sappend(q, lbl_int()); q=sappend(q, " GATHERS + RESTS. "); q=sappend(q, lbl_fire()); q=sappend(q, " SWINGS. "); q=sappend(q, lbl_wall()); q=sappend(q, " CRAFTS."); *q=0; }
     else if (mode==5){ char *q=S->note; q=sappend(q, "TANK RESCUE. "); q=sappend(q, lbl_fire()); q=sappend(q, " FIRES THE CANNON. FREE CAPTIVES, DROP AT PADS."); *q=0; }
     else if (mode==6){ char *q=S->note; q=sappend(q, "CASTLE. TRAPPED! RUN INTO THINGS TO TAKE OR FIGHT. FIND THE KEY, ESCAPE!"); *q=0; }
-    else if (mode==7){ char *q=S->note; q=sappend(q, "SUPER BUDDY CART. 3 LAPS. UP IS THE GAS - STEER, RIDE THE BOOST PADS, WIN!"); *q=0; }
+    else if (mode==7){ char *q=S->note; q=sappend(q, S->crt_duo >= 0? "SUPER BUDDY CART. HEAD-TO-HEAD! 3 LAPS. UP IS THE GAS - BEAT YOUR FELLOW HUMAN!" : "SUPER BUDDY CART. 3 LAPS. UP IS THE GAS - STEER, RIDE THE BOOST PADS, WIN!"); *q=0; }
     else if (mode==1 && b->story_bits==(1<<0)) scpy(S->note, "STORY MODE. PATCH VILLAGE LIES NORTH-WEST.", 72);
     else if (mode==1) scpy(S->note, "BACK TO THE STORY. THE MEADOW REMEMBERS.", 72);
     else scpy(S->note, "BANZAI WORLD. WATCH FOR HACKERS.", 72);
@@ -15152,11 +15156,14 @@ static void crt_places(BwSim *S){
         }
         S->crt_place[i] = pl; }
 }
+static BwIn crt_gin[MAXP];   // a race guest's latest input, keyed by host pi
 static void crt_enter(int pi){
     BwSim *S = &BWS[pi]; Buddy *b = &G.bud[pi];
     crt_build();
     S->crt_state = 0; S->crt_t = 0; S->crt_count = 3.4f; S->crt_fint = 0;
     S->crt_fincount = 0; S->crt_player_place = 0;
+    S->crt_duo = -1; S->crt_guest = 0;
+    S->crt_hfin[0] = 0; S->crt_hfin[1] = 0; S->crt_endt = -1.0f;
     static const float SKILL[5] = { 0.95f, 0.97f, 0.99f, 1.005f, 1.02f };
     static const int SLOT[6] = { 3, 0, 1, 2, 4, 5 };   // your buddy starts 4th: a race, not a parade
     for (int i = 0; i < 6; i++){
@@ -15173,25 +15180,111 @@ static void crt_enter(int pi){
     }
     b->x = CRT_OX + S->crt_x[0]; b->y = CRT_OY + S->crt_y[0];
     b->bw_x = b->x; b->bw_y = b->y; b->aim = S->crt_h[0];
+    // head-to-head: if the other local player is standing around the mall
+    // with a buddy, they get pulled onto the grid as kart 1 — one race,
+    // two humans, and the loser hears about it at dinner
+    if (G.net_mode == NET_OFF || (G.net_mode == NET_HOST && !any_remote_connected())){
+        int other = (pi == G.my_id)? G.p2_slot : G.my_id;
+        if (other >= 0 && other != pi){
+            Player *op = &G.p[other]; Buddy *ob = &G.bud[other]; BwSim *OS = &BWS[other];
+            if (op->connected && ob->active && !ob->fainted && !ob->in_bw && op->in_mall){
+                S->crt_duo = other;
+                crt_gin[pi] = (BwIn){0};
+                OS->crt_guest = pi + 1; OS->crt_duo = -1;
+                OS->from_arcade = 1; OS->arc_cab = 5; OS->bw_menu = 0; OS->bat.active = 0;
+                arcgate[other] = 0; bwgate[other] = 0;
+                ob->bw_mode = 7; ob->in_bw = 1;
+                ob->x = CRT_OX + S->crt_x[1]; ob->y = CRT_OY + S->crt_y[1];
+                ob->bw_x = ob->x; ob->bw_y = ob->y; ob->aim = S->crt_h[1];
+            }
+        }
+    }
+}
+
+// one kart under human hands (host = kart 0, guest = kart 1)
+static void crt_drive_kart(BwSim *S, int i, int keys, float dt){
+    int bi = crt_nearest_full(S->crt_x[i], S->crt_y[i]);
+    float dxl = S->crt_x[i] - CRT_WX[bi], dyl = S->crt_y[i] - CRT_WY[bi];
+    int onroad = (dxl*dxl + dyl*dyl) <= 31.0f * 31.0f;
+    float vmax = onroad? 168.0f : 62.0f;
+    if (S->crt_boost[i] > 0){ S->crt_boost[i] -= dt; vmax *= 1.38f; }
+    float v = S->crt_v[i];
+    if (keys & K_UP){
+        if (v > vmax){ v -= 150.0f * dt; if (v < vmax) v = vmax; }
+        else { v += 175.0f * dt; if (v > vmax) v = vmax; }
+    } else if (keys & K_DOWN){
+        v -= 260.0f * dt; if (v < -58.0f) v = -58.0f;
+    } else {
+        if (v > 0){ v -= 90.0f * dt; if (v < 0) v = 0; }
+        else if (v < 0){ v += 90.0f * dt; if (v > 0) v = 0; }
+        if (v > vmax){ v -= 170.0f * dt; if (v < vmax) v = vmax; }
+    }
+    float steer = 0;
+    if (keys & K_LEFT) steer -= 1;
+    if (keys & K_RIGHT) steer += 1;
+    float sf = v / 55.0f; if (sf > 1) sf = 1; if (sf < -1) sf = -1;
+    S->crt_h[i] = crt_wrap(S->crt_h[i] + steer * 2.75f * sf * dt);
+    S->crt_v[i] = v;
+    S->crt_x[i] += fcos(S->crt_h[i]) * v * dt;
+    S->crt_y[i] += fsin(S->crt_h[i]) * v * dt;
+}
+static void crt_save_record(int who, int place, int tds){
+    if (place <= 0) return;
+    Buddy *bb = &G.bud[who];
+    if (!bb->crt_best_pos || place < bb->crt_best_pos) bb->crt_best_pos = place;
+    if (!bb->crt_best_time || tds < bb->crt_best_time) bb->crt_best_time = tds;
+}
+static void crt_finish_floater(int who, int place){
+    Player *p = &G.p[who]; char buf[64]; char *q = buf;
+    q = sappend(q, "SUPER BUDDY CART: YOU FINISHED P");
+    q = sapp_int(q, place); q = sappend(q, "!"); *q = 0;
+    spawn_floater(p->x, p->y - 26, buf, COL(255, 220, 120));
 }
 static void crt_update(int pi, float dt, const BwIn *in){
     BwSim *S = &BWS[pi]; Buddy *b = &G.bud[pi];
-    if (S->crt_state == 2){
-        S->crt_fint -= dt;
-        if (S->crt_fint <= 0){
-            int place = S->crt_player_place;
-            int tds = (int)(S->crt_t * 10.0f);
-            if (!b->crt_best_pos || place < b->crt_best_pos) b->crt_best_pos = place;
-            if (!b->crt_best_time || tds < b->crt_best_time) b->crt_best_time = tds;
+    if (S->crt_guest){
+        // this player is riding in the host's race: ferry the input over,
+        // and let them bail out on their own (their kart races on as a rival)
+        int host = S->crt_guest - 1;
+        crt_gin[host] = *in;
+        if (in->exit_){
+            BwSim *HS = &BWS[host];
+            if (HS->crt_duo == pi) HS->crt_duo = -1;
+            S->crt_guest = 0;
             bw_exit(pi, 0);
-            Player *p = &G.p[pi]; char buf[64]; char *q = buf;
-            q = sappend(q, "SUPER BUDDY CART: YOU FINISHED P");
-            q = sapp_int(q, place); q = sappend(q, "!"); *q = 0;
-            spawn_floater(p->x, p->y - 26, buf, COL(255, 220, 120));
+            Player *p = &G.p[pi];
+            spawn_floater(p->x, p->y - 26, "YOU LEFT THE RACE", COL(255, 200, 150));
         }
         return;
     }
-    if (in->exit_){ bw_exit(pi, 0); return; }
+    if (S->crt_state == 2){
+        S->crt_fint -= dt;
+        if (S->crt_fint <= 0){
+            int tds = (int)(S->crt_t * 10.0f);
+            int guest = S->crt_duo, gplace = S->crt_hfin[1];
+            crt_save_record(pi, S->crt_hfin[0], tds);
+            if (guest >= 0){
+                BwSim *GS2 = &BWS[guest];
+                crt_save_record(guest, gplace, tds);
+                GS2->crt_guest = 0; S->crt_duo = -1;
+                bw_exit(guest, 0);
+                crt_finish_floater(guest, gplace);
+            }
+            bw_exit(pi, 0);
+            crt_finish_floater(pi, S->crt_hfin[0]);
+        }
+        return;
+    }
+    if (in->exit_){
+        if (S->crt_duo >= 0){
+            int guest = S->crt_duo; BwSim *GS2 = &BWS[guest];
+            GS2->crt_guest = 0; S->crt_duo = -1;
+            bw_exit(guest, 0);
+            Player *gp = &G.p[guest];
+            spawn_floater(gp->x, gp->y - 26, "THE HOST LEFT THE RACE", COL(255, 200, 150));
+        }
+        bw_exit(pi, 0); return;
+    }
     if (S->crt_state == 0){
         float prev = S->crt_count; S->crt_count -= dt;
         if ((int)prev != (int)S->crt_count && S->crt_count > 0) sfx(6);
@@ -15199,35 +15292,11 @@ static void crt_update(int pi, float dt, const BwIn *in){
         return;
     }
     S->crt_t += dt;
-    // ---- the player's kart
-    { int i = 0;
-      int bi = crt_nearest_full(S->crt_x[i], S->crt_y[i]);
-      float dxl = S->crt_x[i] - CRT_WX[bi], dyl = S->crt_y[i] - CRT_WY[bi];
-      int onroad = (dxl*dxl + dyl*dyl) <= 31.0f * 31.0f;
-      float vmax = onroad? 168.0f : 62.0f;
-      if (S->crt_boost[i] > 0){ S->crt_boost[i] -= dt; vmax *= 1.38f; }
-      float v = S->crt_v[i];
-      if (in->keys & K_UP){
-          if (v > vmax){ v -= 150.0f * dt; if (v < vmax) v = vmax; }
-          else { v += 175.0f * dt; if (v > vmax) v = vmax; }
-      } else if (in->keys & K_DOWN){
-          v -= 260.0f * dt; if (v < -58.0f) v = -58.0f;
-      } else {
-          if (v > 0){ v -= 90.0f * dt; if (v < 0) v = 0; }
-          else if (v < 0){ v += 90.0f * dt; if (v > 0) v = 0; }
-          if (v > vmax){ v -= 170.0f * dt; if (v < vmax) v = vmax; }
-      }
-      float steer = 0;
-      if (in->keys & K_LEFT) steer -= 1;
-      if (in->keys & K_RIGHT) steer += 1;
-      float sf = v / 55.0f; if (sf > 1) sf = 1; if (sf < -1) sf = -1;
-      S->crt_h[i] = crt_wrap(S->crt_h[i] + steer * 2.75f * sf * dt);
-      S->crt_v[i] = v;
-      S->crt_x[i] += fcos(S->crt_h[i]) * v * dt;
-      S->crt_y[i] += fsin(S->crt_h[i]) * v * dt;
-    }
-    // ---- the five rivals
-    for (int i = 1; i < 6; i++){
+    // ---- the human karts: host on kart 0, the co-op guest on kart 1
+    crt_drive_kart(S, 0, in->keys, dt);
+    if (S->crt_duo >= 0) crt_drive_kart(S, 1, crt_gin[pi].keys, dt);
+    // ---- the rivals (one fewer when a guest is driving kart 1)
+    for (int i = (S->crt_duo >= 0? 2 : 1); i < 6; i++){
         float tx, ty, hx, hy, t2x, t2y, h2x, h2y;
         crt_point_at(CRT_OFF + S->crt_prog[i] + 48.0f, S->crt_off[i], &tx, &ty, &hx, &hy);
         float des = fatan2(ty - S->crt_y[i], tx - S->crt_x[i]);
@@ -15255,7 +15324,7 @@ static void crt_update(int pi, float dt, const BwIn *in){
         float dx = S->crt_x[i] - CRT_PAD[pd][0], dy = S->crt_y[i] - CRT_PAD[pd][1];
         if (dx*dx + dy*dy < 19*19 && S->crt_boost[i] <= 0){
             S->crt_boost[i] = 0.9f;
-            if (i == 0){ qnote(0, 0, 76, 80, 3); qnote(0.07f, 0, 81, 80, 3); }
+            if (i == 0 || (i == 1 && S->crt_duo >= 0)){ qnote(0, 0, 76, 80, 3); qnote(0.07f, 0, 81, 80, 3); }
         }
     }
     // ---- kart vs kart: soft bumps, nobody spins out
@@ -15275,18 +15344,35 @@ static void crt_update(int pi, float dt, const BwIn *in){
         crt_track_prog(S, i);
         if (!S->crt_finplace[i] && S->crt_prog[i] >= 3.0f * CRT_LEN){
             S->crt_finplace[i] = ++S->crt_fincount;
-            if (i == 0){ S->crt_player_place = S->crt_finplace[i];
-                S->crt_state = 2; S->crt_fint = 3.4f;
-                qnote(0, 0, 60, 90, 6); qnote(0.12f, 0, 64, 90, 6);
-                qnote(0.24f, 0, 67, 90, 6); qnote(0.36f, 0, 72, 110, 10); }
+            int human = (i == 0)? 0 : (i == 1 && S->crt_duo >= 0)? 1 : -1;
+            if (human >= 0){
+                S->crt_hfin[human] = S->crt_finplace[i];
+                if (S->crt_endt < 0) S->crt_endt = 8.0f;   // first human home starts the clock
+            }
         }
     }
     crt_places(S);
+    // the race closes when every human is home, or the clock runs out
+    if (S->crt_endt >= 0) S->crt_endt -= dt;
+    { int all_home = S->crt_hfin[0] && (S->crt_duo < 0 || S->crt_hfin[1]);
+      int timed_out = S->crt_endt <= 0 && S->crt_endt > -50.0f && (S->crt_hfin[0] || S->crt_hfin[1]);
+      if (all_home || timed_out){
+          if (!S->crt_hfin[0]) S->crt_hfin[0] = S->crt_place[0];
+          if (S->crt_duo >= 0 && !S->crt_hfin[1]) S->crt_hfin[1] = S->crt_place[1];
+          S->crt_player_place = S->crt_hfin[0];
+          S->crt_state = 2; S->crt_fint = 3.4f;
+          qnote(0, 0, 60, 90, 6); qnote(0.12f, 0, 64, 90, 6);
+          qnote(0.24f, 0, 67, 90, 6); qnote(0.36f, 0, 72, 110, 10);
+      } }
     b->x = CRT_OX + S->crt_x[0]; b->y = CRT_OY + S->crt_y[0];
     b->bw_x = b->x; b->bw_y = b->y; b->aim = S->crt_h[0];
+    if (S->crt_duo >= 0){ Buddy *gb = &G.bud[S->crt_duo];
+        gb->x = CRT_OX + S->crt_x[1]; gb->y = CRT_OY + S->crt_y[1];
+        gb->bw_x = gb->x; gb->bw_y = gb->y; gb->aim = S->crt_h[1]; }
 }
-static void crt_render(int pi){
-    BwSim *S = &BWS[pi]; Buddy *b = &G.bud[pi];
+static void crt_render_view(int sim_pi, int viewer_pi){
+    BwSim *S = &BWS[sim_pi]; Buddy *b = &G.bud[viewer_pi];
+    int vk = (viewer_pi == sim_pi)? 0 : 1;   // the kart this viewer is driving
     int vx = G.view_x0, vy = G.view_y0, vw2 = G.view_w>0? G.view_w : VW, vh2 = G.view_h>0? G.view_h : VH;
     float cs = (float)vw2 / 640.0f; { float csy = (float)vh2 / 360.0f; if (csy < cs) cs = csy; }
     int ox = vx + (int)((vw2 - 640*cs) / 2), oy = vy + (int)((vh2 - 360*cs) / 2);
@@ -15336,23 +15422,24 @@ static void crt_render(int pi){
         tri_fill(KTX(nx), KTY(ny), KTX(lx), KTY(ly), KTX(rx), KTY(ry), KCOL[i]);
         { float bx2 = kx + ch*(-3), by2 = ky + sh*(-3);
           disc_fill(KTX(bx2), KTY(by2), KTS(6), COL(24, 22, 34));
-          disc_fill(KTX(bx2), KTY(by2), KTS(4), i == 0? COL(255, 235, 200) : COL(240, 240, 240)); }
+          disc_fill(KTX(bx2), KTY(by2), KTS(4), i == vk? COL(255, 235, 200) : COL(240, 240, 240)); }
         disc_fill(KTX(nx - ch*5), KTY(ny - sh*5), KTS(3), COL(255, 255, 255));
-        if (i == 0) draw_text_center(KTX(kx), KTY(ky) - KTS(26), "YOU", 1, COL(255, 255, 255));
+        if (i == vk) draw_text_center(KTX(kx), KTY(ky) - KTS(26), "YOU", 1, COL(255, 255, 255));
+        else if (S->crt_duo >= 0 && i == 1 - vk) draw_text_center(KTX(kx), KTY(ky) - KTS(26), vk == 0? "P2" : "P1", 1, COL(255, 255, 255));
       } }
     // HUD band
     rect_fill(vx, vy, vw2, 24, COL(10, 12, 16));
     { char buf[96]; char *q = buf;
-      int lap = (int)(S->crt_prog[0] / CRT_LEN) + 1; if (lap < 1) lap = 1; if (lap > 3) lap = 3;
+      int lap = (int)(S->crt_prog[vk] / CRT_LEN) + 1; if (lap < 1) lap = 1; if (lap > 3) lap = 3;
       int tds = (int)(S->crt_t * 10.0f); int sec = (tds / 10) % 60;
       q = sappend(q, "LAP "); q = sapp_int(q, lap); q = sappend(q, "/3  POS ");
-      q = sapp_int(q, S->crt_place[0]); q = sappend(q, "/6  TIME ");
+      q = sapp_int(q, S->crt_place[vk]); q = sappend(q, "/6  TIME ");
       q = sapp_int(q, tds / 600); q = sappend(q, ":");
       if (sec < 10) q = sappend(q, "0");
       q = sapp_int(q, sec); q = sappend(q, "."); q = sapp_int(q, tds % 10); *q = 0;
       draw_text(vx + 10, vy + 8, buf, 1, COL(255, 240, 200)); }
-    draw_text_center(vx + vw2/2, vy + 8, "SUPER BUDDY CART", 1, COL(250, 200, 50));
-    if (b->crt_best_pos){ char buf[48]; char *q = buf;
+    if (vw2 >= 600) draw_text_center(vx + vw2/2, vy + 8, "SUPER BUDDY CART", 1, COL(250, 200, 50));
+    if (vw2 >= 600 && b->crt_best_pos){ char buf[48]; char *q = buf;
         q = sappend(q, "BEST P"); q = sapp_int(q, b->crt_best_pos); *q = 0;
         draw_text(vx + vw2 - 70, vy + 8, buf, 1, COL(200, 214, 200)); }
     if (S->crt_state == 0){
@@ -15366,7 +15453,7 @@ static void crt_render(int pi){
         rect_fill(vx + vw2/2 - 130, vy + vh2/2 - 44, 260, 84, COL(12, 14, 22));
         rect_line(vx + vw2/2 - 130, vy + vh2/2 - 44, 260, 84, COL(250, 200, 50));
         { char buf[64]; char *q = buf;
-          q = sappend(q, "FINISH!  P"); q = sapp_int(q, S->crt_player_place); *q = 0;
+          q = sappend(q, "FINISH!  P"); q = sapp_int(q, S->crt_hfin[vk]); *q = 0;
           draw_text_center(vx + vw2/2, vy + vh2/2 - 32, buf, 3, COL(255, 240, 200)); }
         { char buf[64]; char *q = buf; int tds = (int)(S->crt_t * 10.0f); int sec = (tds / 10) % 60;
           q = sappend(q, "TIME "); q = sapp_int(q, tds / 600); q = sappend(q, ":");
@@ -15382,6 +15469,7 @@ static void crt_render(int pi){
 #undef KTY
 #undef KTS
 }
+static void crt_render(int pi){ crt_render_view(pi, pi); }
 
 static void bw_render_modes(int pi){
     BwSim *S = &BWS[pi];
@@ -15392,7 +15480,7 @@ static void bw_render_modes(int pi){
     if (b->bw_mode==4){ craft_render(pi); return; }
     if (b->bw_mode==5){ tank_render(pi); return; }
     if (b->bw_mode==6){ cas_render(pi); return; }
-    if (b->bw_mode==7){ crt_render(pi); return; }
+    if (b->bw_mode==7){ if (S->crt_guest) crt_render_view(S->crt_guest - 1, pi); else crt_render(pi); return; }
     u32 seed=(u32)b->bw_seed;
     G.camx=b->x; G.camy=b->y;
     // the view: full screen solo, or this player's split half in co-op
@@ -16086,6 +16174,18 @@ __attribute__((export_name("dbg_casbest"))) int exp_dbg_casbest(void){ int id = 
 __attribute__((export_name("dbg_casx"))) int exp_dbg_casx(void){ int id = G.my_id>=0? G.my_id : 0; return (int)(G.bud[id].x - 20000.0f); }
 __attribute__((export_name("dbg_casy"))) int exp_dbg_casy(void){ int id = G.my_id>=0? G.my_id : 0; return (int)(G.bud[id].y - 20000.0f); }
 __attribute__((export_name("dbg_crtstate"))) int exp_dbg_crtstate(void){ int id = G.my_id>=0? G.my_id : 0; return BWS[id].crt_state; }
+__attribute__((export_name("dbg_crtduo"))) int exp_dbg_crtduo(void){ int id = G.my_id>=0? G.my_id : 0; return BWS[id].crt_duo; }
+__attribute__((export_name("dbg_crtpos2"))) int exp_dbg_crtpos2(void){ int id = G.my_id>=0? G.my_id : 0; return BWS[id].crt_place[1]; }
+__attribute__((export_name("dbg_crtprog2"))) int exp_dbg_crtprog2(void){ int id = G.my_id>=0? G.my_id : 0; return (int)BWS[id].crt_prog[1]; }
+__attribute__((export_name("dbg_crtbest2"))) int exp_dbg_crtbest2(void){ return (G.p2_slot>=0)? G.bud[G.p2_slot].crt_best_pos : -1; }
+__attribute__((export_name("dbg_crtskip2"))) int exp_dbg_crtskip2(void){ int id = G.my_id>=0? G.my_id : 0; BwSim *S = &BWS[id];
+    if (G.bud[id].bw_mode != 7 || S->crt_duo < 0) return -1;
+    S->crt_state = 1; S->crt_count = 0;
+    S->crt_prog[1] = 3.0f * CRT_LEN - 130.0f;
+    { float x, y, hx, hy; crt_point_at(CRT_OFF + S->crt_prog[1], 0, &x, &y, &hx, &hy);
+      S->crt_x[1] = x; S->crt_y[1] = y; S->crt_h[1] = fatan2(hy, hx); S->crt_v[1] = 120.0f;
+      S->crt_seg[1] = crt_nearest_full(x, y); }
+    return (int)S->crt_prog[1]; }
 __attribute__((export_name("dbg_crtpos"))) int exp_dbg_crtpos(void){ int id = G.my_id>=0? G.my_id : 0; return BWS[id].crt_place[0]; }
 __attribute__((export_name("dbg_crtlap"))) int exp_dbg_crtlap(void){ int id = G.my_id>=0? G.my_id : 0; int l = (int)(BWS[id].crt_prog[0] / CRT_LEN) + 1; if (l<1) l=1; if (l>3) l=3; return l; }
 __attribute__((export_name("dbg_crtprog"))) int exp_dbg_crtprog(void){ int id = G.my_id>=0? G.my_id : 0; return (int)BWS[id].crt_prog[0]; }
