@@ -118,13 +118,17 @@ function T(name, cond, extra) { if (cond) { pass++; } else { fail++; console.log
   const best = await call('dbg_casbest');
   T('the escape score is the saved best', best >= 210, 'best=' + best);
 
-  // relaunch and quit with Escape: a clean exit, no fainting
+  // relaunch: Escape is NOT a way out (Nov 14, Daniel — trapped
+  // means trapped). Only the key opens any door, Escape included.
   await call('dbg_tp', 0, -11898); await sleep(200);
   await key('KeyE', 250);
   await key('Space', 300);
   T('CASTLE relaunched', (await poll('dbg_bwmode', v => v === 6, 4000)) === 6, await call('dbg_bwmode'));
+  await key('Escape', 400); await sleep(400);
+  T('Escape does NOT leave without the key', (await call('dbg_bwmode')) === 6, await call('dbg_bwmode'));
+  await call('dbg_casgive', 2);
   await key('Escape', 400);
-  T('Escape leaves the castle', (await poll('dbg_bwmode', v => v === -1, 4000)) === -1, await call('dbg_bwmode'));
+  T('with the key in hand, Escape leaves', (await poll('dbg_bwmode', v => v === -1, 4000)) === -1, await call('dbg_bwmode'));
   T('...and the buddy did not faint', (await call('dbg_inarcade')) === 1, await call('dbg_inarcade'));
 
   console.log('castletest: ' + pass + ' passed, ' + fail + ' failed');

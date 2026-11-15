@@ -34,7 +34,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     while (Date.now() - t0 < timeout) { const v = await call(fn); if (want(v)) return v; await sleep(step); }
     return call(fn);
   }
-  const key = async (k, ms = 120) => { await page.keyboard.press(k); await sleep(ms); };
+  const key = async (k, ms = 120) => { await page.keyboard.down(k); await sleep(90); await page.keyboard.up(k); await sleep(ms); };
   const btn = async (pi, bi, ms = 130) => {
     await page.evaluate(([p, b]) => window.__btn(p, b, true), [pi, bi]);
     await sleep(ms);
@@ -51,15 +51,16 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   // flavour latch (SETTINGS row hidden or not), which races the shell's
   // pad reporting at boot. Navigate by the live menu count instead of
   // a fixed number of downs: coop index = dbg_menucount - 1 either way.
+  await sleep(800);   // let the pad/keyboard flavour latch settle first
   const mc = await call('dbg_menucount');
   const coopRow = mc - 1;
   for (let i = 0; i < coopRow; i++) await key('ArrowDown', 160);
   ok((await call('dbg_menusel')) === coopRow, 'menu on the co-op row', await call('dbg_menusel'));
-  await key('Space', 300);
+  // verify-and-retry: a press can fall between frames under load
+  for (let t = 0; t < 4 && (await call('dbg_coop')) !== 1; t++) await key('Space', 300);
   ok((await call('dbg_coop')) === 1, 'co-op toggled on', await call('dbg_coop'));
   for (let i = 0; i < coopRow; i++) await key('ArrowUp', 160);
-  await key('Space', 500);
-  if ((await call('dbg_state')) !== 1) { await key('Enter', 500); }
+  for (let t = 0; t < 4 && (await call('dbg_state')) !== 1; t++) { await key('Space', 400); if ((await call('dbg_state')) !== 1) await key('Enter', 400); }
   ok((await call('dbg_state')) === 1, 'co-op run started');
   await btn(1, 0, 160);
   ok((await poll('dbg_p2', v => v > 0, 6000)) > 0, 'P2 dropped in');
@@ -126,11 +127,28 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   ok((await call('dbg_crtstate')) === 1, 'race stays open until P2 is home', await call('dbg_crtstate'));
   ok((await call('dbg_bwstate2')) === 1, 'P2 still racing');
 
-  // P2 skips home and finishes second; the race closes for both
+  // P2 skips home and finishes second; race 1 of the GP closes
   await call('dbg_crtskip2');
   await padSet(0, true); await sleep(2400); await padSet(0, false);
-  ok((await poll('dbg_crtstate', v => v === 2, 8000)) === 2, 'race closed once both humans finished');
-  ok((await poll('dbg_bwmode', v => v === -1, 9000)) === -1, 'P1 returned to the Arcade');
+  ok((await poll('dbg_crtstate', v => v === 2, 8000)) === 2, 'race 1 closed once both humans finished');
+  ok((await poll('dbg_crtstate', v => v === 4, 9000)) === 4, 'standings follow race 1 — nobody goes home yet');
+  ok((await call('dbg_bwstate2')) === 1, 'P2 is still in the cup');
+
+  // races 2-4 of the HOME cup: host fires through the standings,
+  // both karts skip home each race
+  for (let r = 1; r < 4; r++) {
+    await key('Space', 200);
+    ok((await poll('dbg_crtstate', v => v === 1, 9000)) === 1, 'race ' + (r + 1) + ' racing');
+    await call('dbg_crtskip');
+    await page.keyboard.down('Space'); await sleep(1800); await page.keyboard.up('Space');
+    await call('dbg_crtskip2');
+    await padSet(0, true); await sleep(2200); await padSet(0, false);
+    ok((await poll('dbg_crtstate', v => v === 2, 9000)) === 2, 'race ' + (r + 1) + ' closed');
+    if (r < 3) ok((await poll('dbg_crtstate', v => v === 4, 9000)) === 4, 'standings follow race ' + (r + 1));
+  }
+  ok((await poll('dbg_crtstate', v => v === 5, 9000)) === 5, 'final standings after race 4');
+  ok((await call('dbg_crtcupbest')) % 8 >= 1, 'P1 cup best saved', await call('dbg_crtcupbest'));
+  ok((await poll('dbg_bwmode', v => v === -1, 12000)) === -1, 'P1 returned to the Arcade');
   ok((await poll('dbg_bwstate2', v => v === 0, 9000)) === 0, 'P2 returned to the Arcade too');
   ok((await call('dbg_crtbest')) === 1, 'P1 best finish saved as P1', await call('dbg_crtbest'));
   ok((await call('dbg_crtbest2')) === 2, 'P2 best finish saved as P2', await call('dbg_crtbest2'));

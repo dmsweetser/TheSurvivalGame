@@ -736,6 +736,7 @@ typedef struct {
     int tank_done;                    // TANK RESCUE record: deepest level cleared; saved as td
     int cas_best;                     // CASTLE record: best escape score; saved as cb
     int crt_best_pos, crt_best_time;  // SUPER BUDDY CART records: best finish (0 = none) as cp, best race time in deciseconds as cq
+    int crt_cupbest;                  // best Grand Prix rank per cup, packed: home + far*8 (0 = unranked), as cr
     float roll;                       // the pet rock's rolling angle
     float steady_t;                   // pet rock's ROCK STEADY: unhurtable while > 0
     float tx, ty;                     // render interpolation target (client)
@@ -2650,10 +2651,10 @@ static void update_players(float dt){
                 // counts: the curve is what is pinned, not the stride.
                 p->wof = 0.3f;
                 wof_spark_t[i] -= dt*sp;
-                if (wof_spark_t[i]<=0){ wof_spark_t[i]=6;
-                    for (int k=0;k<2;k++)
-                        spawn_particle(p->x + (float)rng_range(-22,22), p->y - (float)rng_range(6,48),
-                                       WOF_COL[(int)(rng_f()*5.99f)], 40, 1.3f, 3); }
+                if (wof_spark_t[i]<=0){ wof_spark_t[i]=2.2f;   // MORE confetti (Daniel, Nov 14): bursts ~3x as often,
+                    for (int k=0;k<6;k++)                        // 3x the pieces, wider and taller
+                        spawn_particle(p->x + (float)rng_range(-32,32), p->y - (float)rng_range(4,66),
+                                       WOF_COL[(int)(rng_f()*5.99f)], 40, 1.3f, 2 + (int)(rng_f()*2.99f)); }
             }
         } else if (i!=G.my_id && G.net_mode==NET_HOST){
             p->aim = p->net_aim;      // remote player standing still: keep
@@ -6180,6 +6181,7 @@ static void do_save(void){
                     *p++=' '; *p=0; p = put_key(p, "cb"); p = put_int(p, bd->cas_best);
                     *p++=' '; *p=0; p = put_key(p, "cp"); p = put_int(p, bd->crt_best_pos);
                     *p++=' '; *p=0; p = put_key(p, "cq"); p = put_int(p, bd->crt_best_time);
+                    *p++=' '; *p=0; p = put_key(p, "cr"); p = put_int(p, bd->crt_cupbest);
                     *p++=' '; *p=0; p = put_key(p, "cx"); p = put_int(p, (int)bd->craft_x);
                     *p++=' '; *p=0; p = put_key(p, "cy"); p = put_int(p, (int)bd->craft_y);
                     *p++=' '; *p=0; p = put_key(p, "cm"); p = put_int(p, bd->craft_wood + bd->craft_stone*1000 + bd->craft_fiber*1000000);
@@ -6433,7 +6435,7 @@ static void continue_run(int slot){
                 }
                 // optional key= tokens (bank / hat stand / mall / buddy)
                 { int bsp=0, bxp=0, b1=0, b2=0, b3=0, bsk=0, bfn=0, bnm=-1, bcl=0, bnv=0, bwo=0, bwn=0, ben=100, bgx=0, bgy=56, bgz=0, ber=0, bgf=0;
-                  int bsm=0, bsq=0, bsi=0, bsq2=0, bsb=0, bpd=0, btd=0, bcb=0, bcp=0, bcq=0, bcx=0, bcy=0, bcm=0, bcn=0, bcg=0, bct=0, bcf=0;
+                  int bsm=0, bsq=0, bsi=0, bsq2=0, bsb=0, bpd=0, btd=0, bcb=0, bcp=0, bcq=0, bcr=0, bcx=0, bcy=0, bcm=0, bcn=0, bcg=0, bct=0, bcf=0;
                   int tcw_bn=0, tcw_x[48], tcw_y[48], tcw_k[48], tcw_h[48];
                   int tcd_gn=0, tcd_g[96];
                   while (*q==' '){
@@ -6487,6 +6489,7 @@ static void continue_run(int slot){
                       else if (kk[0]=='c' && kk[1]=='b') bcb=vv;
                       else if (kk[0]=='c' && kk[1]=='p') bcp=vv;
                       else if (kk[0]=='c' && kk[1]=='q') bcq=vv;
+                      else if (kk[0]=='c' && kk[1]=='r') bcr=vv;
                       else if (kk[0]=='c' && kk[1]=='x') bcx=vv;
                       else if (kk[0]=='c' && kk[1]=='y') bcy=vv;
                       else if (kk[0]=='c' && kk[1]=='m') bcm=vv;
@@ -6523,6 +6526,7 @@ static void continue_run(int slot){
                       bd->tank_done = btd<0? 0 : btd;
                       bd->cas_best = bcb<0? 0 : bcb;
                       bd->crt_best_pos = bcp<0? 0 : bcp;
+                      bd->crt_cupbest = bcr<0? 0 : bcr;
                       bd->crt_best_time = bcq<0? 0 : bcq;
                       bd->craft_x = bcx; bd->craft_y = bcy;
                       bd->craft_wood = bcm % 1000; bd->craft_stone = (bcm/1000) % 1000; bd->craft_fiber = bcm / 1000000;
@@ -9795,6 +9799,15 @@ typedef struct {
     int plat_en_n; PlatEn plat_en[24];
     float plat_fx[8], plat_fy[8], plat_fvx[8], plat_fvy[8], plat_ft[8]; int plat_fa[8];
     unsigned char plat_grid[240*15];
+    // regional alignment (Nov 14): level L IS main-game region
+    // (L-1)%8 — same name, ground palette, bug strain and difficulty
+    // pressure as the country that far from the epicenter. Plus the
+    // Mario grammar: stomp chains, 100 bits = an extra heart, and
+    // one enterable vault pipe per level hiding a bonus room.
+    int plat_region, plat_chain, plat_sub, plat_vault_tx, plat_prevk;
+    int plat_savew, plat_saven; float plat_savex, plat_savey, plat_savecpx;
+    PlatEn plat_saveen[24];
+    unsigned char plat_grid2[240*15];
     // BUDDY CRAFT session (mode 4): the world derives from the buddy's
     // seed; materials, gear, builds and mined-out nodes all persist on
     // the Buddy itself (cm/cn/cg/cw/cd), so only bugs, bolts and other
@@ -9809,6 +9822,8 @@ typedef struct {
     float craft_tz[48];   // per-build zapper-tower cooldowns (session)
     int craft_nap;        // the current rest is a bedroll nap, not a fire sleep
     int craft_scroll;     // crafting menu: first visible row of the scrolling list
+    int craft_search;     // menu search mode: typed text owns the keyboard (soft keyboard up on touch)
+    char craft_filter[13];   // the menu's item filter ("" = the full list)
     float craft_sh_t; int craft_shn;   // sharks: they own the water
     float craft_sh_x[6], craft_sh_y[6], craft_sh_ph[6], craft_sh_tr[6], craft_sh_hd[6]; int craft_sh_hp[6];
     float craft_bmr_x, craft_bmr_y, craft_bmr_vx, craft_bmr_vy, craft_bmr_t; int craft_bmr_a;   // the boomerang
@@ -9851,6 +9866,11 @@ typedef struct {
     float crt_line[6], crt_slidet[6];                     // AI racing-line lateral (smoothed); human drift charge time
     float crt_puffx[20], crt_puffy[20], crt_puffl[20];    // exhaust puffs: position + remaining life (ring buffer)
     int crt_puffn, crt_prevplace[2], crt_prevlap[2];      // puff ring cursor; last place/lap per human (overtake + final-lap notes)
+    // the GRAND PRIX (Nov 14): a cup is four races, one per region
+    // of its half of the world — HOME (regions 0-3) or FAR (4-7).
+    // Points bank per race; the final state ranks the whole field.
+    int crt_cup, crt_race, crt_track;
+    int crt_pts[6], crt_lastpl[6], crt_gprank[6];
     float crt_pufft;                                      // puff spawn timer
     int crt_colsel, crt_colsel2; // waiting-room colour picks (host's own, the guest's)
     int crt_ready;               // waiting-room ready bits: 1 host, 2 guest
@@ -10166,7 +10186,7 @@ static void bw_enter_mode(int pi, int mode){
     else { b->x = b->bw_x; b->y = b->bw_y; }
     b->in_bw = 1;   // the DEV stays parked at the gate in the mall
     if (mode==2){ char *q=S->note; q=sappend(q, "ENTRANCES. A COZY HOTEL. "); q=sappend(q, lbl_int()); q=sappend(q, " OPENS DOORS + DRAWERS. MIND THE ZIP BUG."); *q=0; }
-    else if (mode==3){ char *q=S->note; q=sappend(q, "SUPER BUDDY RUN. "); q=sappend(q, lbl_fire()); q=sappend(q, " JUMPS. STOMP BUGS. PLANT THE FLAG!"); *q=0; }
+    else if (mode==3){ char *q=S->note; q=sappend(q, "LEVEL "); q=sapp_int(q, S->plat_lvl); q=sappend(q, " - "); q=sappend(q, REGION_NAME[S->plat_region]); q=sappend(q, ". "); q=sappend(q, lbl_fire()); q=sappend(q, " JUMPS. STOMP BUGS!"); *q=0; }
     else if (mode==4){ char *q=S->note; q=sappend(q, "BUDDY CRAFT. "); q=sappend(q, lbl_int()); q=sappend(q, " GATHERS + RESTS. "); q=sappend(q, lbl_fire()); q=sappend(q, " SWINGS. "); q=sappend(q, lbl_wall()); q=sappend(q, " CRAFTS."); *q=0; }
     else if (mode==5){ char *q=S->note; q=sappend(q, "TANK RESCUE. "); q=sappend(q, lbl_fire()); q=sappend(q, " FIRES THE CANNON. FREE CAPTIVES, DROP AT PADS."); *q=0; }
     else if (mode==6){ char *q=S->note; q=sappend(q, "CASTLE. TRAPPED! RUN INTO THINGS TO TAKE OR FIGHT. FIND THE KEY, ESCAPE!"); *q=0; }
@@ -10254,7 +10274,7 @@ static void arc_gate_draw(int pi, int vx, int vy, int vw2, int vh2){
         "AN ENDLESS WILD. CHOP, MINE, CRAFT, BUILD.",
         "DRIVE THE TANK. FREE THE CAPTIVES. BREAK THE BOSS.",
         "TRAPPED IN A CASTLE! 13 TREASURES, ONE KEY, ONE GATE.",
-        "KART RACING! 3 LAPS, 6 RACERS, ONE VERY SMUG TROPHY." };
+        "GRAND PRIX! 4 RACES, 8 REGIONS, 2 CUPS. RANK BY POINTS." };
     for (int r=0;r<2;r++){
         int ry = y + 52 + r*20;
         const char *nm = r==0? "PLAY" : "LEAVE";
@@ -12083,6 +12103,17 @@ static void bw_draw_note(int pi){
 #define PL_ROWS 15
 #define PL_MAXW 240
 #define PL_GROUND 13
+// one sky per region — the run wears the country it is in
+static const u32 PLAT_SKY[NREGIONS][3] = {
+    { COL(104,178,238), COL(122,190,242), COL(140,200,245) },   // Clean Code Meadows
+    { COL(116,182,226), COL(136,194,232), COL(156,206,238) },   // Spaghetti Fields
+    { COL(128,162,202), COL(146,176,212), COL(164,190,220) },   // Legacy Lands (dusty)
+    { COL(198,152,102), COL(210,168,118), COL(222,184,136) },   // Kernel Badlands (haze)
+    { COL(172,206,230), COL(190,218,238), COL(206,230,245) },   // Frozen Cache Fields
+    { COL(38,34,90),    COL(52,46,114),   COL(70,62,138) },     // Neon RAM Flats (dusk)
+    { COL(86,152,132),  COL(102,168,146), COL(120,184,160) },   // Cable Jungle
+    { COL(94,90,114),   COL(108,104,128), COL(122,118,142) },   // The Unmaintained Depths
+};
 static int plat_tile(BwSim *S, int tx, int ty){
     if (tx<0 || ty<0 || tx>=S->plat_w || ty>=PL_ROWS) return 0;
     return S->plat_grid[ty*PL_MAXW + tx];
@@ -12110,11 +12141,17 @@ static void plat_en_add(BwSim *S, int kind, float x, float y){
     PlatEn *e=&S->plat_en[S->plat_en_n++];
     e->x=x; e->y=y; e->vx=0; e->vy=0; e->kind=kind; e->state=0; e->t=0;
     if (kind==0) e->vx=-38; if (kind==1) e->vx=-30; if (kind==5) e->vx=44;
+    // regional pressure: the further country, the quicker its
+    // critters — the same scaling the walk out from the epicenter
+    // applies in the main game, plus a lap bonus per full tour
+    if (kind==0 || kind==1 || kind==4)
+        e->vx *= 1.0f + 0.05f*(float)S->plat_region + 0.06f*(float)((S->plat_lvl-1)/8);
 }
 static void plat_load_level(int pi, int lvl){
     BwSim *S=&BWS[pi]; Buddy *b=&G.bud[pi];
     for (int i=0;i<PL_MAXW*PL_ROWS;i++) S->plat_grid[i]=0;
     S->plat_lvl=lvl; S->plat_en_n=0; S->plat_cleart=0; S->plat_deadt=0; S->plat_grace=0;
+    S->plat_region = (lvl-1) % NREGIONS; S->plat_sub = 0; S->plat_vault_tx = -1; S->plat_chain = 0;
     for (int i=0;i<8;i++) S->plat_fa[i]=0;
     int W = 110 + lvl*14; if (W>PL_MAXW-4) W=PL_MAXW-4; S->plat_w=W;
     u32 seed = (u32)b->bw_seed ^ (0x9E37u + (u32)lvl*7919u);
@@ -12133,6 +12170,7 @@ static void plat_load_level(int pi, int lvl){
             int ph = 2 + (int)(h%3);
             for (int r=0;r<ph;r++) for (int c2=0;c2<2;c2++) plat_settile(S, x+c2, 12-r, r==ph-1? 7 : 6);
             if (lvl>=2 && (h&16)) plat_en_add(S, 3, (x+1)*PL_TILE, (13-ph)*PL_TILE);
+            if (ph>=4) S->plat_vault_tx = x;   // the tallest pipe is the vault pipe (the last one wins)
             x += 4;
         } else if (seg==2){     // a crate row: bricks and mystery crates
             int n = 3 + (int)(h%3);
@@ -12213,9 +12251,45 @@ static void plat_bonk_tile(int pi, int tx, int ty){
         splat(tx*PL_TILE+12, ty*PL_TILE+12, COL(150,100,60), 6, 90);
     } else if (t==2 || t==3) sfx(5);
 }
+// the BONUS VAULT under the level's tallest pipe: a small quiet
+// room of bits and a heart, reached by pressing DOWN on the gold-
+// banded pipe. The whole overworld (grid, critters, checkpoint) is
+// parked in the spare buffers and restored on the way out.
+static void plat_vault_enter(int pi){
+    BwSim *S=&BWS[pi]; Buddy *b=&G.bud[pi];
+    for (int i=0;i<PL_MAXW*PL_ROWS;i++) S->plat_grid2[i] = S->plat_grid[i];
+    S->plat_savew = S->plat_w; S->plat_savex = b->x; S->plat_savey = b->y; S->plat_savecpx = S->plat_cpx;
+    S->plat_saven = S->plat_en_n;
+    for (int i=0;i<S->plat_en_n;i++) S->plat_saveen[i] = S->plat_en[i];
+    for (int i=0;i<PL_MAXW*PL_ROWS;i++) S->plat_grid[i]=0;
+    S->plat_en_n = 0; S->plat_w = 36; S->plat_sub = 1;
+    for (int x=0;x<36;x++){ plat_settile(S, x, 13, 1); plat_settile(S, x, 14, 1); plat_settile(S, x, 0, 5); }
+    for (int y=1;y<13;y++){ plat_settile(S, 0, y, 5); plat_settile(S, 35, y, 5); }
+    // the haul: two arcs and a shelf of bits, and a heart on a plinth
+    for (int i2=0;i2<7;i2++) plat_settile(S, 5+i2, 11 - (i2<3? i2 : 6-i2)/1, 10);
+    for (int i2=0;i2<8;i2++) plat_settile(S, 14+i2, 10, 10);
+    for (int i2=0;i2<3;i2++){ plat_settile(S, 24+i2, 9, 5); plat_settile(S, 24+i2, 8, 10); }
+    plat_en_add(S, 7, 17*PL_TILE, PL_GROUND*PL_TILE);   // the heart (kind 7)
+    // the way out: a pipe at the far end
+    for (int r=0;r<3;r++) for (int c2=0;c2<2;c2++) plat_settile(S, 32+c2, 12-r, r==2? 7 : 6);
+    b->x = 3.5f*PL_TILE; b->y = PL_GROUND*PL_TILE;
+    S->plat_vx=0; S->plat_vy=0; S->plat_cpx = 3.5f*PL_TILE;
+    scpy(S->note, "THE BONUS VAULT! HELP YOURSELF.", 72); S->note_t=2.4f; sfx(19);
+}
+static void plat_vault_exit(int pi){
+    BwSim *S=&BWS[pi]; Buddy *b=&G.bud[pi];
+    for (int i=0;i<PL_MAXW*PL_ROWS;i++) S->plat_grid[i] = S->plat_grid2[i];
+    S->plat_w = S->plat_savew; S->plat_en_n = S->plat_saven;
+    for (int i=0;i<S->plat_saven;i++) S->plat_en[i] = S->plat_saveen[i];
+    b->x = S->plat_savex; b->y = S->plat_savey; S->plat_cpx = S->plat_savecpx;
+    S->plat_vx=0; S->plat_vy=0; S->plat_sub = 0;
+    scpy(S->note, "BACK TO THE RUN!", 72); S->note_t=1.6f; sfx(19);
+}
 static void plat_update(int pi, float dt, const BwIn *in){
     BwSim *S=&BWS[pi]; Buddy *b=&G.bud[pi];
     if (in->exit_){ bw_exit(pi, 0); return; }
+    int dn_edge = (in->keys & K_DOWN) && !(S->plat_prevk & K_DOWN);
+    S->plat_prevk = in->keys;
     S->plat_t += dt;
     if (S->plat_grace>0) S->plat_grace -= dt;
     if (b->atk_cd>0) b->atk_cd -= dt;
@@ -12233,7 +12307,8 @@ static void plat_update(int pi, float dt, const BwIn *in){
             if (S->plat_lvl > b->plat_done){ b->plat_done = S->plat_lvl; }
             do_save();
             plat_load_level(pi, S->plat_lvl+1);
-            scpy(S->note, "DEPLOYED! ON TO THE NEXT LEVEL.", 72); S->note_t=2.6f;
+            { char *q=S->note; q=sappend(q, "DEPLOYED! LEVEL "); q=sapp_int(q, S->plat_lvl); q=sappend(q, " - "); q=sappend(q, REGION_NAME[S->plat_region]); q=sappend(q, "."); *q=0; }
+            S->note_t=2.6f;
         }
         return;
     }
@@ -12345,6 +12420,19 @@ static void plat_update(int pi, float dt, const BwIn *in){
             if (S->plat_bits%25==0 && S->plat_hearts<5){ S->plat_hearts++; scpy(S->note, "25 BITS! +1 HEART", 72); S->note_t=2.0f; }
         }
     }
+    // the vault pipe: stand on the gold-banded pipe and press DOWN
+    if (S->plat_ground){
+        int btx = (int)(b->x/PL_TILE);
+        int ontop = plat_tile(S, btx, (int)((b->y+2)/PL_TILE))==7;
+        if (!S->plat_sub && S->plat_vault_tx>=0 && ontop && (btx==S->plat_vault_tx || btx==S->plat_vault_tx+1)){
+            if (dn_edge) plat_vault_enter(pi);
+            else if (S->note_t<=0){ scpy(S->note, "DOWN - INTO THE VAULT!", 72); S->note_t=1.4f; }
+        } else if (S->plat_sub && ontop && (btx==32 || btx==33)){
+            if (dn_edge) plat_vault_exit(pi);
+            else if (S->note_t<=0){ scpy(S->note, "DOWN - BACK TO THE RUN!", 72); S->note_t=1.4f; }
+        }
+    }
+    if (S->plat_ground) S->plat_chain = 0;   // a stomp chain only lives while you stay airborne
     // hotfix fireballs
     if (in->interact && S->plat_power>=2 && b->atk_cd<=0){
         b->atk_cd = 0.34f;
@@ -12421,6 +12509,12 @@ static void plat_update(int pi, float dt, const BwIn *in){
         if (S->plat_cleart>0) continue;
         float dx = b->x - e->x, dy = (b->y-11) - (e->y-8);
         if (dx*dx > 17*17 || dy*dy > 20*20) continue;
+        if (e->kind==7){   // the vault heart
+            if (S->plat_hearts<5) S->plat_hearts++;
+            e->kind=-1; S->plat_score += 200; sfx(19);
+            scpy(S->note, "A SPARE HEART! +1.", 72); S->note_t=1.8f;
+            continue;
+        }
         if (e->kind==5 || e->kind==6){
             S->plat_power = e->kind==5? 1 : 2; e->kind=-1; S->plat_score += 200; sfx(19);
             if (S->plat_power==1){ scpy(S->note, "PATCHED UP! BRICKS BREAK NOW.", 72); }
@@ -12437,7 +12531,19 @@ static void plat_update(int pi, float dt, const BwIn *in){
             continue;
         }
         if (stomp){
-            if (e->kind==0 || e->kind==4){ e->kind=-1; S->plat_score += 100; sfx(4); splat(e->x, e->y-8, COL(120,90,160), 7, 95); }
+            if (e->kind==0 || e->kind==4){
+                // the stomp chain: each airborne stomp doubles the
+                // last — 100, 200, 400, 800, 1600 — until you land
+                e->kind=-1;
+                int pts = 100 << (S->plat_chain<4? S->plat_chain : 4);
+                S->plat_score += pts; S->plat_chain++;
+                if (S->plat_chain>=2){
+                    char buf[48]; char *q=buf;
+                    q=sappend(q, "STOMP CHAIN X"); q=sapp_int(q, S->plat_chain); q=sappend(q, "! +"); q=sapp_int(q, pts); *q=0;
+                    scpy(S->note, buf, 72); S->note_t=1.2f;
+                }
+                sfx(4); splat(e->x, e->y-8, COL(120,90,160), 7, 95);
+            }
             else if (e->kind==1){ e->kind=2; e->state=0; e->vx=0; sfx(4); }
             else if (e->kind==2){ e->state=0; e->vx=0; sfx(4); }
             S->plat_vy = -350;
@@ -12482,10 +12588,19 @@ static void plat_update(int pi, float dt, const BwIn *in){
         S->plat_en_n=w;
     }
 }
-static void plat_draw_enemy(PlatEn *e, int bob){
+static void plat_draw_enemy(PlatEn *e, int bob, int strain){
     int x = SX(e->x), y = SY(e->y);
-    if (e->kind==0 || e->kind==1){   // crawlers: a bug with a dome (green for the shell-bug)
-        ellipse_fill(x, y-7, 10, 7, e->kind==1? COL(64,150,70) : COL(96,74,140));
+    if (e->kind==7){   // the vault heart, gently bobbing
+        int hy = y - 12 + (int)(fsin(e->t*3.0f)*2.0f);
+        disc_fill(x-4, hy-3, 5, COL(240,80,90)); disc_fill(x+4, hy-3, 5, COL(240,80,90));
+        rect_fill(x-8, hy-3, 17, 6, COL(240,80,90));
+        tri_fill(x-8, hy+2, x+9, hy+2, x, hy+11, COL(240,80,90));
+        disc_fill(x-3, hy-4, 2, COL(255,190,195));
+        return;
+    }
+    if (e->kind==0 || e->kind==1){   // crawlers: a bug with a dome (green for the shell-bug;
+                                     // the region's dominant strain colours the plain crawler)
+        ellipse_fill(x, y-7, 10, 7, e->kind==1? COL(64,150,70) : (strain>=0? BUG_COL[strain] : COL(96,74,140)));
         if (e->kind==1){ rect_fill(x-10, y-9, 20, 3, COL(50,120,56)); }
         disc_fill(x + (e->vx<0? -5:5), y-8, 2, COL(255,255,255));
         disc_fill(x + (e->vx<0? -5:5), y-8, 1, COL(20,16,24));
@@ -12530,27 +12645,33 @@ static void plat_render(int pi){
     if (camx < half) camx = half;
     if (camx > S->plat_w*PL_TILE - half) camx = S->plat_w*PL_TILE - half;
     G.camx = camx; G.camy = 180;
-    // sky, then two layers of server skyline drifting behind
-    rect_fill(vx, vy, vw2, vh2, COL(104,178,238));
-    rect_fill(vx, vy+vh2/3, vw2, vh2/3, COL(122,190,242));   // gradient step (glow-up)
-    rect_fill(vx, vy+vh2*2/3, vw2, vh2/3, COL(140,200,245));
-    // the sun, high and pleased with itself (glow-up)
+    // sky, then two layers of server skyline drifting behind — the
+    // sky wears the level's REGION (the vault borrows the Depths)
+    int rg = S->plat_sub? 7 : S->plat_region;
+    rect_fill(vx, vy, vw2, vh2, PLAT_SKY[rg][0]);
+    rect_fill(vx, vy+vh2/3, vw2, vh2/3, PLAT_SKY[rg][1]);   // gradient step (glow-up)
+    rect_fill(vx, vy+vh2*2/3, vw2, vh2/3, PLAT_SKY[rg][2]);
+    // the sun, high and pleased with itself (glow-up) — a pale moon
+    // over the dark countries
     { int sunx = vx + vw2 - 84, suny = vy + 44;
-      glow_ellipse(sunx, suny, 34, 34, COL(255,236,160), 60);
-      disc_fill(sunx, suny, 15, COL(255,240,170)); disc_fill(sunx-4, suny-4, 6, COL(255,250,215)); }
+      int dark = (rg==5 || rg==7);
+      glow_ellipse(sunx, suny, 34, 34, dark? COL(200,204,225) : COL(255,236,160), 60);
+      disc_fill(sunx, suny, 15, dark? COL(226,230,242) : COL(255,240,170));
+      disc_fill(sunx-4, suny-4, 6, dark? COL(240,242,250) : COL(255,250,215)); }
     // lazy clouds on the slowest parallax (glow-up)
     { int coff = (int)(camx*0.12f + G.anim_t*3.0f);
+      u32 cloudc = (rg==5 || rg==7)? COL(126,122,158) : COL(235,246,255);
       for (int sx = vx - (coff % 150) - 150; sx < vx+vw2+150; sx += 150){
           int idx = (coff + sx - vx)/150;
           u32 hh = hash2(idx, 3, 0xC10Du);
           int cy2 = vy + 18 + (int)(hh % 44), cs = 12 + (int)((hh>>6) % 10);
-          ellipse_fill(sx+30, cy2, cs+10, cs*2/3, COL(235,246,255));
-          ellipse_fill(sx+52, cy2-4, cs+4, cs/2, COL(245,250,255));
-          ellipse_fill(sx+12, cy2+2, cs, cs/2, COL(228,242,252));
+          ellipse_fill(sx+30, cy2, cs+10, cs*2/3, cloudc);
+          ellipse_fill(sx+52, cy2-4, cs+4, cs/2, col_shade(cloudc, 1.05f));
+          ellipse_fill(sx+12, cy2+2, cs, cs/2, col_shade(cloudc, 0.96f));
       } }
     for (int layer=0; layer<2; layer++){
         float par = layer? 0.65f : 0.35f;
-        u32 lc = layer? COL(90,120,170) : COL(120,150,195);
+        u32 lc = col_shade(PLAT_SKY[rg][2], layer? 0.60f : 0.76f);
         int off = (int)(camx*par) % 92;
         for (int sx = vx - off - 92; sx < vx+vw2+92; sx += 92){
             int wx = sx + (int)(camx*par) - vx;
@@ -12565,10 +12686,13 @@ static void plat_render(int pi){
         int t = plat_tile(S, tx, ty); if (!t) continue;
         int x = SX(tx*PL_TILE), y = SY(ty*PL_TILE);
         if (t==1){
+            // the earth itself is regional: topsoil in the region's
+            // own green (or frost, or neon loam), dirt a dark shade
+            // of its second ground tone
             int above = plat_tile(S, tx, ty-1);
-            rect_fill(x, y, PL_TILE, PL_TILE, COL(122,84,50));
-            rect_fill(x, y, PL_TILE, 4, COL(140,102,62));
-            if (above!=1){ rect_fill(x, y, PL_TILE, 8, COL(84,176,84)); rect_fill(x, y+6, PL_TILE, 3, COL(64,150,66)); }
+            rect_fill(x, y, PL_TILE, PL_TILE, col_shade(REGION_GB[rg], 0.52f));
+            rect_fill(x, y, PL_TILE, 4, col_shade(REGION_GB[rg], 0.68f));
+            if (above!=1){ rect_fill(x, y, PL_TILE, 8, REGION_GA[rg]); rect_fill(x, y+6, PL_TILE, 3, REGION_GB[rg]); }
         } else if (t==2){
             rect_fill(x+1, y+1, PL_TILE-2, PL_TILE-2, COL(168,102,58));
             rect_line(x+1, y+1, PL_TILE-2, PL_TILE-2, COL(110,62,34));
@@ -12582,13 +12706,20 @@ static void plat_render(int pi){
             rect_fill(x+1, y+1, PL_TILE-2, PL_TILE-2, COL(146,110,70));
             rect_line(x+1, y+1, PL_TILE-2, PL_TILE-2, COL(100,74,44));
         } else if (t==5){
-            rect_fill(x, y, PL_TILE, PL_TILE, COL(128,134,142));
-            rect_fill(x, y, PL_TILE, 3, COL(160,166,174));
-            disc_fill(x+4, y+4, 1, COL(90,94,100)); disc_fill(x+PL_TILE-5, y+PL_TILE-5, 1, COL(90,94,100));
+            rect_fill(x, y, PL_TILE, PL_TILE, col_shade(REGION_GA[rg], 0.78f));
+            rect_fill(x, y, PL_TILE, 3, col_shade(REGION_GA[rg], 0.97f));
+            disc_fill(x+4, y+4, 1, col_shade(REGION_GA[rg], 0.5f)); disc_fill(x+PL_TILE-5, y+PL_TILE-5, 1, col_shade(REGION_GA[rg], 0.5f));
         } else if (t==6 || t==7){
             rect_fill(x+2, y, PL_TILE-4, PL_TILE, COL(38,148,96));
             rect_fill(x+5, y, 4, PL_TILE, COL(70,180,120));
-            if (t==7) rect_fill(x-1, y, PL_TILE+2, 7, COL(30,128,84));
+            if (t==7){
+                // the vault pipes (in and out) wear a gold band
+                int gold = (S->plat_sub && (tx==32 || tx==33)) || (!S->plat_sub && (tx==S->plat_vault_tx || tx==S->plat_vault_tx+1));
+                if (gold){ float pu = 0.9f + 0.1f*fsin(S->plat_t*5);
+                    rect_fill(x-1, y, PL_TILE+2, 7, col_shade(COL(238,186,54), pu));
+                    rect_fill(x-1, y+5, PL_TILE+2, 2, COL(160,116,26)); }
+                else rect_fill(x-1, y, PL_TILE+2, 7, COL(30,128,84));
+            }
         } else if (t==8){
             rect_fill(x+10, y, 3, PL_TILE, COL(190,196,204));
             if (ty==4){
@@ -12618,7 +12749,7 @@ static void plat_render(int pi){
         int passed = b->x > S->plat_cpx;
         for (int r=0;r<7;r++) rect_fill(x+3, y-34+r, 11-r, 1, passed? COL(84,196,90) : COL(240,240,240));
     }
-    for (int i=0;i<S->plat_en_n;i++) if (S->plat_en[i].kind>=0) plat_draw_enemy(&S->plat_en[i], (int)(S->plat_t*8)&1);
+    for (int i=0;i<S->plat_en_n;i++) if (S->plat_en[i].kind>=0) plat_draw_enemy(&S->plat_en[i], (int)(S->plat_t*8)&1, REGION_BUG[S->plat_region]);
     for (int i=0;i<8;i++) if (S->plat_fa[i]){
         int x = SX(S->plat_fx[i]), y = SY(S->plat_fy[i]);
         disc_fill(x, y, 5, COL(255,130,40)); disc_fill(x, y, 3, COL(255,200,80));
@@ -12644,6 +12775,7 @@ static void plat_render(int pi){
     rect_fill(vx, vy, vw2, 20, COL(16,20,28));
     { char buf[96]; char *q=buf;
       q=sappend(q, "LEVEL "); q=sapp_int(q, S->plat_lvl);
+      q=sappend(q, " - "); q=sappend(q, S->plat_sub? "BONUS VAULT" : REGION_NAME[S->plat_region]);
       q=sappend(q, "   SCORE "); q=sapp_int(q, S->plat_score);
       q=sappend(q, "   BITS "); q=sapp_int(q, S->plat_bits);
       if (S->plat_power==1) q=sappend(q, "   PATCHED");
@@ -12792,6 +12924,7 @@ static void craft_enter(int pi){
     else { b->x = b->craft_x; b->y = b->craft_y; }
     if (b->craft_tod<=0) b->craft_tod = 40;   // first trip starts in the morning
     S->craft_menu=0; S->craft_sel=0; S->craft_cat=0; S->craft_scroll=0; S->craft_biome=-1; S->craft_hitn=0;
+    S->craft_search=0; S->craft_filter[0]=0;
     S->craft_bugn=0; S->craft_grace=0; S->craft_bt=2.0f; S->craft_demolish=0;
     S->craft_swarm_t=70; S->craft_cache_t=40; S->craft_cache_on=0; S->craft_haste=0;
     S->craft_darkp=craft_darkf(b); S->craft_beam_t=0; S->craft_prevk=0;
@@ -12876,6 +13009,37 @@ static int craft_all_rows(Buddy *b, int *rows){
     }
     return n;
 }
+// the menu's rows, honouring the search filter (Nov 14): with a
+// filter the list goes FLAT — matching items only, no segment
+// headers — and an empty result is one -99 sentinel row so every
+// consumer (nav, render, detail strip) has something safe to hold.
+static const char *craft_row_name(int id);
+static int craft_ci_contains(const char *hay, const char *needle){
+    int nl = slen(needle); if (!nl) return 1;
+    for (int i=0; hay[i]; i++){
+        int j=0;
+        while (needle[j] && hay[i+j]){
+            char a = hay[i+j], b2 = needle[j];
+            if (a>='a' && a<='z') a -= 32;
+            if (b2>='a' && b2<='z') b2 -= 32;
+            if (a != b2) break;
+            j++;
+        }
+        if (j==nl) return 1;
+    }
+    return 0;
+}
+static int craft_menu_rows(BwSim *S, Buddy *b, int *rows){
+    if (!S->craft_filter[0]) return craft_all_rows(b, rows);
+    int n=0;
+    for (int c=0;c<5;c++){
+        int ids[16]; int m = craft_rows(b, c, ids);
+        for (int i=0;i<m && n<64;i++)
+            if (craft_ci_contains(craft_row_name(ids[i]), S->craft_filter)) rows[n++]=ids[i];
+    }
+    if (!n){ rows[0] = -99; return 1; }
+    return n;
+}
 // move the selection one CRAFTABLE row in a direction, skipping the
 // segment headers, wrapping around the ends of the list
 static int craft_step(const int *rows, int n, int from, int dir){
@@ -12884,6 +13048,7 @@ static int craft_step(const int *rows, int n, int from, int dir){
     return from;
 }
 static int craft_row_cat(int id){
+    if (id<0) return 0;
     if (id>=100) return id==102? 2 : 4;
     return CREC[id].cat;
 }
@@ -13179,7 +13344,35 @@ static void craft_update(int pi, float dt, const BwIn *in){
         // ONE list with segment headers (craft_all_rows). Up/down are
         // the only way the selection moves — left/right do nothing in
         // here on purpose, so a sensitive dpad can never flip lists.
-        int rows[64]; int n = craft_all_rows(b, rows);
+        int rows[64]; int n = craft_menu_rows(S, b, rows);
+        // SEARCH (Nov 14): "/" (or a tap on the search row) starts
+        // it — P itself belongs to the BW menu and never reaches
+        // this update. Typed letters filter the list flat: the fix
+        // for scrolling thirty rows on a phone. While searching,
+        // typed characters are text, never commands.
+        int typed_now = 0;
+        if (!S->craft_search && pi==G.my_id){
+            for (int i=0;i<IN.typed_n;i++) if (IN.typed[i]=='/'){ S->craft_search = 1; break; }
+        }
+        if (S->craft_search){
+            if (pi==G.my_id){
+                for (int i=0;i<IN.typed_n;i++){
+                    char c = IN.typed[i];
+                    if (c>='a' && c<='z') c -= 32;
+                    if ((c>='A' && c<='Z') || (c>='0' && c<='9') || c==' '){
+                        int L = slen(S->craft_filter);
+                        if (L<12){ S->craft_filter[L]=c; S->craft_filter[L+1]=0; typed_now=1; }
+                    }
+                }
+                if (IN.backspace){ int L = slen(S->craft_filter); if (L>0) S->craft_filter[L-1]=0; typed_now=1; }
+            }
+            if (typed_now){ S->craft_sel=0; S->craft_scroll=0; n = craft_menu_rows(S, b, rows); }
+            // leaving search clears the filter: the soft-keyboard
+            // session restarts from an empty field every time, so a
+            // standing filter could never be edited again — done
+            // searching means the whole list comes back
+            if (!typed_now && in->exit_){ S->craft_search=0; S->craft_filter[0]=0; S->craft_sel=0; S->craft_scroll=0; S->craft_prevk = in->keys; return; }
+        }
         if (S->craft_sel>=n) S->craft_sel=0;
         if (rows[S->craft_sel]<0) S->craft_sel = craft_step(rows, n, S->craft_sel, 1);
         if (in->up){ S->craft_sel = craft_step(rows, n, S->craft_sel, -1); sfx(6); }
@@ -13197,13 +13390,20 @@ static void craft_update(int pi, float dt, const BwIn *in){
         if (pi==G.my_id && IN.tapped){
             int vx,vy,vw2,vh2; p1_view_rect(&vx,&vy,&vw2,&vh2);
             int visn = n<7? n : 7;
-            int w=380, h=40+visn*20+16+24;
+            int w=380, h=40+visn*20+16+24+22;
             int x=vx+(vw2-w)/2, y=vy+(vh2-h)/2;
             if (w>vw2-8){ w=vw2-8; x=vx+4; }
             int tx=IN.tap_x, ty=IN.tap_y; IN.tapped=0;
-            if (tx<x || tx>x+w || ty<y || ty>y+h){ S->craft_menu=0; sfx(6); }
+            if (tx>=x+10 && tx<=x+w-10 && ty>=y+28 && ty<y+50){
+                // the search row toggles typing; ending a search
+                // clears its filter (see the keyboard path)
+                S->craft_search = !S->craft_search;
+                if (!S->craft_search){ S->craft_filter[0]=0; S->craft_sel=0; S->craft_scroll=0; }
+                sfx(6);
+            }
+            else if (tx<x || tx>x+w || ty<y || ty>y+h){ S->craft_menu=0; S->craft_search=0; sfx(6); }
             else for (int r=S->craft_scroll; r<S->craft_scroll+visn && r<n; r++){
-                int ry = y+30+(r-S->craft_scroll)*20;
+                int ry = y+52+(r-S->craft_scroll)*20;
                 if (ty>=ry-4 && ty<ry+15){
                     if (rows[r]<0){ S->craft_sel = craft_step(rows, n, r, 1); sfx(6); }
                     else if (r==S->craft_sel) craft_do(pi, rows[r]);
@@ -13214,13 +13414,13 @@ static void craft_update(int pi, float dt, const BwIn *in){
             S->craft_prevk = in->keys;
             return;
         }
-        if (in->sel || in->interact) craft_do(pi, rows[S->craft_sel]);
-        if (in->exit_ || in->wall) S->craft_menu=0;
+        if ((in->sel || in->interact) && !typed_now && rows[S->craft_sel]>=0) craft_do(pi, rows[S->craft_sel]);
+        if (in->exit_ || in->wall){ S->craft_menu=0; S->craft_search=0; }
         S->craft_prevk = in->keys;
         return;
     }
     if (in->wall){ int rows[64]; int n = craft_all_rows(b, rows);
-        S->craft_menu=1; S->craft_sel = n>1? craft_step(rows, n, 0, 1) : 0; S->craft_scroll=0; S->craft_demolish=0; sfx(6); S->craft_prevk = in->keys; return; }
+        S->craft_menu=1; S->craft_sel = n>1? craft_step(rows, n, 0, 1) : 0; S->craft_scroll=0; S->craft_demolish=0; S->craft_filter[0]=0; S->craft_search=0; sfx(6); S->craft_prevk = in->keys; return; }
     // movement, meadow-style, against the wild's own solids
     float mx=0, my=0; int k=in->keys;
     if (k&K_UP) my-=1; if (k&K_DOWN) my+=1; if (k&K_LEFT) mx-=1; if (k&K_RIGHT) mx+=1;
@@ -13965,15 +14165,30 @@ static void craft_render(int pi){
         if (d>0.75f) draw_text_center(vx + vw2/2, vy + vh2/2-4, "Z Z Z", 2, COL(200,210,255));
     }
     if (S->craft_menu){
-        int rows[64]; int n = craft_all_rows(b, rows);
+        int rows[64]; int n = craft_menu_rows(S, b, rows);
         int visn = n<7? n : 7;   // the list scrolls: seven rows, never a wall of text
-        int w=380, h=40+visn*20+16+24;   // +24: the selection detail strip
+        int w=380, h=40+visn*20+16+24+22;   // +24: the selection detail strip; +22: the search row
         int x=vx+(vw2-w)/2, y=vy+(vh2-h)/2;
         if (w>vw2-8){ w=vw2-8; x=vx+4; }
         rect_fill(x, y, w, h, COL(18,22,20)); rect_line(x, y, w, h, COL(198,164,84));
         draw_text_center(x+w/2, y+8, "CRAFTING", 2, COL(255,214,64));
+        // the search row: tap it (or press P) and type — the list
+        // filters flat to matching items, a mercy on a phone
+        { int sy2 = y+28;
+          rect_fill(x+10, sy2, w-20, 17, S->craft_search? COL(52,46,22) : COL(24,28,24));
+          rect_line(x+10, sy2, w-20, 17, S->craft_search? COL(255,220,90) : COL(90,96,90));
+          char sb[48]; char *q=sb; q=sappend(q, "SEARCH: ");
+          if (S->craft_filter[0]) q=sappend(q, S->craft_filter);
+          else if (!S->craft_search) q=sappend(q, mobile_ui()? "TAP HERE, THEN TYPE" : "PRESS /, THEN TYPE");
+          if (S->craft_search && ((int)(G.anim_t*2.4f)&1)) q=sappend(q, "_");
+          *q=0;
+          draw_text(x+16, sy2+5, sb, 1, (S->craft_filter[0] || S->craft_search)? COL(255,240,200) : COL(150,170,190)); }
         for (int r=S->craft_scroll;r<S->craft_scroll+visn && r<n;r++){
-            int id = rows[r], ry = y+30+(r-S->craft_scroll)*20;
+            int id = rows[r], ry = y+52+(r-S->craft_scroll)*20;
+            if (id==-99){   // the filter matched nothing
+                draw_text_center(x+w/2, ry, "NOTHING MATCHES - TRY FEWER LETTERS", 1, COL(255,150,130));
+                continue;
+            }
             if (id<0){   // a segment header: a signpost in the list, never selectable
                 rect_fill(x+10, ry-2, w-20, 13, COL(26,32,28));
                 draw_text_center(x+w/2, ry, CRAFT_CAT_NAME[-id-1], 1, COL(198,164,84));
@@ -13988,7 +14203,7 @@ static void craft_render(int pi){
         }
         // the scrollbar: a track, and a thumb that says where you are
         if (n>visn){
-            int track_y = y+30, track_h = visn*20-8;
+            int track_y = y+52, track_h = visn*20-8;
             rect_fill(x+w-10, track_y, 3, track_h, COL(52,58,54));
             int th = track_h*visn/n; if (th<12) th=12;
             int ty2 = track_y + (track_h-th)*S->craft_scroll/(n-visn);
@@ -13997,14 +14212,19 @@ static void craft_render(int pi){
         // the selection, up close: its icon in a gold chip, its name big —
         // what you are about to craft is never in doubt (Daniel, Nov 5)
         { int sid = rows[S->craft_sel]; int dy2 = y+h-40;
-          char sst[64]; craft_row_status(b, sid, sst);
           rect_fill(x+10, dy2, w-20, 24, COL(24,28,24));
+          if (sid==-99){
+              draw_text(x+38, dy2+5, "NO MATCHES", 2, COL(255,150,130));
+          } else {
+          char sst[64]; craft_row_status(b, sid, sst);
           rect_line(x+14, dy2+4, 16, 16, COL(198,164,84));
           craft_icon(x+15, dy2+5, sid);
           draw_text(x+38, dy2+5, craft_row_shortname(sid), 2, craft_row_color(b, sid));
-          draw_text(x+w-28-text_w(sst,1), dy2+8, sst, 1, COL(200,214,200)); }
+          draw_text(x+w-28-text_w(sst,1), dy2+8, sst, 1, COL(200,214,200)); } }
         { char buf[96]; char *q=buf;
-          if (mobile_ui() && !pad_mode()){
+          if (S->craft_search){
+              draw_text_center(x+w/2, y+h-14, "TYPE TO FILTER - ESC WHEN DONE", 1, COL(150,170,190));
+          } else if (mobile_ui() && !pad_mode()){
               draw_text_center(x+w/2, y+h-14, G.touch_ctl? "STICK PICKS - FIRE CRAFTS - TAP ROWS TOO" : "TAP A ROW - TAP IT AGAIN TO CRAFT - TAP OUTSIDE TO CLOSE", 1, COL(150,170,190));
           } else {
               q=sappend(q, pad_mode()? "DPAD/STICK" : "ARROWS"); q=sappend(q, " PICK - ");
@@ -14882,7 +15102,19 @@ static void cas_update(int pi, float dt, const BwIn *in){
         }
         return;
     }
-    if (in->exit_){ bw_exit(pi, 0); return; }
+    if (in->exit_){
+        // TRAPPED means trapped (Daniel, Nov 14): there is no
+        // bail-out from the castle. The only way out is the
+        // courtyard gate, and the gate wants the key — so leaving
+        // by ANY door requires cas_key. (Dying still carries you
+        // out; that is not leaving, that is losing.)
+        if (S->cas_key){ bw_exit(pi, 0); return; }
+        if (S->cas_notecd <= 0){
+            S->cas_notecd = 2.0f;
+            cas_note(S, "NO WAY OUT. SOMEWHERE IN HERE IS A KEY.", 2.0f);
+            sfx(16);
+        }
+    }
     if (S->cas_hitcd > 0) S->cas_hitcd -= dt;
     if (S->cas_notecd > 0) S->cas_notecd -= dt;
     // movement at a fixed castle pace
@@ -15193,28 +15425,83 @@ static void crt_arc(float cx, float cy, float a0, float a1){
     for (int i = 0; i < n; i++){ float a = a0 + (a1-a0) * (float)i / (float)n;
         crt_addpt(cx + 70.0f*fcos(a), cy + 70.0f*fsin(a)); }
 }
-static void crt_build(void){
-    if (CRT_N > 0) return;
-    crt_line(180, 290, 460, 290);          // bottom straight (start/finish)
-    crt_arc(460, 220, PI/2, 0);            // bottom-right corner
-    crt_line(530, 220, 530, 140);          // right straight
-    crt_arc(460, 140, 0, -PI/2);           // top-right corner
-    crt_line(460, 70, 180, 70);            // top straight
-    crt_arc(180, 140, -PI/2, -PI);         // top-left corner
-    crt_line(110, 140, 110, 220);          // left straight
-    crt_arc(180, 220, PI, PI/2);           // bottom-left corner, closing the loop
+// one circuit per REGION (Nov 14): track 0 is the hand-built
+// Meadows oval; tracks 1-7 are radial circuits whose wiggle grows
+// with the region's distance from the epicenter — the far country
+// is twistier, exactly like its bugs are meaner. a1/a2: lobe
+// amplitudes (2- and 3-lobed), p1/p2: their phases.
+// one sky per region for the kart view, same discipline as the run
+static const u32 CRT_SKY[NREGIONS][2] = {
+    { COL(96,168,235),  COL(196,228,250) },   // Clean Code Meadows
+    { COL(104,172,228), COL(206,232,246) },   // Spaghetti Fields
+    { COL(122,158,196), COL(214,220,208) },   // Legacy Lands
+    { COL(206,158,106), COL(240,214,170) },   // Kernel Badlands
+    { COL(168,204,230), COL(226,240,250) },   // Frozen Cache Fields
+    { COL(36,32,88),    COL(96,84,160) },     // Neon RAM Flats (dusk)
+    { COL(80,146,124),  COL(190,226,196) },   // Cable Jungle
+    { COL(92,88,112),   COL(168,162,180) },   // The Unmaintained Depths
+};
+// the standings order: points, then the latest race's place, then grid order
+static void crt_order(BwSim *S, int *ord){
+    for (int i = 0; i < 6; i++) ord[i] = i;
+    for (int a = 0; a < 5; a++) for (int b2 = a + 1; b2 < 6; b2++){
+        int x = ord[a], y = ord[b2], swap = 0;
+        if (S->crt_pts[y] > S->crt_pts[x]) swap = 1;
+        else if (S->crt_pts[y] == S->crt_pts[x]){
+            int lx = S->crt_lastpl[x]? S->crt_lastpl[x] : 9, ly = S->crt_lastpl[y]? S->crt_lastpl[y] : 9;
+            if (ly < lx) swap = 1;
+        }
+        if (swap){ ord[a] = y; ord[b2] = x; }
+    }
+}
+static const float CRT_PARAM[7][4] = {
+    { 10, 0,  0.6f, 0.0f },   // 1 Spaghetti Fields: a gentle sway
+    { 15, 5,  2.1f, 0.4f },   // 2 Legacy Lands
+    { 18, 8,  4.0f, 2.2f },   // 3 Kernel Badlands
+    { 13, 13, 1.2f, 3.9f },   // 4 Frozen Cache Fields
+    { 20, 10, 5.3f, 1.1f },   // 5 Neon RAM Flats
+    { 16, 16, 0.2f, 5.0f },   // 6 Cable Jungle
+    { 22, 13, 3.3f, 2.8f },   // 7 The Unmaintained Depths
+};
+static void crt_build(int track){
+    CRT_N = 0;
+    if (track <= 0){
+        crt_line(180, 290, 460, 290);          // bottom straight (start/finish)
+        crt_arc(460, 220, PI/2, 0);            // bottom-right corner
+        crt_line(530, 220, 530, 140);          // right straight
+        crt_arc(460, 140, 0, -PI/2);           // top-right corner
+        crt_line(460, 70, 180, 70);            // top straight
+        crt_arc(180, 140, -PI/2, -PI);         // top-left corner
+        crt_line(110, 140, 110, 220);          // left straight
+        crt_arc(180, 220, PI, PI/2);           // bottom-left corner, closing the loop
+    } else {
+        const float *P = CRT_PARAM[track-1];
+        int M = 168;
+        for (int i = 0; i < M; i++){
+            float th = (float)i / (float)M * 6.2831853f;
+            float r = 92.0f + P[0]*fsin(2.0f*th + P[2]) + P[1]*fsin(3.0f*th + P[3]);
+            crt_addpt(320.0f + fcos(th) * r * 1.82f, 180.0f + fsin(th) * r);
+        }
+    }
     CRT_CUM[0] = 0;
     for (int i = 1; i <= CRT_N; i++){ int a = i-1, b = i % CRT_N;
         float dx = CRT_WX[b] - CRT_WX[a], dy = CRT_WY[b] - CRT_WY[a];
         CRT_CUM[i] = CRT_CUM[i-1] + fsqrt(dx*dx + dy*dy); }
     CRT_LEN = CRT_CUM[CRT_N];
-    { int bi = 0; float bd = 1e18f;        // the start line sits at (320, 290)
+    { int bi = 0; float bd = 1e18f;        // the start line sits at the bottom, near (320, 290)
       for (int i = 0; i < CRT_N; i++){ float dx = CRT_WX[i]-320, dy = CRT_WY[i]-290;
           float d = dx*dx + dy*dy; if (d < bd){ bd = d; bi = i; } }
       CRT_OFF = CRT_CUM[bi]; }
-    CRT_PAD[0][0] = 320; CRT_PAD[0][1] = 70;
-    CRT_PAD[1][0] = 530; CRT_PAD[1][1] = 180;
-    CRT_PAD[2][0] = 110; CRT_PAD[2][1] = 180;
+    if (track <= 0){
+        CRT_PAD[0][0] = 320; CRT_PAD[0][1] = 70;
+        CRT_PAD[1][0] = 530; CRT_PAD[1][1] = 180;
+        CRT_PAD[2][0] = 110; CRT_PAD[2][1] = 180;
+    } else {
+        static const float PF[3] = { 0.30f, 0.56f, 0.82f };
+        for (int k = 0; k < 3; k++){ float x, y, hx, hy;
+            crt_point_at(CRT_OFF + PF[k] * CRT_LEN, 0, &x, &y, &hx, &hy);
+            CRT_PAD[k][0] = x; CRT_PAD[k][1] = y; }
+    }
     // scenery: a ring of trees and tire stacks outside the road, a few
     // infield trees, and the grandstand watching the top straight
     { int n = 0;
@@ -15227,9 +15514,26 @@ static void crt_build(void){
           if (x < 14 || x > 626 || y < 14 || y > 346) continue;
           CRT_SCX[n] = x; CRT_SCY[n] = y; CRT_SCT[n] = ((h >> 12) % 6 == 0)? 1 : 0; n++;
       }
-      static const float INF[8][2] = { {320,180},{240,150},{400,210},{270,225},{370,140},{200,200},{440,160},{320,118} };
-      for (int k = 0; k < 8 && n < CRT_SCN_N - 1; k++){ CRT_SCX[n] = INF[k][0]; CRT_SCY[n] = INF[k][1]; CRT_SCT[n] = 0; n++; }
-      CRT_SCX[n] = 320; CRT_SCY[n] = 14; CRT_SCT[n] = 3; n++;
+      if (track <= 0){
+          static const float INF[8][2] = { {320,180},{240,150},{400,210},{270,225},{370,140},{200,200},{440,160},{320,118} };
+          for (int k = 0; k < 8 && n < CRT_SCN_N - 1; k++){ CRT_SCX[n] = INF[k][0]; CRT_SCY[n] = INF[k][1]; CRT_SCT[n] = 0; n++; }
+          CRT_SCX[n] = 320; CRT_SCY[n] = 14; CRT_SCT[n] = 3; n++;
+      } else {
+          // infield: sample the inside of the loop, keeping only
+          // spots a clear 50 units from the asphalt
+          for (int k = 0; k < 14 && n < CRT_SCN_N - 2; k++){
+              float x, y, hx, hy;
+              crt_point_at(CRT_OFF + (k + 0.5f) * CRT_LEN / 14.0f, -72.0f - (float)(k % 3) * 14.0f, &x, &y, &hx, &hy);
+              if (x < 20 || x > 620 || y < 20 || y > 340) continue;
+              float bd2 = 1e18f;
+              for (int i = 0; i < CRT_N; i += 2){ float dx = CRT_WX[i]-x, dy = CRT_WY[i]-y; float d = dx*dx + dy*dy; if (d < bd2) bd2 = d; }
+              if (bd2 < 50.0f * 50.0f) continue;
+              CRT_SCX[n] = x; CRT_SCY[n] = y; CRT_SCT[n] = 0; n++;
+          }
+          // the grandstand watches the start from outside the loop
+          { float x, y, hx, hy; crt_point_at(CRT_OFF + CRT_LEN * 0.04f, 116.0f, &x, &y, &hx, &hy);
+            if (x > 56 && x < 584 && y > 22 && y < 338){ CRT_SCX[n] = x; CRT_SCY[n] = y; CRT_SCT[n] = 3; n++; } }
+      }
       while (n < CRT_SCN_N){ CRT_SCX[n] = -100; CRT_SCY[n] = -100; CRT_SCT[n] = 0; n++; }
     }
 }
@@ -15275,7 +15579,9 @@ static BwIn crt_gin[MAXP];   // a race guest's latest input, keyed by host pi
 // pick the cart on their own side too — only then are you linked
 static void crt_enter(int pi){
     BwSim *S = &BWS[pi]; Buddy *b = &G.bud[pi];
-    crt_build();
+    S->crt_cup = 0; S->crt_race = 0; S->crt_track = 0;
+    for (int i = 0; i < 6; i++){ S->crt_pts[i] = 0; S->crt_lastpl[i] = 0; S->crt_gprank[i] = 0; }
+    crt_build(0);
     S->crt_state = 3; S->crt_t = 0; S->crt_count = 3.4f; S->crt_fint = 0;
     S->crt_fincount = 0; S->crt_player_place = 0;
     S->crt_duo = -1; S->crt_guest = 0;
@@ -15308,7 +15614,8 @@ static void crt_start_race(int pi){
         S->crt_finplace[i] = 0; S->crt_place[i] = slot + 1;
         S->crt_seg[i] = crt_nearest_full(x, y);
         S->crt_off[i] = (i == 0)? 0 : ((i % 2 == 0)? -1 : 1) * (7.0f + (float)((i * 37) % 9));
-        S->crt_skill[i] = (i == 0)? 1.0f : SKILL[i-1] * (0.99f + rng_f() * 0.02f);
+        // the far country's rivals are quicker, like its bugs
+        S->crt_skill[i] = (i == 0)? 1.0f : SKILL[i-1] * (0.99f + rng_f() * 0.02f) * (1.0f + 0.012f * (float)S->crt_track);
     }
     // colours: the humans wear their waiting-room picks, the rivals
     // take whatever is left in palette order
@@ -15336,7 +15643,7 @@ static void crt_start_race(int pi){
     }
     b->x = CRT_OX + S->crt_x[0]; b->y = CRT_OY + S->crt_y[0];
     b->bw_x = b->x; b->bw_y = b->y; b->aim = S->crt_h[0];
-    { char *q = S->note; q = sappend(q, S->crt_duo >= 0? "HEAD-TO-HEAD! 3 LAPS. HOLD FIRE TO GO - BEAT YOUR FELLOW HUMAN!" : "3 LAPS. HOLD FIRE TO GO - RIDE THE BOOST PADS, WIN!"); *q = 0; S->note_t = 2.4f; }
+    { char *q = S->note; q = sappend(q, "RACE "); q = sapp_int(q, S->crt_race + 1); q = sappend(q, "/4 - "); q = sappend(q, REGION_NAME[S->crt_track]); q = sappend(q, ". HOLD FIRE TO GO!"); *q = 0; S->note_t = 2.4f; }
     if (S->crt_duo >= 0){ Buddy *gb = &G.bud[S->crt_duo];
         gb->x = CRT_OX + S->crt_x[1]; gb->y = CRT_OY + S->crt_y[1];
         gb->bw_x = gb->x; gb->bw_y = gb->y; gb->aim = S->crt_h[1]; }
@@ -15399,6 +15706,33 @@ static void crt_finish_floater(int who, int place){
     q = sapp_int(q, place); q = sappend(q, "!"); *q = 0;
     spawn_floater(p->x, p->y - 26, buf, COL(255, 220, 120));
 }
+// a cup begins: points wiped, race 1 on the cup's first region
+static void crt_gp_begin(int pi){
+    BwSim *S = &BWS[pi];
+    S->crt_race = 0;
+    for (int i = 0; i < 6; i++){ S->crt_pts[i] = 0; S->crt_lastpl[i] = 0; S->crt_gprank[i] = 0; }
+    S->crt_track = S->crt_cup * 4;
+    crt_build(S->crt_track);
+    crt_start_race(pi);
+}
+// the cup ends: rank the field, and bank each human's best rank
+static void crt_gp_finalize(int pi){
+    BwSim *S = &BWS[pi];
+    int ord[6]; crt_order(S, ord);
+    for (int r = 0; r < 6; r++) S->crt_gprank[ord[r]] = r + 1;
+    for (int h = 0; h < 2; h++){
+        int who = (h == 0)? pi : S->crt_duo;
+        if (who < 0) continue;
+        Buddy *hb = &G.bud[who];
+        int rank = S->crt_gprank[h];
+        int cur = (S->crt_cup == 0)? hb->crt_cupbest % 8 : hb->crt_cupbest / 8;
+        if (!cur || rank < cur){
+            if (S->crt_cup == 0) hb->crt_cupbest = (hb->crt_cupbest / 8) * 8 + rank;
+            else hb->crt_cupbest = (hb->crt_cupbest % 8) + rank * 8;
+        }
+    }
+    do_save();
+}
 static void crt_update(int pi, float dt, const BwIn *in){
     BwSim *S = &BWS[pi]; Buddy *b = &G.bud[pi];
     if (S->crt_guest){
@@ -15441,6 +15775,10 @@ static void crt_update(int pi, float dt, const BwIn *in){
         int edges = in->keys & ~S->crt_prevk; S->crt_prevk = in->keys;
         if (edges & K_LEFT){ do { S->crt_colsel = (S->crt_colsel + 5) % 6; } while (S->crt_duo >= 0 && S->crt_colsel == S->crt_colsel2); sfx(6); }
         if (edges & K_RIGHT){ do { S->crt_colsel = (S->crt_colsel + 1) % 6; } while (S->crt_duo >= 0 && S->crt_colsel == S->crt_colsel2); sfx(6); }
+        // the cup is the host's call: UP for the HOME CUP (regions
+        // 1-4), DOWN for the FAR CUP (regions 5-8)
+        if (edges & K_UP){ S->crt_cup = 0; S->crt_track = 0; crt_build(0); sfx(6); }
+        if (edges & K_DOWN){ S->crt_cup = 1; S->crt_track = 4; crt_build(4); sfx(6); }
         if (in->exit_){
             if (S->crt_duo >= 0){
                 // send the partner back to their own solo waiting room
@@ -15458,9 +15796,9 @@ static void crt_update(int pi, float dt, const BwIn *in){
             if (gedges & K_RIGHT){ do { S->crt_colsel2 = (S->crt_colsel2 + 1) % 6; } while (S->crt_colsel2 == S->crt_colsel); }
             if (g->sel && S->crt_t > 0.35f) S->crt_ready |= 2;
             if (in->sel && S->crt_t > 0.35f) S->crt_ready |= 1;
-            if (S->crt_ready == 3) crt_start_race(pi);
+            if (S->crt_ready == 3) crt_gp_begin(pi);
         } else if (in->sel && S->crt_t > 0.35f){
-            crt_start_race(pi);
+            crt_gp_begin(pi);
         }
         return;
     }
@@ -15470,15 +15808,16 @@ static void crt_update(int pi, float dt, const BwIn *in){
             int tds = (int)(S->crt_t * 10.0f);
             int guest = S->crt_duo, gplace = S->crt_hfin[1];
             crt_save_record(pi, S->crt_hfin[0], tds);
-            if (guest >= 0){
-                BwSim *GS2 = &BWS[guest];
-                crt_save_record(guest, gplace, tds);
-                GS2->crt_guest = 0; S->crt_duo = -1;
-                bw_exit(guest, 0);
-                crt_finish_floater(guest, gplace);
+            if (guest >= 0) crt_save_record(guest, gplace, tds);
+            // bank the Grand Prix points for the whole field
+            static const int PTS[6] = { 10, 8, 6, 5, 4, 3 };
+            for (int i = 0; i < 6; i++){
+                int pl = S->crt_finplace[i]? S->crt_finplace[i] : S->crt_place[i];
+                S->crt_pts[i] += PTS[pl - 1];
+                S->crt_lastpl[i] = pl;
             }
-            bw_exit(pi, 0);
-            crt_finish_floater(pi, S->crt_hfin[0]);
+            if (S->crt_race < 3){ S->crt_state = 4; S->crt_fint = 5.0f; }
+            else { S->crt_state = 5; S->crt_fint = 7.0f; crt_gp_finalize(pi); }
         }
         return;
     }
@@ -15491,6 +15830,42 @@ static void crt_update(int pi, float dt, const BwIn *in){
             spawn_floater(gp->x, gp->y - 26, "THE HOST LEFT THE RACE", COL(255, 200, 150));
         }
         bw_exit(pi, 0); return;
+    }
+    if (S->crt_state == 4){
+        // the standings between races: breathe, read the table,
+        // then roll on to the next region (FIRE hurries it along)
+        S->crt_fint -= dt;
+        if (S->crt_fint <= 0 || in->sel){
+            S->crt_race++;
+            S->crt_track = S->crt_cup * 4 + S->crt_race;
+            crt_build(S->crt_track);
+            crt_start_race(pi);
+        }
+        return;
+    }
+    if (S->crt_state == 5){
+        // the final standings: the cup is decided — linger, then
+        // everyone goes back to the mall with their rank
+        S->crt_fint -= dt;
+        if (S->crt_fint <= 0 || in->sel){
+            int guest = S->crt_duo;
+            int hrank = S->crt_gprank[0], grank = S->crt_gprank[1];
+            if (guest >= 0){
+                BwSim *GS2 = &BWS[guest];
+                GS2->crt_guest = 0; S->crt_duo = -1;
+                bw_exit(guest, 0);
+                Player *gp = &G.p[guest];
+                char buf[64]; char *q = buf;
+                q = sappend(q, "GRAND PRIX: YOU RANKED P"); q = sapp_int(q, grank); q = sappend(q, " OF 6!"); *q = 0;
+                spawn_floater(gp->x, gp->y - 26, buf, COL(255, 220, 120));
+            }
+            bw_exit(pi, 0);
+            { Player *p = &G.p[pi];
+              char buf[64]; char *q = buf;
+              q = sappend(q, "GRAND PRIX: YOU RANKED P"); q = sapp_int(q, hrank); q = sappend(q, " OF 6!"); *q = 0;
+              spawn_floater(p->x, p->y - 26, buf, COL(255, 220, 120)); }
+        }
+        return;
     }
     if (S->crt_state == 0){
         float prev = S->crt_count; S->crt_count -= dt;
@@ -15697,6 +16072,9 @@ static void crt_render_view(int sim_pi, int viewer_pi){
             if ((tx2 + ty2) & 1) rect_fill(KTX(tx2*32), KTY(ty2*32), KTS(32) + 1, KTS(32) + 1, COL(22, 52, 28));
         draw_text_center(vx + vw2/2, vy + 26, "SUPER BUDDY CART", vw2 >= 620? 3 : 2, COL(250, 200, 50));
         draw_text_center(vx + vw2/2, vy + 62, "THE WAITING ROOM", 2, COL(255, 255, 255));
+        { char buf[80]; char *q = buf;
+          q = sappend(q, "GRAND PRIX - "); q = sappend(q, S->crt_cup? "FAR CUP: CACHE TO THE DEPTHS" : "HOME CUP: MEADOWS TO BADLANDS"); *q = 0;
+          draw_text_center(vx + vw2/2, vy + 84, buf, 1, COL(250, 200, 50)); }
         // your kart, big and proud, wearing your pick
         { int cx = vx + vw2/2, cy = vy + vh2/2 - 6;
           disc_fill(cx - KTS(48), cy - KTS(35), KTS(17), COL(16, 14, 24));
@@ -15710,7 +16088,7 @@ static void crt_render_view(int sim_pi, int viewer_pi){
           tri_fill(cx + KTS(92), cy - KTS(16), cx + KTS(92), cy + KTS(16), cx + KTS(70), cy, COL(255, 255, 255));
           draw_text_center(cx, cy + KTS(64), COLNAME[mycol], 2, COL(255, 255, 255)); }
         draw_text_center(vx + vw2/2, vy + 98, pad_mode()? "IN THE RACE: HOLD A TO GO, STEER WITH THE STICK" : "IN THE RACE: HOLD FIRE TO GO, STEER WITH THE ARROWS", 1, COL(170, 200, 190));
-        draw_text_center(vx + vw2/2, vy + vh2 - 104, "LEFT / RIGHT - PICK YOUR COLOUR", 1, COL(200, 230, 200));
+        draw_text_center(vx + vw2/2, vy + vh2 - 104, vk == 0? "LEFT / RIGHT - COLOUR      UP / DOWN - CUP" : "LEFT / RIGHT - COLOUR      THE HOST PICKS THE CUP", 1, COL(200, 230, 200));
         if (S->crt_duo >= 0){
             int imready = (vk == 0)? (S->crt_ready & 1) : (S->crt_ready & 2);
             int theyready = (vk == 0)? (S->crt_ready & 2) : (S->crt_ready & 1);
@@ -15722,7 +16100,50 @@ static void crt_render_view(int sim_pi, int viewer_pi){
         } else {
             draw_text_center(vx + vw2/2, vy + vh2 - 82, "NO PARTNER YET", 1, COL(255, 240, 200));
             draw_text_center(vx + vw2/2, vy + vh2 - 62, "THE OTHER PLAYER MUST PICK THE CART TOO", 1, COL(220, 220, 220));
-            draw_text_center(vx + vw2/2, vy + vh2 - 42, "FIRE: RACE SOLO   -   LEAVE: BACK OUT", 1, COL(255, 255, 255));
+            draw_text_center(vx + vw2/2, vy + vh2 - 42, "FIRE: START THE GRAND PRIX   -   LEAVE: BACK OUT", 1, COL(255, 255, 255));
+        }
+        if (S->note_t > 0){
+            rect_fill(vx, vy + vh2 - 22, vw2, 22, COL(10, 12, 10));
+            draw_text_center(vx + vw2/2, vy + vh2 - 15, S->note, 1, COL(220, 255, 220));
+        }
+        return;
+    }
+    if (S->crt_state == 4 || S->crt_state == 5){
+        // ---- the STANDINGS between (and after) the cup's races
+        int fin = (S->crt_state == 5);
+        rect_fill(vx, vy, vw2, vh2, col_shade(REGION_GB[S->crt_track], 0.35f));
+        for (int ty2 = 0; ty2 < 12; ty2++) for (int tx2 = 0; tx2 < 20; tx2++)
+            if ((tx2 + ty2) & 1) rect_fill(KTX(tx2*32), KTY(ty2*32), KTS(32) + 1, KTS(32) + 1, col_shade(REGION_GB[S->crt_track], 0.45f));
+        draw_text_center(vx + vw2/2, vy + 24, fin? "FINAL STANDINGS" : "STANDINGS", 3, COL(250, 200, 50));
+        { char buf[80]; char *q = buf;
+          q = sappend(q, S->crt_cup? "FAR CUP" : "HOME CUP");
+          if (!fin){ q = sappend(q, " - AFTER RACE "); q = sapp_int(q, S->crt_race + 1); q = sappend(q, " OF 4"); }
+          *q = 0; draw_text_center(vx + vw2/2, vy + 62, buf, 1, COL(255, 255, 255)); }
+        int ord[6]; crt_order(S, ord);
+        for (int r = 0; r < 6; r++){
+            int k = ord[r], ry = vy + 92 + r * 30;
+            if (k == vk) rect_fill(vx + vw2/2 - 170, ry - 5, 340, 24, COL(52, 46, 22));
+            char buf[80]; char *q = buf;
+            q = sappend(q, "P"); q = sapp_int(q, r + 1); q = sappend(q, "  ");
+            q = sappend(q, BUD_ELF[S->crt_nameidx[k] % BUD_NAMES_N]);
+            if (k == vk) q = sappend(q, "  (YOU)");
+            else if (S->crt_duo >= 0 && k == 1 - vk) q = sappend(q, "  (PARTNER)");
+            q = sappend(q, "  -  "); q = sapp_int(q, S->crt_pts[k]); q = sappend(q, " PTS"); *q = 0;
+            draw_text_center(vx + vw2/2, ry, buf, 2, (k == vk)? COL(255, 240, 160) : COL(225, 230, 235));
+        }
+        if (fin){
+            Buddy *vb = &G.bud[viewer_pi];
+            char buf[80]; char *q = buf;
+            q = sappend(q, "YOU RANKED P"); q = sapp_int(q, S->crt_gprank[vk]); q = sappend(q, " OF 6");
+            int best = (S->crt_cup == 0)? vb->crt_cupbest % 8 : vb->crt_cupbest / 8;
+            if (best){ q = sappend(q, "   -   CUP BEST P"); q = sapp_int(q, best); }
+            *q = 0;
+            draw_text_center(vx + vw2/2, vy + 92 + 6 * 30 + 12, buf, 1, COL(255, 240, 200));
+            if (S->crt_gprank[vk] == 1) draw_text_center(vx + vw2/2, vy + 92 + 6 * 30 + 32, "CHAMPION OF THE CUP!", 1, COL(250, 200, 50));
+        } else {
+            char buf[80]; char *q = buf;
+            q = sappend(q, "NEXT: "); q = sappend(q, REGION_NAME[S->crt_cup * 4 + S->crt_race + 1]); *q = 0;
+            draw_text_center(vx + vw2/2, vy + 92 + 6 * 30 + 12, buf, 1, COL(200, 230, 200));
         }
         if (S->note_t > 0){
             rect_fill(vx, vy + vh2 - 22, vw2, 22, COL(10, 12, 10));
@@ -15752,36 +16173,42 @@ static void crt_render_view(int sim_pi, int viewer_pi){
       } while (0)
       // sky: a four-band gradient, a haloed sun, drifting clouds,
       // a far hill line, and the tree line in front of it — all of
-      // it sliding as you steer
+      // it sliding as you steer, all of it wearing the REGION
+      int rg = S->crt_track;
+      u32 skyT = CRT_SKY[rg][0], skyH = CRT_SKY[rg][1];
+      u32 gndA = col_shade(REGION_GA[rg], 0.55f), gndB = col_shade(REGION_GB[rg], 0.55f);
+      u32 aprA = col_shade(REGION_GA[rg], 0.74f), aprB = col_shade(REGION_GB[rg], 0.74f);
+      int dark = (rg == 5 || rg == 7);
       { int sh = horizon - vy; if (sh < 4) sh = 4;
-        rect_fill(vx, vy, vw2, sh/4 + 1, COL(96, 165, 238));
-        rect_fill(vx, vy + sh/4, vw2, sh/4 + 1, COL(120, 182, 244));
-        rect_fill(vx, vy + sh/2, vw2, sh/4 + 1, COL(146, 200, 248));
-        rect_fill(vx, vy + 3*sh/4, vw2, sh - 3*sh/4 + 1, COL(174, 218, 250)); }
-      disc_fill(vx + vw2 - 90, vy + 44, 31, COL(255, 246, 196));
-      disc_fill(vx + vw2 - 90, vy + 44, 20, COL(255, 236, 150));
+        rect_fill(vx, vy, vw2, sh/4 + 1, col_shade(skyT, 0.74f));
+        rect_fill(vx, vy + sh/4, vw2, sh/4 + 1, skyT);
+        rect_fill(vx, vy + sh/2, vw2, sh/4 + 1, col_shade(skyH, 0.93f));
+        rect_fill(vx, vy + 3*sh/4, vw2, sh - 3*sh/4 + 1, skyH); }
+      disc_fill(vx + vw2 - 90, vy + 44, 31, dark? COL(200, 204, 225) : COL(255, 246, 196));
+      disc_fill(vx + vw2 - 90, vy + 44, 20, dark? COL(226, 230, 242) : COL(255, 236, 150));
       { int slide = (int)(kh * 260.0f);
+        u32 cloudc = dark? COL(126, 122, 158) : COL(248, 251, 255);
         for (int ci = 0; ci < 4; ci++){
             int cw = 54 + (ci * 29) % 40;
             int cxx = (ci * 317 + 60 - slide * 2 - (int)(S->crt_t * 6.0f)) % (vw2 + 240);
             if (cxx < 0) cxx += vw2 + 240;
             int cxp2 = vx + cxx - 120, cyp2 = vy + 14 + (ci * 23) % 30;
-            ellipse_fill(cxp2, cyp2, cw/2, cw/6, COL(248, 251, 255));
-            ellipse_fill(cxp2 + cw/5, cyp2 - cw/10, cw/3, cw/7, COL(255, 255, 255));
-            ellipse_fill(cxp2 - cw/4, cyp2 + 2, cw/3, cw/8, COL(232, 242, 252));
+            ellipse_fill(cxp2, cyp2, cw/2, cw/6, cloudc);
+            ellipse_fill(cxp2 + cw/5, cyp2 - cw/10, cw/3, cw/7, col_shade(cloudc, 1.03f));
+            ellipse_fill(cxp2 - cw/4, cyp2 + 2, cw/3, cw/8, col_shade(cloudc, 0.94f));
         }
         for (int hi2 = -1; hi2 < vw2 / 130 + 2; hi2++){
             int hxp = vx + hi2 * 130 - ((slide % 130) + 130) % 130;
             int hh = 20 + (int)(hash2(hi2 + slide / 130, 7, 0x411u) % 22);
-            tri_fill(hxp, horizon, hxp + 65, horizon - hh, hxp + 130, horizon, COL(84, 148, 102));
+            tri_fill(hxp, horizon, hxp + 65, horizon - hh, hxp + 130, horizon, col_shade(REGION_GA[rg], 0.8f));
         }
         for (int ti = -1; ti < vw2 / 74 + 2; ti++){
             int txp = vx + ti * 74 - ((slide % 74) + 74) % 74;
             int th = 16 + ((ti * 37 + (slide / 74) * 13) & 15);
-            tri_fill(txp, horizon, txp + 22, horizon - th - 10, txp + 44, horizon, COL(34, 110, 52));
+            tri_fill(txp, horizon, txp + 22, horizon - th - 10, txp + 44, horizon, col_shade(REGION_GA[rg], 0.6f));
             rect_fill(txp + 19, horizon - 6, 6, 6, COL(90, 64, 40));
         } }
-      rect_fill(vx, horizon, vw2, vy + vh2 - horizon, COL(26, 96, 34));
+      rect_fill(vx, horizon, vw2, vy + vh2 - horizon, gndB);
       // the road ahead: sample the centreline from your segment forward
       { int startseg = crt_nearest_full(kx, ky);
         enum { NS = 46 };
@@ -15807,10 +16234,10 @@ static void crt_render_view(int sim_pi, int viewer_pi){
         for (int j = NS - 1; j >= 0; j--){
             if (rf[j + 1] < 4.0f) continue;
             int par = (startseg + j) & 1;
-            if (rsy[j] > horizon) rect_fill(vx, rsy[j], vw2, rsy[j + 1] - rsy[j] + 1, par? COL(30, 104, 38) : COL(24, 90, 32));
+            if (rsy[j] > horizon) rect_fill(vx, rsy[j], vw2, rsy[j + 1] - rsy[j] + 1, par? gndA : gndB);
             if (rf[j] < 4.0f) continue;
             // the manicured apron the track sits in
-            u32 ap = par? COL(46, 130, 54) : COL(41, 121, 49);
+            u32 ap = par? aprA : aprB;
             tri_fill(arx[j], ary[j], alx[j], aly[j], alx[j + 1], aly[j + 1], ap);
             tri_fill(arx[j], ary[j], alx[j + 1], aly[j + 1], arx[j + 1], ary[j + 1], ap);
             u32 rum = par? COL(226, 226, 226) : COL(205, 50, 45);
@@ -15876,7 +16303,7 @@ static void crt_render_view(int sim_pi, int viewer_pi){
                     int bh = (int)(9.0f * F / ff); if (bh < 3) bh = 3;
                     tri_fill(gx[0], gt[0], gx[1], gt[1], gx[1], gt[1] + bh, COL(198, 52, 48));
                     tri_fill(gx[0], gt[0], gx[1], gt[1] + bh, gx[0], gt[0] + bh, COL(198, 52, 48));
-                    if (gx[1] - gx[0] > 210) draw_text_center((gx[0] + gx[1]) / 2, (gt[0] + gt[1]) / 2 + bh/2 - 3, "SUPER BUDDY CART", 1, COL(255, 244, 220));
+                    if (gx[1] - gx[0] > 210) draw_text_center((gx[0] + gx[1]) / 2, (gt[0] + gt[1]) / 2 + bh/2 - 3, REGION_NAME[rg], 1, COL(255, 244, 220));
                 } }
           } }
         // boost pads lying on the road
@@ -15938,12 +16365,12 @@ static void crt_render_view(int sim_pi, int viewer_pi){
         float f = itf[oi]; int sx = itsx[oi], base = itsy[oi];
         if (itk[oi] == 1){
             int sn = itx[oi], tp = CRT_SCT[sn];
-            if (tp == 0){   // a tree (every seventh is in blossom)
+            if (tp == 0){   // a tree (every seventh wears the region's tuft colour)
                 int th = (int)(30.0f * F / f); if (th < 3) continue;
                 if (sx < vx - th || sx > vx + vw2 + th) continue;
-                ellipse_fill(sx, base, th/4, th/10, COL(22, 84, 30));
+                ellipse_fill(sx, base, th/4, th/10, col_shade(REGION_GB[rg], 0.45f));
                 rect_fill(sx - th/16 - 1, base - th*38/100, th/8 + 2, th*38/100, COL(96, 66, 40));
-                u32 g1 = (sn % 7 == 3)? COL(216, 138, 160) : (sn & 1)? COL(34, 116, 52) : COL(28, 100, 44);
+                u32 g1 = (sn % 7 == 3)? REGION_TUFT[rg] : (sn & 1)? col_shade(REGION_GA[rg], 0.62f) : col_shade(REGION_GA[rg], 0.5f);
                 disc_fill(sx, base - th*52/100, th*30/100, g1);
                 disc_fill(sx, base - th*80/100, th*22/100, col_shade(g1, 1.18f));
             } else if (tp == 1){   // a tire stack
@@ -16045,13 +16472,13 @@ static void crt_render_view(int sim_pi, int viewer_pi){
     { char buf[96]; char *q = buf;
       int lap = (int)(S->crt_prog[vk] / CRT_LEN) + 1; if (lap < 1) lap = 1; if (lap > 3) lap = 3;
       int tds = (int)(S->crt_t * 10.0f); int sec = (tds / 10) % 60;
-      q = sappend(q, "LAP "); q = sapp_int(q, lap); q = sappend(q, "/3  POS ");
+      q = sappend(q, "RACE "); q = sapp_int(q, S->crt_race + 1); q = sappend(q, "/4  LAP "); q = sapp_int(q, lap); q = sappend(q, "/3  POS ");
       q = sapp_int(q, S->crt_place[vk]); q = sappend(q, "/6  TIME ");
       q = sapp_int(q, tds / 600); q = sappend(q, ":");
       if (sec < 10) q = sappend(q, "0");
       q = sapp_int(q, sec); q = sappend(q, "."); q = sapp_int(q, tds % 10); *q = 0;
       draw_text(vx + 10, vy + 8, buf, 1, COL(255, 240, 200)); }
-    if (vw2 >= 600) draw_text_center(vx + vw2/2, vy + 8, "SUPER BUDDY CART", 1, COL(250, 200, 50));
+    if (vw2 >= 600) draw_text_center(vx + vw2/2, vy + 8, REGION_NAME[S->crt_track], 1, COL(250, 200, 50));
     if (vw2 >= 600 && b->crt_best_pos){ char buf[48]; char *q = buf;
         q = sappend(q, "BEST P"); q = sapp_int(q, b->crt_best_pos); *q = 0;
         draw_text(vx + vw2 - 70, vy + 8, buf, 1, COL(200, 214, 200)); }
@@ -16517,6 +16944,7 @@ __attribute__((export_name("text_mode"))) int exp_text_mode(void){
     // keyboard on every gameplay tap (Daniel, Nov 9).
     if (G.state==GS_MENU && G.edit_field) return G.edit_field;
     if (whale_code_mode[G.my_id]) return 3;
+    if (BWS[G.my_id].craft_menu && BWS[G.my_id].craft_search) return 4;   // the craft menu's search field
     return 0;
 }
 __attribute__((export_name("dbg_peek"))) void exp_dbg_peek(void){ peek_slots(); }
@@ -16796,6 +17224,12 @@ __attribute__((export_name("dbg_casbest"))) int exp_dbg_casbest(void){ int id = 
 __attribute__((export_name("dbg_casx"))) int exp_dbg_casx(void){ int id = G.my_id>=0? G.my_id : 0; return (int)(G.bud[id].x - 20000.0f); }
 __attribute__((export_name("dbg_casy"))) int exp_dbg_casy(void){ int id = G.my_id>=0? G.my_id : 0; return (int)(G.bud[id].y - 20000.0f); }
 __attribute__((export_name("dbg_crtstate"))) int exp_dbg_crtstate(void){ int id = G.my_id>=0? G.my_id : 0; return BWS[id].crt_state; }
+__attribute__((export_name("dbg_crtrace"))) int exp_dbg_crtrace(void){ int id = G.my_id>=0? G.my_id : 0; return BWS[id].crt_race; }
+__attribute__((export_name("dbg_crttrack"))) int exp_dbg_crttrack(void){ int id = G.my_id>=0? G.my_id : 0; return BWS[id].crt_track; }
+__attribute__((export_name("dbg_crtpts"))) int exp_dbg_crtpts(void){ int id = G.my_id>=0? G.my_id : 0; return BWS[id].crt_pts[0]; }
+__attribute__((export_name("dbg_crtcup"))) int exp_dbg_crtcup(void){ int id = G.my_id>=0? G.my_id : 0; return BWS[id].crt_cup; }
+__attribute__((export_name("dbg_crtcupbest"))) int exp_dbg_crtcupbest(void){ int id = G.my_id>=0? G.my_id : 0; return G.bud[id].crt_cupbest; }
+__attribute__((export_name("dbg_crtgprank"))) int exp_dbg_crtgprank(void){ int id = G.my_id>=0? G.my_id : 0; return BWS[id].crt_gprank[0]; }
 __attribute__((export_name("dbg_crtduo"))) int exp_dbg_crtduo(void){ int id = G.my_id>=0? G.my_id : 0; return BWS[id].crt_duo; }
 __attribute__((export_name("dbg_crtpos2"))) int exp_dbg_crtpos2(void){ int id = G.my_id>=0? G.my_id : 0; return BWS[id].crt_place[1]; }
 __attribute__((export_name("dbg_crtprog2"))) int exp_dbg_crtprog2(void){ int id = G.my_id>=0? G.my_id : 0; return (int)BWS[id].crt_prog[1]; }
@@ -16829,6 +17263,10 @@ __attribute__((export_name("dbg_givebean"))) void exp_dbg_givebean(void){ int id
 __attribute__((export_name("dbg_bwentm"))) void exp_dbg_bwentm(int m){ int id = G.my_id>=0? G.my_id : 0; mall_enter(id); bw_enter_mode(id, m); }
 __attribute__((export_name("dbg_bwmode"))) int exp_dbg_bwmode(void){ int id = G.my_id>=0? G.my_id : 0; return G.bud[id].in_bw? G.bud[id].bw_mode : -1; }
 __attribute__((export_name("dbg_platlvl"))) int exp_dbg_platlvl(void){ int id = G.my_id>=0? G.my_id : 0; return BWS[id].plat_lvl; }
+__attribute__((export_name("dbg_platregion"))) int exp_dbg_platregion(void){ int id = G.my_id>=0? G.my_id : 0; return BWS[id].plat_region; }
+__attribute__((export_name("dbg_platsub"))) int exp_dbg_platsub(void){ int id = G.my_id>=0? G.my_id : 0; return BWS[id].plat_sub; }
+__attribute__((export_name("dbg_platvaultx"))) int exp_dbg_platvaultx(void){ int id = G.my_id>=0? G.my_id : 0; return BWS[id].plat_vault_tx<0? -1 : BWS[id].plat_vault_tx*24 + 24; }
+__attribute__((export_name("dbg_platwarp"))) int exp_dbg_platwarp(int lvl){ int id = G.my_id>=0? G.my_id : 0; if (G.bud[id].bw_mode==3 && lvl>=1) plat_load_level(id, lvl); return BWS[id].plat_lvl; }
 __attribute__((export_name("dbg_platbits"))) int exp_dbg_platbits(void){ int id = G.my_id>=0? G.my_id : 0; return BWS[id].plat_bits; }
 __attribute__((export_name("dbg_plath"))) int exp_dbg_plath(void){ int id = G.my_id>=0? G.my_id : 0; return BWS[id].plat_hearts; }
 __attribute__((export_name("dbg_platpow"))) int exp_dbg_platpow(void){ int id = G.my_id>=0? G.my_id : 0; return BWS[id].plat_power; }
@@ -16864,7 +17302,9 @@ __attribute__((export_name("dbg_pausesel"))) int exp_dbg_pausesel(void){ return 
 __attribute__((export_name("dbg_bwmenu"))) int exp_dbg_bwmenu(void){ int id = G.my_id>=0? G.my_id : 0; return BWS[id].bw_menu; }
 __attribute__((export_name("dbg_craftsel"))) int exp_dbg_craftsel(void){ int id = G.my_id>=0? G.my_id : 0; return BWS[id].craft_sel; }
 __attribute__((export_name("dbg_craftcat"))) int exp_dbg_craftcat(void){ int id = G.my_id>=0? G.my_id : 0; return BWS[id].craft_cat; }
-__attribute__((export_name("dbg_craftrowid"))) int exp_dbg_craftrowid(void){ int id = G.my_id>=0? G.my_id : 0; int rows[64]; int n = craft_all_rows(&G.bud[id], rows); int s = BWS[id].craft_sel; return (s>=0 && s<n)? rows[s] : -99; }
+__attribute__((export_name("dbg_craftrowid"))) int exp_dbg_craftrowid(void){ int id = G.my_id>=0? G.my_id : 0; int rows[64]; int n = craft_menu_rows(&BWS[id], &G.bud[id], rows); int s = BWS[id].craft_sel; return (s>=0 && s<n)? rows[s] : -99; }
+__attribute__((export_name("dbg_craftsearch"))) int exp_dbg_craftsearch(void){ int id = G.my_id>=0? G.my_id : 0; return BWS[id].craft_search; }
+__attribute__((export_name("dbg_craftrows"))) int exp_dbg_craftrows(void){ int id = G.my_id>=0? G.my_id : 0; int rows[64]; return craft_menu_rows(&BWS[id], &G.bud[id], rows); }
 __attribute__((export_name("dbg_craftbuilds"))) int exp_dbg_craftbuilds(void){ int id = G.my_id>=0? G.my_id : 0; return G.bud[id].craft_bn; }
 __attribute__((export_name("dbg_craftbuildk"))) int exp_dbg_craftbuildk(int i){ int id = G.my_id>=0? G.my_id : 0; Buddy *b=&G.bud[id]; return (i>=0 && i<b->craft_bn)? b->craft_bk[i] : -1; }
 __attribute__((export_name("dbg_craftnight"))) int exp_dbg_craftnight(void){ int id = G.my_id>=0? G.my_id : 0; return (int)(craft_darkf(&G.bud[id])*100); }

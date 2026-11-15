@@ -69,11 +69,30 @@ function T(name, cond, extra) { if (cond) { pass++; } else { fail++; console.log
   T('a sane live position', pos >= 1 && pos <= 6, 'pos=' + pos);
   await cv.screenshot({ path: __dirname + '/cart-race.png' });
 
-  // jump to the last straight of lap 3 and drive it home
-  await call('dbg_crtskip');
-  await hold('Space', 1600);
-  T('finish banner state reached', (await poll('dbg_crtstate', v => v === 2, 6000)) === 2, await call('dbg_crtstate'));
-  T('race auto-exits after the banner', (await poll('dbg_bwmode', v => v === -1, 9000)) === -1, await call('dbg_bwmode'));
+  // the GRAND PRIX (Nov 14): four races, one per HOME-cup region,
+  // points banked after each, standings between, a rank at the end.
+  // Each race: skip to the last straight of lap 3 and drive it home.
+  for (let r = 0; r < 4; r++) {
+    T('race ' + (r + 1) + ' runs on region track ' + r, (await call('dbg_crttrack')) === r, await call('dbg_crttrack'));
+    await call('dbg_crtskip');
+    await hold('Space', 1600);
+    T('race ' + (r + 1) + ' finish banner', (await poll('dbg_crtstate', v => v === 2, 6000)) === 2, await call('dbg_crtstate'));
+    if (r < 3) {
+      T('standings after race ' + (r + 1), (await poll('dbg_crtstate', v => v === 4, 9000)) === 4, await call('dbg_crtstate'));
+      T('points banked after race ' + (r + 1), (await call('dbg_crtpts')) >= 3, await call('dbg_crtpts'));
+      if (r === 0) await cv.screenshot({ path: __dirname + '/cart-standings.png' });
+      await key('Space', 300);   // FIRE: roll on to the next race
+      T('race ' + (r + 2) + ' countdown', (await poll('dbg_crtstate', v => v === 0, 6000)) === 0, await call('dbg_crtstate'));
+      T('race ' + (r + 2) + ' racing', (await poll('dbg_crtstate', v => v === 1, 8000)) === 1, await call('dbg_crtstate'));
+    } else {
+      T('final standings after race 4', (await poll('dbg_crtstate', v => v === 5, 9000)) === 5, await call('dbg_crtstate'));
+      const rank = await call('dbg_crtgprank');
+      T('a final rank was earned', rank >= 1 && rank <= 6, 'rank=' + rank);
+      T('the cup best was saved (packed home rank)', (await call('dbg_crtcupbest')) % 8 === rank, await call('dbg_crtcupbest'));
+      await cv.screenshot({ path: __dirname + '/cart-final.png' });
+    }
+  }
+  T('the cup auto-exits after the final standings', (await poll('dbg_bwmode', v => v === -1, 12000)) === -1, await call('dbg_bwmode'));
   T('back in the arcade', (await call('dbg_inarcade')) === 1, await call('dbg_inarcade'));
   const ry = await call('dbg_py');
   T('...right back at the cart cabinet', Math.abs(ry - (-11890)) < 130, 'py=' + ry);

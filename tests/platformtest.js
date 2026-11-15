@@ -59,6 +59,41 @@ function T(name, cond, extra) { if (cond) { pass++; } else { fail++; console.log
   T('and lands again', stable >= 3 && yLand <= y0 + 1, yLand);
   await page.screenshot({ path: __dirname + '/plat-run.png' });
 
+  // REGIONS (Nov 14): level L wears region (L-1)%8 — the same eight
+  // countries as the main game, in the same order, every time
+  for (let L = 1; L <= 8; L++) {
+    await call('dbg_platwarp', L);
+    T('level ' + L + ' is region ' + (L - 1), (await call('dbg_platregion')) === L - 1, await call('dbg_platregion'));
+    if (L === 5) await page.screenshot({ path: __dirname + '/plat-cache.png' });
+    if (L === 6) await page.screenshot({ path: __dirname + '/plat-ram.png' });
+  }
+
+  // the BONUS VAULT: find a level whose tallest pipe is gold-banded,
+  // stand on it, press DOWN, take the heart, leave by the far pipe
+  let vaultLvl = 0;
+  for (let L = 1; L <= 12 && !vaultLvl; L++) {
+    await call('dbg_platwarp', L);
+    if ((await call('dbg_platvaultx')) >= 0) vaultLvl = L;
+  }
+  T('some level hides a vault pipe', vaultLvl > 0, 'lvl=' + vaultLvl);
+  if (vaultLvl) {
+    const vx = await call('dbg_platvaultx');
+    await call('dbg_bwtp', vx, 60);
+    await sleep(900);   // fall onto the pipe top and settle
+    await key('ArrowDown', 200);
+    T('DOWN on the gold pipe drops into the vault', (await poll('dbg_platsub', v => v === 1, 4000)) === 1, await call('dbg_platsub'));
+    await page.screenshot({ path: __dirname + '/plat-vault.png' });
+    const h0 = await call('dbg_plath');
+    await call('dbg_bwtp', 17 * 24, 312);
+    await sleep(500);
+    T('the vault heart is real (+1)', (await call('dbg_plath')) === Math.min(5, h0 + 1), h0 + ' -> ' + (await call('dbg_plath')));
+    await call('dbg_bwtp', 33 * 24, 60);
+    await sleep(900);
+    await key('ArrowDown', 200);
+    T('the far pipe leads back to the run', (await poll('dbg_platsub', v => v === 0, 4000)) === 0, await call('dbg_platsub'));
+    T('...on the same level as before', (await call('dbg_platlvl')) === vaultLvl, await call('dbg_platlvl'));
+  }
+
   await key('Escape', 300); await sleep(400);
   T('Escape returns to the mall', (await call('dbg_bwmode')) === -1, await call('dbg_bwmode'));
 
