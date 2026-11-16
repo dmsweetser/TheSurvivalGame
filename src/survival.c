@@ -1809,6 +1809,14 @@ static int uf_find(int *par, int i){ while (par[i]!=i){ par[i]=par[par[i]]; i=pa
 // the saved damage fraction instead.
 static void walls_recompute_ex(int fresh){
     static int par[MAXWALLS], lead[MAXWALLS];
+    // Nov 15: snapshot the OUTGOING pool state before anything is
+    // rebuilt. The carry below used to test grp_n[grp_old] AFTER
+    // grp_n had been recounted for the NEW grouping — when a run's
+    // leader died, the survivors silently fell out of the share
+    // branch, and a chewed loner's pool record (never updated by
+    // loner damage) let it rejoin a run at health it no longer had.
+    static int oldn[MAXWALLS]; static float oldcap[MAXWALLS], oldpool[MAXWALLS];
+    for (int i=0;i<MAXWALLS;i++){ oldn[i]=grp_n[i]; oldcap[i]=grp_cap[i]; oldpool[i]=grp_pool[i]; }
     int sim = (G.net_mode!=NET_CLIENT);
     for (int i=0;i<MAXWALLS;i++){ par[i]=i; lead[i]=-1; }
     for (int i=0;i<MAXWALLS;i++) if (G.walls[i].alive==1)
@@ -1836,8 +1844,8 @@ static void walls_recompute_ex(int fresh){
         for (int i=0;i<MAXWALLS;i++) if (G.walls[i].alive==1){
             Wall *w=&G.walls[i]; int L=w->grp;
             if (fresh) npool[L] += w->hp * 1.1f;                    // saved hp was a fraction of base; x1.1 rebuilds the pool share
-            else if (w->grp_old>=0 && grp_n[w->grp_old]>=2 && grp_cap[w->grp_old]>0)
-                npool[L] += grp_pool[w->grp_old] * (w->maxhp*1.1f) / grp_cap[w->grp_old];
+            else if (w->grp_old>=0 && oldn[w->grp_old]>=2 && oldcap[w->grp_old]>0)
+                npool[L] += oldpool[w->grp_old] * (w->maxhp*1.1f) / oldcap[w->grp_old];
             else npool[L] += w->hp + w->maxhp*0.1f;                 // loner/new: what it had + interlock bonus on the base
         }
         for (int i=0;i<MAXWALLS;i++) if (grp_n[i]>0){
@@ -1902,6 +1910,12 @@ static void damage_wall(int wi, float dmg){
         if (grp_pool[L]<=0 || grp_dsb[L] >= 1.1f*layer_hp) break_wall(wi);
     } else {
         w->hp -= dmg;
+        // keep a loner's pool record truthful (Nov 15): the record
+        // is what the share carry reads when this wall later joins
+        // a run — left stale, a chewed wall rejoined at the health
+        // it had when the record was last written, not its own.
+        if (w->grp>=0){ grp_cap[w->grp] = w->maxhp*1.1f;
+            grp_pool[w->grp] = w->hp + w->maxhp*0.1f; if (grp_pool[w->grp]<0) grp_pool[w->grp]=0; }
         if (w->hp<=0) break_wall(wi);
     }
 }
@@ -2357,6 +2371,14 @@ static void place_wall(int pi){
         float sum=0; float ws[3];
         for (int k=0;k<3;k++){ ws[k]=hat_pop(p); sum+=ws[k]; }
         float add = 45.0f + sum*2.2f;
+        // the run's health fraction BEFORE the layer lands: the
+        // recompute's share carry credits the new layer at this
+        // fraction, but a fresh layer arrives at FULL strength —
+        // the pool must include ALL of the reinforcement (Daniel,
+        // Nov 15), so the un-credited part is topped up after.
+        int oldL = o->grp; float ofrac = 1.0f;
+        if (oldL>=0 && grp_cap[oldL]>0){ ofrac = grp_pool[oldL]/grp_cap[oldL];
+            if (ofrac<0) ofrac=0; if (ofrac>1) ofrac=1; }
         o->maxhp += add; o->hp += add; if (o->hp>o->maxhp) o->hp=o->maxhp;
         o->stack = (o->stack>0? o->stack : 1) + 1; if (o->stack>999) o->stack=999;
         for (int k=0;k<3;k++){
@@ -2364,6 +2386,14 @@ static void place_wall(int pi){
             if (f) f->wall_slot=stack_i;   // lands on it; an alive wall ignores the build count
         }
         walls_recompute();
+        { int L2 = o->grp;
+          if (L2>=0 && grp_n[L2]>=2 && ofrac<1.0f){
+              grp_pool[L2] += add*1.1f*(1.0f-ofrac);
+              if (grp_pool[L2]>grp_cap[L2]) grp_pool[L2]=grp_cap[L2];
+              float fr2 = grp_cap[L2]>0? grp_pool[L2]/grp_cap[L2] : 0;
+              for (int m=0;m<MAXWALLS;m++) if (G.walls[m].alive==1 && G.walls[m].grp==L2)
+                  G.walls[m].hp = G.walls[m].maxhp * fr2;
+          } }
         spawn_floater(o->x, o->y-16, "REINFORCED!", COL(255,230,150));
         p->wall_cd = 0.35f;
         sfx(15);
@@ -12326,26 +12356,31 @@ static void plat_update(int pi, float dt, const BwIn *in){
     if (dir!=0 && grounded && dir==S->plat_face) S->plat_run_t += dt;
     else if (grounded && dir==0) S->plat_run_t = 0;
     else if (grounded && dir!=S->plat_face) S->plat_run_t = 0;
-    float maxs = 138.0f + 38.0f*fclamp(S->plat_run_t/0.9f, 0.0f, 1.0f);   // Daniel: the physics feel right, it was just too zippy overall
+    // Nov 15 (Daniel): still too fast and too slidey — top speed
+    // down ~25%, friction way up so a stop is a stop, snappier
+    // ground accel to reach the (lower) top sooner, overspeed
+    // decays fast, weaker air drift. Jump/gravity untouched: the
+    // level geometry (pipes, stairs, gaps) is tuned to them.
+    float maxs = 110.0f + 26.0f*fclamp(S->plat_run_t/0.9f, 0.0f, 1.0f);
     if (dir!=0){
-        float acc = grounded? 980.0f : 640.0f;
-        if (grounded && ((dir>0 && S->plat_vx<-120) || (dir<0 && S->plat_vx>120))){
+        float acc = grounded? 1240.0f : 540.0f;
+        if (grounded && ((dir>0 && S->plat_vx<-92) || (dir<0 && S->plat_vx>92))){
             acc = 2400.0f; S->plat_skid = 0.16f;   // skidding against your own momentum
             if (S->plat_dust_t<=0){ plat_puff(S, b->x - S->plat_face*8, b->y-2); S->plat_dust_t = 0.05f; }
         }
         S->plat_vx += dir*acc*dt;
-        if (dir>0 && S->plat_vx>maxs){ float d2 = S->plat_vx-260*dt; S->plat_vx = d2>maxs? d2 : maxs; }
-        if (dir<0 && S->plat_vx<-maxs){ float d2 = S->plat_vx+260*dt; S->plat_vx = d2<-maxs? d2 : -maxs; }
+        if (dir>0 && S->plat_vx>maxs){ float d2 = S->plat_vx-560*dt; S->plat_vx = d2>maxs? d2 : maxs; }
+        if (dir<0 && S->plat_vx<-maxs){ float d2 = S->plat_vx+560*dt; S->plat_vx = d2<-maxs? d2 : -maxs; }
         S->plat_face = dir;
     } else if (grounded){
-        float fr = 1050.0f*dt;
+        float fr = 1750.0f*dt;
         if (S->plat_vx > 0) S->plat_vx = S->plat_vx>fr? S->plat_vx-fr : 0;
         else if (S->plat_vx < 0) S->plat_vx = S->plat_vx<-fr? S->plat_vx+fr : 0;
     }
     if (S->plat_skid>0) S->plat_skid -= dt;
     if (S->plat_land_t>0) S->plat_land_t -= dt;
     if (S->plat_dust_t>0) S->plat_dust_t -= dt;
-    if (grounded && (S->plat_vx>200 || S->plat_vx<-200) && S->plat_dust_t<=0){
+    if (grounded && (S->plat_vx>150 || S->plat_vx<-150) && S->plat_dust_t<=0){
         plat_puff(S, b->x - S->plat_face*9, b->y-1); S->plat_dust_t = 0.13f;   // sprint dust
     }
     if (grounded && S->plat_vx!=0){ b->walk_ph += dt * (5.0f + (S->plat_vx<0? -S->plat_vx : S->plat_vx) * 0.05f); b->mv_t = 0.15f; }
@@ -12644,7 +12679,15 @@ static void plat_render(int pi){
     float camx = b->x; float half = vw2/2.0f;
     if (camx < half) camx = half;
     if (camx > S->plat_w*PL_TILE - half) camx = S->plat_w*PL_TILE - half;
-    G.camx = camx; G.camy = 180;
+    G.camx = camx;
+    // Nov 15 (Daniel): on the touch stick scheme the joystick and
+    // JUMP button sit right on the ground line and swallow the
+    // runner. Give the level an 84px deck: the world rides up by
+    // that much and a dark stage fills the strip under it, so the
+    // controls live on the deck, not on the game. Only the local
+    // player's full-width view — split co-op draws no stick HUD.
+    int plat_deck = (pi==G.my_id && mobile_ui() && !pad_mode() && G.touch_ctl==1 && vw2>=VW)? 84 : 0;
+    G.camy = 180 + plat_deck;
     // sky, then two layers of server skyline drifting behind — the
     // sky wears the level's REGION (the vault borrows the Depths)
     int rg = S->plat_sub? 7 : S->plat_region;
@@ -12741,6 +12784,12 @@ static void plat_render(int pi){
             ellipse_fill(x+12, y+12, 5-(sq<0?-sq:sq)/2+2, 6, COL(250,205,70));
             disc_fill(x+12, y+12, 2, COL(200,150,40));
         }
+    }
+    // the deck under the world (touch stick scheme, see above):
+    // a dark stage strip the controls can sit on
+    if (plat_deck){
+        rect_fill(vx, vy + vh2 - plat_deck, vw2, plat_deck, COL(14, 13, 22));
+        rect_fill(vx, vy + vh2 - plat_deck, vw2, 2, COL(52, 48, 74));
     }
     // the checkpoint post
     {
@@ -15531,7 +15580,9 @@ static void crt_build(int track){
               CRT_SCX[n] = x; CRT_SCY[n] = y; CRT_SCT[n] = 0; n++;
           }
           // the grandstand watches the start from outside the loop
-          { float x, y, hx, hy; crt_point_at(CRT_OFF + CRT_LEN * 0.04f, 116.0f, &x, &y, &hx, &hy);
+          // (Nov 15: pushed further out and further past the line —
+          // at 116 it loomed over the grid as a screen-filling wall)
+          { float x, y, hx, hy; crt_point_at(CRT_OFF + CRT_LEN * 0.10f, 152.0f, &x, &y, &hx, &hy);
             if (x > 56 && x < 584 && y > 22 && y < 338){ CRT_SCX[n] = x; CRT_SCY[n] = y; CRT_SCT[n] = 3; n++; } }
       }
       while (n < CRT_SCN_N){ CRT_SCX[n] = -100; CRT_SCY[n] = -100; CRT_SCT[n] = 0; n++; }
@@ -16381,8 +16432,15 @@ static void crt_render_view(int sim_pi, int viewer_pi){
                 rect_fill(sx - tw/2, base - thh*2, tw, thh, COL(226, 226, 226));
                 rect_fill(sx - tw/2, base - thh*3, tw, thh, (sn & 1)? COL(205, 50, 45) : COL(38, 38, 44));
             } else {   // the grandstand, watching the top straight
+                // Nov 15 (Daniel's "weird gray wall"): unclamped,
+                // the stand's projection at grid distance filled
+                // half the screen with flat concrete. Bound it to a
+                // building's size, and don't draw it at all when the
+                // kart is right alongside it.
+                if (f < 42.0f) continue;
                 int gw = (int)(175.0f * F / f); if (gw < 12) continue;
-                int gh = (int)(42.0f * F / f);
+                if (gw > 380) gw = 380;
+                int gh = (int)(42.0f * F / f); if (gh > 92) gh = 92;
                 if (sx < vx - gw/2 || sx > vx + vw2 + gw/2) continue;
                 rect_fill(sx - gw/2, base - gh, gw, gh, COL(116, 126, 148));
                 for (int r2 = 0; r2 < 4; r2++) for (int c3 = 0; c3 < gw/9; c3++){
@@ -17298,6 +17356,53 @@ __attribute__((export_name("dbg_pay"))) int exp_dbg_pay(void){ return pay_active
 __attribute__((export_name("dbg_wallhp"))) int exp_dbg_wallhp(void){ float s=0; for (int i=0;i<MAXWALLS;i++) if (G.walls[i].alive==1) s += G.walls[i].maxhp; return (int)(s*10); }
 __attribute__((export_name("dbg_wallstack"))) int exp_dbg_wallstack(void){ int m=0; for (int i=0;i<MAXWALLS;i++) if (G.walls[i].alive==1){ int s=G.walls[i].stack>0? G.walls[i].stack:1; if (s>m) m=s; } return m; }
 __attribute__((export_name("dbg_walllayers"))) int exp_dbg_walllayers(void){ int s=0; for (int i=0;i<MAXWALLS;i++) if (G.walls[i].alive==1) s += G.walls[i].stack>0? G.walls[i].stack:1; return s; }
+// wall-pool instrumentation (Nov 15): place/reinforce/damage walls
+// with fixed 100hp layers so the shared-pool math can be asserted
+// exactly, without a carcass hunt. Test-only.
+__attribute__((export_name("dbg_wallplace"))) int exp_dbg_wallplace(int x, int y, int horiz){
+    for (int i=0;i<MAXWALLS;i++) if (!G.walls[i].alive){
+        Wall *w=&G.walls[i];
+        w->alive=1; w->horiz=horiz? 1:0; w->x=(float)x; w->y=(float)y;
+        w->hp=w->maxhp=100.0f; w->stack=1; w->grp=-1; w->grp_old=-1; w->endpt=0;
+        wall_build_n[i]=0; walls_recompute(); return i; }
+    return -1; }
+__attribute__((export_name("dbg_wallreinf"))) int exp_dbg_wallreinf(int i){
+    if (i<0 || i>=MAXWALLS || G.walls[i].alive!=1) return -1;
+    Wall *o=&G.walls[i];
+    int oldL = o->grp; float ofrac = 1.0f;
+    if (oldL>=0 && grp_cap[oldL]>0){ ofrac = grp_pool[oldL]/grp_cap[oldL];
+        if (ofrac<0) ofrac=0; if (ofrac>1) ofrac=1; }
+    o->maxhp += 100.0f; o->hp += 100.0f; if (o->hp>o->maxhp) o->hp=o->maxhp;
+    o->stack = (o->stack>0? o->stack : 1) + 1;
+    walls_recompute();
+    { int L2 = o->grp;
+      if (L2>=0 && grp_n[L2]>=2 && ofrac<1.0f){
+          grp_pool[L2] += 100.0f*1.1f*(1.0f-ofrac);
+          if (grp_pool[L2]>grp_cap[L2]) grp_pool[L2]=grp_cap[L2];
+          float fr2 = grp_cap[L2]>0? grp_pool[L2]/grp_cap[L2] : 0;
+          for (int m=0;m<MAXWALLS;m++) if (G.walls[m].alive==1 && G.walls[m].grp==L2)
+              G.walls[m].hp = G.walls[m].maxhp * fr2;
+      } }
+    return o->stack; }
+__attribute__((export_name("dbg_walldmg"))) int exp_dbg_walldmg(int i, int dmg){
+    if (i<0 || i>=MAXWALLS || G.walls[i].alive!=1) return -1;
+    damage_wall(i, (float)dmg);
+    return G.walls[i].grp>=0? (int)(grp_pool[G.walls[i].grp]*10) : -2; }
+__attribute__((export_name("dbg_wallhpof"))) int exp_dbg_wallhpof(int i){
+    if (i<0 || i>=MAXWALLS || !G.walls[i].alive) return -1; return (int)(G.walls[i].hp*10); }
+__attribute__((export_name("dbg_wallmaxof"))) int exp_dbg_wallmaxof(int i){
+    if (i<0 || i>=MAXWALLS || !G.walls[i].alive) return -1; return (int)(G.walls[i].maxhp*10); }
+__attribute__((export_name("dbg_wallstackof"))) int exp_dbg_wallstackof(int i){
+    if (i<0 || i>=MAXWALLS || !G.walls[i].alive) return -1; return G.walls[i].stack>0? G.walls[i].stack : 1; }
+__attribute__((export_name("dbg_poolof"))) int exp_dbg_poolof(int i){
+    if (i<0 || i>=MAXWALLS || !G.walls[i].alive || G.walls[i].grp<0) return -1;
+    return (int)(grp_pool[G.walls[i].grp]*10); }
+__attribute__((export_name("dbg_capof"))) int exp_dbg_capof(int i){
+    if (i<0 || i>=MAXWALLS || !G.walls[i].alive || G.walls[i].grp<0) return -1;
+    return (int)(grp_cap[G.walls[i].grp]*10); }
+__attribute__((export_name("dbg_grpnof"))) int exp_dbg_grpnof(int i){
+    if (i<0 || i>=MAXWALLS || !G.walls[i].alive || G.walls[i].grp<0) return -1;
+    return grp_n[G.walls[i].grp]; }
 __attribute__((export_name("dbg_pausesel"))) int exp_dbg_pausesel(void){ return G.pause_sel; }
 __attribute__((export_name("dbg_bwmenu"))) int exp_dbg_bwmenu(void){ int id = G.my_id>=0? G.my_id : 0; return BWS[id].bw_menu; }
 __attribute__((export_name("dbg_craftsel"))) int exp_dbg_craftsel(void){ int id = G.my_id>=0? G.my_id : 0; return BWS[id].craft_sel; }
