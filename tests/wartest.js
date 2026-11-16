@@ -6,10 +6,16 @@
 // a save/Continue round trip (the Buddy's wr key).
 // dbg packings (see survival.c): dbg_warunits(side,type) counts alive
 // units (side 0 buddies / 1 bugs; types 0 harvester, 1 melee, 2 ranged,
-// 3 crawler, 4 spitter; -1 = any). dbg_warunitxy / dbg_warstructxy pack
-// arena-local coords as x*10000+y; dbg_warunitpos packs on-screen fb
-// coords the same way. Struct 0 is always the Compiler Core; the hive
-// of a fresh battle is struct 1.
+// 3 crawler, 4 spitter, 5 scout buggy, 6 siege tank; -1 = any).
+// dbg_warunitxy / dbg_warstructxy pack arena-local coords as
+// x*10000+y; dbg_warunitpos packs on-screen fb coords the same way.
+// Struct 0 is always the Compiler Core; the hive of a fresh battle is
+// struct 1. Round 2 (Nov 16) adds: dbg_warplace (armed build kind),
+// dbg_warterrain (feature count), dbg_warfog(x,y) (0 black / 1 explored
+// / 2 visible), dbg_warmove(i,x,y) (teleport), dbg_warbuildxy (exact-
+// spot build, walls grid-snapped, property bypassed), and touch_point
+// drags for the pan checks. Struct kinds: 1 patch, 2 zapper, 3 wall,
+// 5 assembly plant.
 const { chromium } = require('playwright-core');
 const EXE = process.env.HOME + '/.cache/ms-playwright/chromium-1248/chrome-linux64/chrome';
 const URL = 'http://localhost:8903/the-survival-game.html';
@@ -172,6 +178,147 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   ok((await poll('dbg_warstate', [], v => v === 2, 5000)) === 2, 'hive down: victory state');
   ok((await poll('dbg_warstate', [], v => v === 0, 8000)) === 0, 'victory returns to the world map');
   ok((await call('dbg_warconq')) === 1, 'region 1 is conquered (war_prog = 1)');
+
+  // ================= round 2 (Nov 16, Daniel's playtest) ==========
+  // a fresh region-1 battle for the new systems: fog, terrain, the
+  // grab-the-world pan, the property rule, vehicles, triple-click.
+  ok((await call('dbg_warenter', 0)) === 1, 'fresh battle for the round-2 checks');
+  await sleep(600);
+
+  // fog of war: base visible, far corners black, exploration permanent
+  ok((await poll('dbg_warfog', [280, 600], v => v === 2, 4000)) === 2, 'fog: the Core clearing is visible');
+  ok((await call('dbg_warfog', 1560, 60)) === 0, 'fog: the far corner starts unexplored');
+  ok((await call('dbg_warfog', 60, 1140)) === 0, 'fog: the south-west corner starts unexplored');
+  ok((await call('dbg_warterrain')) > 30, 'terrain scattered across the arena', await call('dbg_warterrain'));
+  let scout1 = await call('dbg_warfind', 1);
+  await call('dbg_warmove', scout1, 1500, 100);
+  ok((await poll('dbg_warfog', [1560, 60], v => v === 2, 5000)) === 2, 'fog: a scouted corner becomes visible');
+  await call('dbg_warmove', scout1, 336, 548);
+  ok((await poll('dbg_warfog', [1560, 60], v => v === 1, 5000)) === 1, 'fog: explored NEVER rescinds (dims to explored, not black)');
+  ok((await call('dbg_warfog', 60, 1140)) === 0, 'fog: the unvisited corner is still black');
+  await call('dbg_warcam', 700, 450); await sleep(400);
+  await cv.screenshot({ path: __dirname + '/war2-fog.png' });
+  await call('dbg_warcam', 430, 430); await sleep(400);
+  await cv.screenshot({ path: __dirname + '/war2-terrain.png' });
+
+  // grab-the-world pan: drag (+100,+40) and the world follows the finger
+  await call('dbg_warcam', 280, 600); await sleep(250);
+  const feat = await call('dbg_warfind', 1);
+  const p0 = unpos(await call('dbg_warunitpos', feat));
+  await page.evaluate(() => window.__TSG.touch_point(7, 300, 150, 0));
+  await sleep(130);
+  for (const [dx, dy] of [[325, 160], [350, 170], [375, 180], [400, 190]]) {
+    await page.evaluate(([x, y]) => window.__TSG.touch_point(7, x, y, 1), [dx, dy]);
+    await sleep(130);
+  }
+  await page.evaluate(() => window.__TSG.touch_point(7, 400, 190, 2));
+  await sleep(300);
+  const p1 = unpos(await call('dbg_warunitpos', feat));
+  ok(Math.abs((p1[0] - p0[0]) - 100) <= 6 && Math.abs((p1[1] - p0[1]) - 40) <= 6,
+     'drag pan tracks the finger 1:1 (grab the world)', `feature moved ${p1[0] - p0[0]},${p1[1] - p0[1]} for a +100,+40 drag`);
+
+  // the property rule through the REAL tap flow: the Core's bar arms
+  // a Zapper; a tap way outside your land is refused (and you stay in
+  // placement); a tap inside the Core's zone builds.
+  await call('dbg_warcam', 280, 600); await sleep(250);
+  await tap(320, 157);
+  ok((await poll('dbg_warselstruct', [], v => v === 0, 4000)) === 0, 'property: tapping the Core selects it');
+  await tap(228, 337);   // bar slot 2: ZAPPER
+  ok((await poll('dbg_warplace', [], v => v === 2, 4000)) === 2, 'property: the bar armed Zapper placement');
+  await tap(600, 60);    // world (560,503): ~296u from the Core, far outside its 78u zone
+  await sleep(300);
+  ok((await call('dbg_warstructs', 2)) === 0 && (await call('dbg_warplace')) === 2,
+     'property: a build outside your land is refused, placement kept');
+  await tap(386, 157);   // world (346,600): 66u from the Core — inside the zone, clear of its hull
+  ok((await poll('dbg_warstructs', [2], v => v === 1, 4000)) === 1 && (await call('dbg_warplace')) === -1,
+     'property: a build on your own land goes up');
+
+  // vehicles: the Assembly Plant, a Scout Buggy and a Siege Tank
+  await call('dbg_waraddbits', 2000);
+  const asm = await call('dbg_warbuildat', 5);
+  ok(asm > 0 && (await call('dbg_warstructs', 5)) === 1, 'Assembly Plant built', 'idx=' + asm);
+  const armyBefore = await call('dbg_warunits', 0, -1);
+  let bitsV = await call('dbg_warbits');
+  ok((await call('dbg_wartrain', 5)) === 1, 'a Scout Buggy rolled out');
+  ok((await call('dbg_warbits')) <= bitsV - 70, 'the scout charged ~90 bits', await call('dbg_warbits'));
+  bitsV = await call('dbg_warbits');
+  ok((await call('dbg_wartrain', 6)) === 1, 'a Siege Tank rolled out');
+  ok((await call('dbg_warbits')) <= bitsV - 140, 'the siege tank charged ~160 bits', await call('dbg_warbits'));
+  ok((await call('dbg_warunits', 0, -1)) === armyBefore + 2, 'vehicles count in the army total');
+  const pb2 = await call('dbg_warbuildat', 1);
+  ok(pb2 > 0, 'Patch Bay built (for the triple-click ranks)');
+  await call('dbg_wartrain', 1);
+  await call('dbg_wartrain', 2);
+  // park the two vehicles on open ground south of the base so the
+  // fleet shot shows them clear of the buildings
+  const scI = await call('dbg_warfind', 5), sgI = await call('dbg_warfind', 6);
+  if (scI >= 0) await call('dbg_warmove', scI, 190, 800);
+  if (sgI >= 0) await call('dbg_warmove', sgI, 340, 820);
+  await call('dbg_warcam', 280, 690); await sleep(400);
+  await cv.screenshot({ path: __dirname + '/war2-fleet.png' });
+
+  // triple-click: three quick taps on a melee buddy select EVERY
+  // combat unit — melee, ranged and both vehicles — never harvesters
+  const combatN = (await call('dbg_warunits', 0, 1)) + (await call('dbg_warunits', 0, 2))
+                + (await call('dbg_warunits', 0, 5)) + (await call('dbg_warunits', 0, 6));
+  const mi3 = await call('dbg_warfind', 1);
+  const [m3x, m3y] = unxy(await call('dbg_warunitxy', mi3));
+  await call('dbg_warcam', m3x, m3y); await sleep(250);
+  for (let k = 0; k < 3; k++) {
+    const pp = unpos(await call('dbg_warunitpos', mi3));
+    await page.evaluate(([tx, ty]) => window.__TSG.evt_tap(tx, ty), pp);
+    await sleep(150);
+  }
+  await sleep(300);
+  ok(combatN >= 5 && (await call('dbg_warsel')) === combatN,
+     'triple-click selected ALL combat units (harvesters excluded)',
+     'sel=' + (await call('dbg_warsel')) + ' combat=' + combatN + ' army=' + (await call('dbg_warunits', 0, -1)));
+
+  // the siege gun cracks structures: ordered onto the hive, its shots
+  // (double damage vs structures) bite chunks out of it
+  const sg = await call('dbg_warfind', 6);
+  await call('dbg_warmove', sg, 1190, 600);   // 140u west of the hive: inside its 125+30 range
+  ok((await call('dbg_wartapunit', sg)) === 1, 'siege tank selected for the order');
+  await call('dbg_warcam', 1330, 600); await sleep(250);
+  const hiveHp0 = await call('dbg_warhurt', 1, 1, 0);
+  await tap(320, 157);   // the hive, dead centre: attack order
+  ok((await poll('dbg_warhurt', [1, 1, 0], v => v >= 0 && v <= hiveHp0 - 50, 20000, 300)) <= hiveHp0 - 50,
+     'the siege tank is shelling the hive (x2 vs structures)', 'hive hp stuck at ' + (await call('dbg_warhurt', 1, 1, 0)));
+
+  // firewalls: grid-snapped segments join into one barrier, and a bug
+  // cannot walk through the line
+  ok((await call('dbg_warenter', 0)) === 1, 'fresh battle for the firewall checks');
+  await call('dbg_waraddbits', 500);
+  const w1 = await call('dbg_warbuildxy', 3, 500, 400);
+  const w2 = await call('dbg_warbuildxy', 3, 500, 424);
+  const w3 = await call('dbg_warbuildxy', 3, 500, 448);
+  const w4 = await call('dbg_warbuildxy', 3, 524, 448);
+  ok(w1 >= 0 && w2 >= 0 && w3 >= 0 && w4 >= 0 && (await call('dbg_warstructs', 3)) === 4,
+     'four firewall segments placed', [w1, w2, w3, w4].join(','));
+  const snap = v => Math.round(v / 24) * 24;
+  const [w1x, w1y] = unxy(await call('dbg_warstructxy', w1));
+  const [w2x, w2y] = unxy(await call('dbg_warstructxy', w2));
+  const [w3x, w3y] = unxy(await call('dbg_warstructxy', w3));
+  const [w4x, w4y] = unxy(await call('dbg_warstructxy', w4));
+  ok(w1x === snap(500) && w2x === w1x && w3x === w1x && w2y - w1y === 24 && w3y - w2y === 24
+     && w4y === w3y && w4x - w3x === 24,
+     'segments snapped to the 24u grid, shoulder to shoulder',
+     `${w1x},${w1y} ${w2x},${w2y} ${w3x},${w3y} ${w4x},${w4y}`);
+  await call('dbg_warcam', w1x, w2y); await sleep(400);
+  await cv.screenshot({ path: __dirname + '/war2-wall.png' });
+  await call('dbg_warspawnbug', 640, 432);
+  let bugIdx = -1, minBugX = 1e9;
+  for (let s = 0; s < 10; s++) {
+    await sleep(500);
+    for (let i = 0; i < 80; i++) {
+      const v = await call('dbg_warunitxy', i);
+      if (v < 0) continue;
+      const [ux, uy] = unxy(v);
+      if (ux > 560 && ux < 700 && uy > 380 && uy < 490) { bugIdx = i; if (ux < minBugX) minBugX = ux; }
+    }
+  }
+  ok(bugIdx >= 0 && minBugX > 490, 'the firewall line held: the crawler never crossed',
+     'bugIdx=' + bugIdx + ' minX=' + minBugX);
 
   // region 2 is unlocked now
   ok((await call('dbg_warenter', 1)) === 1, 'region 2 battle launches');
