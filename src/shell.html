@@ -417,6 +417,29 @@ cv.addEventListener('touchstart', (e)=>{
 cv.addEventListener('touchmove', (e)=>{ send_touch(e, 1); e.preventDefault(); }, { passive: false });
 cv.addEventListener('touchend', (e)=>{ send_touch(e, 2); e.preventDefault(); }, { passive: false });
 cv.addEventListener('touchcancel', (e)=>{ send_touch(e, 2); e.preventDefault(); }, { passive: false });
+// ---------- mouse (desktop): a click is a tap and a drag is a drag,
+// forwarded through the same touch_point channel under a reserved
+// pointer id, so every tap-first screen (WAR! above all) drives
+// with a mouse exactly as it does with a finger ----------
+let mouse_down = false;
+cv.addEventListener('pointerdown', (e)=>{
+  if (e.pointerType !== 'mouse' || e.button !== 0) return;
+  audio_init(); if (AC && AC.state==='suspended') AC.resume();
+  mouse_down = true;
+  const p = fb_pos(e);
+  if (EX && EX.touch_point) EX.touch_point(4242, p[0], p[1], 0);
+});
+cv.addEventListener('pointermove', (e)=>{
+  if (e.pointerType !== 'mouse' || !mouse_down) return;
+  const p = fb_pos(e);
+  if (EX && EX.touch_point) EX.touch_point(4242, p[0], p[1], 1);
+});
+addEventListener('pointerup', (e)=>{
+  if (e.pointerType !== 'mouse' || !mouse_down) return;
+  mouse_down = false;
+  const p = fb_pos(e);
+  if (EX && EX.touch_point) EX.touch_point(4242, p[0], p[1], 2);
+});
 escbtn.addEventListener('click', ()=>{ audio_init(); if (EX) EX.pulse_key(42); });
 if (window.matchMedia && matchMedia('(pointer: coarse)').matches) escbtn.style.display = 'block';
 
