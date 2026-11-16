@@ -2179,6 +2179,7 @@ static void crt_render(int pi);
 static void war_enter(int pi);
 static void war_update(int pi, float dt, const BwIn *in);
 static void war_render(int pi);
+static const char *war_snap_for_save(int pi);   // v1.17: WAR! battle snapshot for the save writer (defined with the WAR! block, below)
 static void bw_draw_note(int pi);
 static void bw_update(int pi, float dt, const BwIn *in);   // ditto, below
 static void bw_fill_p1(BwIn *bin, float dt);   // P1 input pack (touch-unified), below
@@ -6366,6 +6367,19 @@ static void unpack_copies(Player *p, int v){ for (int w=0;w<NWEAP;w++){ p->owned
 static void unpack_owned_mask(Player *p, int v){ for (int w=0;w<NWEAP;w++) p->owned[w]=(v>>w)&1; }
 static char slotbuf[SAVE_CAP];
 static void refresh_has_save(void){ G.has_save = (G.slot_has[1]||G.slot_has[2]||G.slot_has[3])? 1:0; }
+// WAR! battle snapshots (v1.17): a parked mid-battle state per player,
+// stored as the canonical save-token text ("wb=... wu=... ws=...
+// wn=... wt=... wf=...") so the writer can emit it verbatim and the
+// loader can rebuild it token by token. Sized for the worst case:
+// 80 unit records, 28 structs, 72 terrain, the 38-word fog bitset —
+// ~6.8K of text with arena-relative coordinates; 12K leaves margin.
+// (SAVE_CAP audit, Nov 16: existing per-player worst ~3.5K of pl-line
+// + <=6.8K war + 420 walls ~19.7K + headers ~0.4K = ~61.3K worst case
+// across 4 players, inside the 65536 cap with ~4.2K to spare.)
+#define WAR_SNAP_CAP 12288
+static char war_snap[MAXP][WAR_SNAP_CAP];
+static int war_snap_on[MAXP];
+static void war_snap_clear(int pi){ war_snap_on[pi]=0; war_snap[pi][0]=0; }
 static void do_save(void){
     char *p = savebuf;
     p = sappend(p, "TSG3\n");   // v3: weapon counts written raw (stacks are uncapped now); v2 was base-6 packed, v1 a bitmask — both still load
@@ -6459,6 +6473,13 @@ static void do_save(void){
                     *p++=' '; *p=0; p = put_key(p, "cq"); p = put_int(p, bd->crt_best_time);
                     *p++=' '; *p=0; p = put_key(p, "cr"); p = put_int(p, bd->crt_cupbest);
                     *p++=' '; *p=0; p = put_key(p, "wr"); p = put_int(p, bd->war_prog);
+                    // WAR! battle snapshot (v1.17): a parked snapshot
+                    // rides verbatim; a LIVE battle serializes fresh
+                    // into the snapshot buffer first, so quitting the
+                    // app mid-battle keeps the battle too. (Via a hook:
+                    // BWS itself is defined far below the save code.)
+                    { const char *wsnap = war_snap_for_save(i);
+                      if (wsnap){ *p++=' '; *p=0; p = sappend(p, wsnap); } }
                     *p++=' '; *p=0; p = put_key(p, "cx"); p = put_int(p, (int)bd->craft_x);
                     *p++=' '; *p=0; p = put_key(p, "cy"); p = put_int(p, (int)bd->craft_y);
                     *p++=' '; *p=0; p = put_key(p, "cm"); p = put_int(p, bd->craft_wood + bd->craft_stone*1000 + bd->craft_fiber*1000000);
@@ -6658,7 +6679,7 @@ static void continue_run(int slot){
     savebuf[n]=0;
     G.slot = slot;
     reset_world();
-    for (int i=0;i<MAXP;i++){ G.p[i].connected=0; G.p[i].is_local=0; }
+    for (int i=0;i<MAXP;i++){ G.p[i].connected=0; G.p[i].is_local=0; war_snap_clear(i); }   // parked WAR! battles reload from THIS blob only
     G.net_mode=NET_OFF; G.my_id=0;
     const char *v;
     G.zen_run = G.zen;
@@ -6715,6 +6736,13 @@ static void continue_run(int slot){
                   int bsm=0, bsq=0, bsi=0, bsq2=0, bsb=0, bpd=0, btd=0, bcb=0, bcp=0, bcq=0, bcr=0, bwr=0, bcx=0, bcy=0, bcm=0, bcn=0, bcg=0, bct=0, bcf=0;
                   int tcw_bn=0, tcw_x[48], tcw_y[48], tcw_k[48], tcw_h[48];
                   int tcd_gn=0, tcd_g[96];
+                  // WAR! snapshot (v1.17): the six values ride as raw
+                  // text (',' inside records, ';' between them, never
+                  // a space) and are rebuilt into war_snap[idx] below.
+                  // The nodes key is "wg", NOT the spec's "wn" — wn is
+                  // already whale_on in this same token tail.
+                  char twb[64], twu[4096], tws[1664], twg[160], twt[1664], twf[448];
+                  int twar=0; twb[0]=twu[0]=tws[0]=twg[0]=twt[0]=twf[0]=0;
                   while (*q==' '){
                       q++;
                       char kk[4]; int ki=0;
@@ -6733,6 +6761,19 @@ static void continue_run(int slot){
                           while (*q && *q!=' ' && *q!='\n' && tcd_gn<96){
                               tcd_g[tcd_gn++]=parse_int(q); while (*q && *q!=';' && *q!=' ' && *q!='\n') q++; if (*q==';') q++;
                           }
+                      } else if (kk[0]=='w' && kk[2]==0 && (kk[1]=='b' || kk[1]=='u' || kk[1]=='s' || kk[1]=='g' || kk[1]=='t' || kk[1]=='f')){
+                          // a WAR! snapshot value: copy it raw (bounded);
+                          // the generic tail-skip below then steps over it
+                          char *dst; int cap;
+                          if (kk[1]=='b'){ dst=twb; cap=(int)sizeof(twb); }
+                          else if (kk[1]=='u'){ dst=twu; cap=(int)sizeof(twu); }
+                          else if (kk[1]=='s'){ dst=tws; cap=(int)sizeof(tws); }
+                          else if (kk[1]=='g'){ dst=twg; cap=(int)sizeof(twg); }
+                          else if (kk[1]=='t'){ dst=twt; cap=(int)sizeof(twt); }
+                          else { dst=twf; cap=(int)sizeof(twf); }
+                          { int di=0; while (*q && *q!=' ' && *q!='\n' && di<cap-1) dst[di++]=*q++;
+                            dst[di]=0; while (*q && *q!=' ' && *q!='\n') q++; }
+                          if (kk[1]=='b') twar=1;   // the header anchors the snapshot; the rest are its luggage
                       }
                       int vv=parse_int(q);
                       if (kk[0]=='b' && kk[1]=='k' && kk[2]==0) pl->banked=vv*0.5f;
@@ -6815,6 +6856,16 @@ static void continue_run(int slot){
                       bd->craft_fish = bcf;
                       bd->craft_bn = tcw_bn;
                       for (int bi=0;bi<tcw_bn;bi++){ bd->craft_btx[bi]=tcw_x[bi]; bd->craft_bty[bi]=tcw_y[bi]; bd->craft_bk[bi]=tcw_k[bi]; bd->craft_bhp[bi]=tcw_h[bi]; }
+                      if (twar){   // rebuild the canonical WAR! snapshot text for this player
+                          char *sp = war_snap[idx];
+                          sp = sappend(sp, "wb="); sp = sappend(sp, twb);
+                          sp = sappend(sp, " wu="); sp = sappend(sp, twu);
+                          sp = sappend(sp, " ws="); sp = sappend(sp, tws);
+                          sp = sappend(sp, " wg="); sp = sappend(sp, twg);
+                          sp = sappend(sp, " wt="); sp = sappend(sp, twt);
+                          sp = sappend(sp, " wf="); sp = sappend(sp, twf);
+                          *sp = 0; war_snap_on[idx] = 1;
+                      }
                       bd->craft_gn = tcd_gn;
                       for (int gi=0;gi<tcd_gn;gi++) bd->craft_gone[gi]=tcd_g[gi];
                       { int pk=bsi; for (int i2=0;i2<4;i2++){ bd->items[i2]=pk%10; pk/=10; } }
@@ -10196,12 +10247,24 @@ typedef struct {
     // to, so any change of selection retires the highlight.
     float war_curx, war_cury; int war_curon;
     int war_barhl, war_barhl_s;
+    // v1.17: the battle pause menu (Esc in a battle) and the
+    // categorized command bar. war_bcat: -1 top level (categories),
+    // 0 TRAIN, 1 BUILD, 2 DEFENSE. war_pause freezes the battle.
+    int war_pause, war_bcat;
     char war_msg[72]; float war_msgt;
     float war_ux[80], war_uy[80], war_uhp[80], war_uatk[80];
     float war_utx[80], war_uty[80], war_uharv[80];
     int war_utype[80], war_umaxhp[80], war_ustate[80], war_utarget[80], war_ucarry[80], war_usel[80];
     float war_sx[28], war_sy[28], war_shp[28], war_scd[28], war_qt[28];
-    int war_stype[28], war_sside[28], war_smaxhp[28], war_queue[28];
+    int war_stype[28], war_sside[28], war_smaxhp[28];
+    // v1.17 addendum 2: production is a QUEUE of up to 9 per building,
+    // C&C-style — paid in full when queued, mixed types allowed, the
+    // front item trains on war_qt and the rest roll out in order.
+    int war_queue[28][9]; int war_qlen[28];
+    // v1.17 addendum 3: rally points — where a producer's fresh units
+    // walk to the moment they roll out. 0 = unset (arena coords are
+    // ~40000+, so 0 is never a real point).
+    float war_rallyx[28], war_rallyy[28];
     float war_nx[10], war_ny[10]; int war_namt[10], war_nn;
     float war_px[64], war_py[64]; int war_ptar[64], war_pdmg[64], war_pside[64]; float war_pt[64];
     // WAR! round 2 (Nov 16 2026, Daniel's playtest): static terrain and
@@ -10214,6 +10277,15 @@ typedef struct {
     // the fading scorch mark a destroyed feature leaves behind.
     float war_thp[72]; int war_tmaxhp[72]; float war_tdeadt[72];
     unsigned char war_fog[40*30];
+    // v1.17 pathfinding: per-unit waypoint runs (turning points of a
+    // grid A* path, LOS-shortcut). war_ptg is the target the path was
+    // computed for; if the caller's target drifts >24u from it the
+    // path is dropped. Stall bookkeeping lives here too: a unit that
+    // tries to step but barely moves for 0.6s earns a path request.
+    float war_wpx[80][32], war_wpy[80][32];
+    unsigned char war_wpn[80], war_wpi[80];
+    float war_ptgx[80], war_ptgy[80];
+    float war_stallt[80], war_repath[80], war_stallx[80], war_stally[80];
 } BwSim;
 static BwSim BWS[MAXP];
 static int bw_defeated_has(BwSim *S, int key){ for (int i=0;i<S->defeated_n;i++) if (S->defeated[i]==key) return 1; return 0; }
@@ -12673,7 +12745,10 @@ static void plat_update(int pi, float dt, const BwIn *in){
     // ground accel to reach the (lower) top sooner, overspeed
     // decays fast, weaker air drift. Jump/gravity untouched: the
     // level geometry (pipes, stairs, gaps) is tuned to them.
-    float maxs = 110.0f + 26.0f*fclamp(S->plat_run_t/0.9f, 0.0f, 1.0f);
+    // Nov 16 (Daniel): a little slower even — 100 base / 124 top
+    // (was 110/136). Jump distance at full run is still ~100px,
+    // clear of the widest generated gap (4 tiles) with a run-up.
+    float maxs = 100.0f + 24.0f*fclamp(S->plat_run_t/0.9f, 0.0f, 1.0f);
     if (dir!=0){
         float acc = grounded? 1240.0f : 540.0f;
         if (grounded && ((dir>0 && S->plat_vx<-92) || (dir<0 && S->plat_vx>92))){
@@ -12961,7 +13036,7 @@ static void plat_draw_enemy(PlatEn *e, int bob, int strain){
             disc_fill(x+SPO[ph][0], y-5+SPO[ph][1], 2, COL(255,255,255));
             disc_fill(x-SPO[ph][0], y-5+SPO[(ph+2)&3][1], 2, COL(210,240,210)); }
     } else if (e->kind==3){          // the piranha bug, mid-rise
-        int top = (int)(e->y - e->vy*34);
+        int top = SY(e->y - e->vy*34.0f);   // v1.17 fix: this was raw WORLD y used as a screen y — fine only where camy made SY the identity (solo desktop); on touch (deck 84) and split-screen the piranha drew ~3 tiles too low, buried in its pipe, while its bite used the true position
         if (e->vy>0.03f){
             ellipse_fill(x, top+8, 9, 8, COL(196,64,54));
             disc_fill(x-3, top+5, 2, COL(255,255,255)); disc_fill(x+3, top+5, 2, COL(255,255,255));
@@ -16926,14 +17001,17 @@ static void crt_render(int pi){ crt_render_view(pi, pi); }
 #define WAR_S_WALL 3
 #define WAR_S_HIVE 4
 #define WAR_S_ASM 5
+#define WAR_S_GATE 6
 #define WAR_MAXT 72
 #define WAR_FOG_W 40
 #define WAR_FOG_H 30
-static const int WAR_SRAD[6] = { 34, 26, 14, 13, 30, 28 };        // structure radii
-static const int WAR_SHP[6] = { 600, 300, 160, 120, 0, 450 };     // structure hp (hive scales instead)
+#define WAR_CARRY 25          // bits a harvester hauls per trip (v1.17: 20 -> 25)
+#define WAR_SUB_H 46          // the categorized bar's options strip, drawn above the bar (WAR_BAR_H itself is load-bearing — tap math is coupled to it)
+static const int WAR_SRAD[7] = { 34, 26, 14, 13, 30, 28, 13 };        // structure radii (gate last: a firewall-footprint segment)
+static const int WAR_SHP[7] = { 600, 300, 160, 120, 0, 450, 120 };     // structure hp (hive scales instead)
 static const int WAR_TRAIN_COST[7] = { 80, 50, 75, 0, 0, 90, 160 };   // by UNIT type: harvester / melee / ranged / - / - / scout / siege
 static const float WAR_TRAIN_TIME[7] = { 6.0f, 4.0f, 5.0f, 0, 0, 5.0f, 9.0f };
-static const int WAR_BUILD_COST[6] = { 0, 150, 100, 25, 0, 200 }; // patch bay / zapper / firewall / - / assembly plant
+static const int WAR_BUILD_COST[7] = { 0, 150, 100, 25, 0, 200, 35 }; // patch bay / zapper / firewall / - / assembly plant / gate
 // canopy tints for WAR terrain trees, one per region (Meadows green,
 // Spaghetti olive, Legacy dry, Badlands scorched, Cache frost-pale,
 // RAM Flats neon, Cable Jungle deep green, the Depths ashen violet)
@@ -16942,7 +17020,10 @@ static const u32 WAR_TREE_COL[8] = { COL(46,120,52), COL(96,124,44), COL(110,96,
 // debris hit points by terrain kind: 0 tree / 1 rock / 2 terminal /
 // 3 spool / 4 rubble — rubble crumbles fast, rock takes a beating
 static const int WAR_THP[5] = { 35, 90, 55, 45, 25 };
-static const u32 WAR_SPCOL[6] = { COL(240,180,90), COL(250,150,70), COL(150,105,70), COL(90,180,170), COL(150,150,160), COL(190,200,210) };
+// debris bounties (v1.17): felling terrain with PLAYER-side damage pays
+// bits by kind — tree / rock / terminal / spool / rubble. Bugs pay none.
+static const int WAR_TBITS[5] = { 10, 25, 40, 30, 15 };
+static const u32 WAR_SPCOL[7] = { COL(240,180,90), COL(250,150,70), COL(150,105,70), COL(90,180,170), COL(150,150,160), COL(190,200,210), COL(255,205,80) };   // last: the gate's warm gold — "yours, walk through"
 static int war_u_side(int type){ return (type==WAR_U_CRAWL || type==WAR_U_SPIT)? 1 : 0; }
 static int war_u_hp(int type, int region){
     switch (type){ case 0: return 45; case 1: return 90; case 2: return 55;
@@ -17019,12 +17100,13 @@ static void war_clamp_cam(BwSim *S){
     if (S->war_camy > WAR_OY+WAR_AH-110) S->war_camy = WAR_OY+WAR_AH-110;
 }
 static void war_clear_field(BwSim *S){
-    for (int i=0;i<WAR_MAXU;i++){ S->war_uhp[i]=0; S->war_usel[i]=0; }
-    for (int i=0;i<WAR_MAXS;i++){ S->war_shp[i]=0; S->war_smaxhp[i]=0; S->war_queue[i]=-1; }
+    for (int i=0;i<WAR_MAXU;i++){ S->war_uhp[i]=0; S->war_usel[i]=0; S->war_wpn[i]=0; S->war_wpi[i]=0; S->war_stallt[i]=0; S->war_repath[i]=0; }
+    for (int i=0;i<WAR_MAXS;i++){ S->war_shp[i]=0; S->war_smaxhp[i]=0; S->war_qlen[i]=0; S->war_rallyx[i]=0; S->war_rallyy[i]=0; }
     for (int i=0;i<WAR_MAXP;i++) S->war_pt[i]=0;
     S->war_selstruct=-1; S->war_place=-1;
     S->war_tn=0; S->war_ltap_n=0; S->war_ltap_unit=-1;
     S->war_curon=0; S->war_barhl=-1; S->war_barhl_s=-1;   // a fresh field has no pad cursor and no bar highlight
+    S->war_pause=0; S->war_bcat=-1;   // v1.17: no pause menu, bar at its top level
 }
 // --- fog of war ------------------------------------------------------
 // Cells are 40u over the 1600x1200 arena. Explored is sticky: a cell
@@ -17095,6 +17177,8 @@ static int war_spawn_unit(BwSim *S, int type, float x, float y){
         S->war_umaxhp[i]=war_u_hp(type, S->war_region); S->war_uhp[i]=(float)S->war_umaxhp[i];
         S->war_ustate[i]=0; S->war_utarget[i]=0; S->war_ucarry[i]=0; S->war_usel[i]=0;
         S->war_uatk[i]=0; S->war_uharv[i]=0; S->war_utx[i]=x; S->war_uty[i]=y;
+        S->war_wpn[i]=0; S->war_wpi[i]=0; S->war_stallt[i]=0; S->war_repath[i]=0;
+        S->war_stallx[i]=x; S->war_stally[i]=y; S->war_ptgx[i]=x; S->war_ptgy[i]=y;
         return i;
     }
     return -1;
@@ -17103,7 +17187,7 @@ static int war_spawn_struct(BwSim *S, int type, int side, float x, float y){
     for (int i=0;i<WAR_MAXS;i++) if (S->war_shp[i]<=0){
         int hp = type==WAR_S_HIVE? 220 + 60*S->war_region : WAR_SHP[type];
         S->war_stype[i]=type; S->war_sside[i]=side; S->war_sx[i]=x; S->war_sy[i]=y;
-        S->war_smaxhp[i]=hp; S->war_shp[i]=(float)hp; S->war_scd[i]=0; S->war_qt[i]=0; S->war_queue[i]=-1;
+        S->war_smaxhp[i]=hp; S->war_shp[i]=(float)hp; S->war_scd[i]=0; S->war_qt[i]=0; S->war_qlen[i]=0; S->war_rallyx[i]=0; S->war_rallyy[i]=0;
         return i;
     }
     return -1;
@@ -17122,14 +17206,16 @@ static void war_spawn_bug(BwSim *S, int hive, int wave){
 }
 static void war_win(int pi){
     BwSim *S = &BWS[pi]; Buddy *b = &G.bud[pi];
-    S->war_state = 2; S->war_endt = 3.2f;
+    S->war_state = 2; S->war_endt = 3.2f; S->war_pause = 0;
+    war_snap_clear(pi);   // the battle is decided: no snapshot survives it (cleared BEFORE the save below)
     if (S->war_region == b->war_prog && b->war_prog < 8){ b->war_prog++; do_save(); }
     war_note(S, "REGION CONQUERED!");
     qnote(0, 0, 60, 80, 6); qnote(0.12f, 0, 64, 80, 6); qnote(0.24f, 0, 67, 80, 6); qnote(0.36f, 0, 72, 90, 10);
 }
 static void war_lose(int pi){
     BwSim *S = &BWS[pi];
-    S->war_state = 3; S->war_endt = 3.2f;
+    S->war_state = 3; S->war_endt = 3.2f; S->war_pause = 0;
+    war_snap_clear(pi);   // a fallen Core leaves nothing to resume
     war_note(S, "THE COMPILER CORE HAS FALLEN!");
     qnote(0, 0, 48, 80, 8); qnote(0.2f, 0, 43, 80, 8); qnote(0.4f, 0, 36, 90, 12);
 }
@@ -17138,7 +17224,7 @@ static void war_hurt_unit(int pi, int i, int dmg){
     if (!war_unit_alive(S, i)) return;
     S->war_uhp[i] -= dmg;
     if (S->war_uhp[i] <= 0){
-        S->war_uhp[i] = 0; S->war_usel[i] = 0; S->war_utarget[i] = 0;
+        S->war_uhp[i] = 0; S->war_usel[i] = 0; S->war_utarget[i] = 0; S->war_wpn[i] = 0;   // the dead drop their paths
         if (S->war_utype[i]==WAR_U_HARV && war_count_type(S, WAR_U_HARV)==0
             && S->war_bits < WAR_TRAIN_COST[0] && S->war_state==1){
             // never soft-lock the economy: the Core prints one
@@ -17153,7 +17239,7 @@ static void war_hurt_struct(int pi, int i, int dmg){
     if (!war_struct_alive(S, i)) return;
     S->war_shp[i] -= dmg;
     if (S->war_shp[i] <= 0){
-        S->war_shp[i] = 0; S->war_queue[i] = -1;
+        S->war_shp[i] = 0; S->war_qlen[i] = 0;
         if (S->war_selstruct == i) S->war_selstruct = -1;
         if (S->war_state == 1 && S->war_stype[i]==WAR_S_HQ) war_lose(pi);
         else if (S->war_state == 1 && S->war_stype[i]==WAR_S_HIVE && war_hives_alive(S)==0) war_win(pi);
@@ -17163,13 +17249,17 @@ static void war_hurt_struct(int pi, int i, int dmg){
 // from your combat units — never the siege gun's structure bonus —
 // and at 0 hp they are gone for the rest of the battle: movement
 // frees up at once and all that remains is a scorch mark that fades.
-static void war_hurt_terrain(int pi, int t, int dmg){
+// v1.17: felling debris with PLAYER-side damage (side 0) also pays a
+// salvage bounty by kind (WAR_TBITS) — silent income, no note spam.
+// Bug damage (side 1) pays nothing.
+static void war_hurt_terrain(int pi, int t, int dmg, int side){
     BwSim *S = &BWS[pi];
     if (t<0 || t>=S->war_tn || S->war_thp[t]<=0) return;
     S->war_thp[t] -= (float)dmg;
     if (S->war_thp[t] <= 0){
         S->war_thp[t] = 0;
         S->war_tdeadt[t] = 6.0f;
+        if (side==0) S->war_bits += WAR_TBITS[S->war_ttype[t]];
         if (pi==G.my_id) sfx(17);   // the wall-crunch: debris gives way
     }
 }
@@ -17196,7 +17286,7 @@ static int war_nearest_enemy(BwSim *S, int side, float x, float y, float maxd, i
         }
     return best;
 }
-static float war_move_to(BwSim *S, int i, float tx, float ty, float stopd, float dt){
+static float war_move_step(BwSim *S, int i, float tx, float ty, float stopd, float dt){
     float dx=tx-S->war_ux[i], dy=ty-S->war_uy[i];
     float d=fsqrt(dx*dx+dy*dy);
     if (d>stopd && d>0.01f){
@@ -17205,6 +17295,183 @@ static float war_move_to(BwSim *S, int i, float tx, float ty, float stopd, float
         S->war_ux[i] += dx/d*step; S->war_uy[i] += dy/d*step;
     }
     return d;
+}
+// --- pathfinding (v1.17, Daniel: units must conceive of going
+// AROUND a wall) ------------------------------------------------------
+// war_move_to used to steer in a straight line and let war_separate
+// push the unit out of obstacle circles; with the target behind a
+// firewall line or a building the two forces reach a stable
+// equilibrium and the unit pins forever. Now: grid A* over the fog
+// grid's geometry (40x30 cells of 40u), requested ONLY when a unit
+// stalls (0.6s of trying to step with <3u of net movement), so idle
+// behaviour and cost are unchanged. The grid and the LOS shortcut are
+// SIDE-AWARE (addendum 1): a gate is an obstacle only to side 1 —
+// your harvesters route through your gates; bugs route around them
+// or chew through. All scratch is fixed static arrays; every loop is
+// bounded (expansion cap, ring cap, sample cap) — no wasm hangs.
+static unsigned char war_pf_block[WAR_FOG_W*WAR_FOG_H];
+static int war_pf_g[WAR_FOG_W*WAR_FOG_H];
+static int war_pf_from[WAR_FOG_W*WAR_FOG_H];
+static unsigned char war_pf_closed[WAR_FOG_W*WAR_FOG_H];
+static int war_pf_path[WAR_FOG_W*WAR_FOG_H];
+static float war_pf_tpx[128], war_pf_tpy[128];
+static int war_pf_blocked_at(BwSim *S, int side, float wx, float wy){
+    for (int s=0;s<WAR_MAXS;s++){
+        if (S->war_shp[s]<=0) continue;
+        if (side==0 && S->war_stype[s]==WAR_S_GATE) continue;   // your gates are doors — to you
+        float rr = (float)WAR_SRAD[S->war_stype[s]] + 13.0f;
+        float dx=wx-S->war_sx[s], dy=wy-S->war_sy[s];
+        if (dx*dx+dy*dy < rr*rr) return 1;
+    }
+    for (int t=0;t<S->war_tn;t++){
+        if (S->war_thp[t]<=0) continue;
+        float rr = (float)S->war_trad[t] + 13.0f;
+        float dx=wx-S->war_tx[t], dy=wy-S->war_ty[t];
+        if (dx*dx+dy*dy < rr*rr) return 1;
+    }
+    return 0;
+}
+static int war_pf_seg_blocked(BwSim *S, int side, float x0, float y0, float x1, float y1){
+    float dx=x1-x0, dy=y1-y0, d=fsqrt(dx*dx+dy*dy);
+    int steps = (int)(d/10.0f) + 1; if (steps>200) steps=200;
+    for (int k=0;k<=steps;k++){
+        float t = (float)k/(float)steps;
+        if (war_pf_blocked_at(S, side, x0+dx*t, y0+dy*t)) return 1;
+    }
+    return 0;
+}
+static int war_pf_nearest_free(int cx, int cy, float wx, float wy){
+    // the free cell whose CENTRE is closest to (wx,wy), searching
+    // rings outward from (cx,cy); the first ring with any free cell
+    // wins. Distance matters, not just ring order: a unit pressing a
+    // wall stands in a blocked cell, and the first free cell in ring
+    // order can be the one BEHIND the wall — its centre then becomes
+    // the path's first waypoint, unreachable, and the unit jams
+    // against the wall forever (found by wartest check 5: a crawler
+    // frozen at the wall face for 45s). The nearest free centre is
+    // on the unit's own side of the obstacle, where it can be
+    // steered to, and the grid path leads on from there.
+    for (int r=0;r<=4;r++){
+        int best=-1; float bd=1e18f;
+        for (int dy=-r; dy<=r; dy++) for (int dx=-r; dx<=r; dx++){
+            if (r>0 && dx>-r && dx<r && dy>-r && dy<r) continue;   // the ring only, never the filled square
+            int nx=cx+dx, ny=cy+dy;
+            if (nx<0 || ny<0 || nx>=WAR_FOG_W || ny>=WAR_FOG_H) continue;
+            if (war_pf_block[ny*WAR_FOG_W+nx]) continue;
+            float ccx = WAR_OX + nx*40.0f + 20.0f, ccy = WAR_OY + ny*40.0f + 20.0f;
+            float ddx = ccx-wx, ddy = ccy-wy, d2 = ddx*ddx + ddy*ddy;
+            if (d2<bd){ bd=d2; best = ny*WAR_FOG_W+nx; }
+        }
+        if (best>=0) return best;
+    }
+    return -1;
+}
+static int war_pf_find(BwSim *S, int i, float tx, float ty){
+    int side = war_u_side(S->war_utype[i]);
+    for (int cy=0; cy<WAR_FOG_H; cy++) for (int cx=0; cx<WAR_FOG_W; cx++)
+        war_pf_block[cy*WAR_FOG_W+cx] = (unsigned char)war_pf_blocked_at(S, side, WAR_OX + cx*40.0f + 20.0f, WAR_OY + cy*40.0f + 20.0f);
+    int start = war_pf_nearest_free((int)((S->war_ux[i]-WAR_OX)/40.0f), (int)((S->war_uy[i]-WAR_OY)/40.0f), S->war_ux[i], S->war_uy[i]);
+    int goal = war_pf_nearest_free((int)((tx-WAR_OX)/40.0f), (int)((ty-WAR_OY)/40.0f), tx, ty);
+    if (start<0 || goal<0) return 0;
+    int gx = goal%WAR_FOG_W, gy = goal/WAR_FOG_W;
+    for (int c=0;c<WAR_FOG_W*WAR_FOG_H;c++){ war_pf_g[c]=-1; war_pf_from[c]=-1; war_pf_closed[c]=0; }
+    war_pf_g[start]=0;
+    int found = (start==goal), expansions = 0;
+    while (!found){
+        int best=-1, bf=0;
+        for (int c=0;c<WAR_FOG_W*WAR_FOG_H;c++){
+            if (war_pf_g[c]<0 || war_pf_closed[c]) continue;
+            int cx=c%WAR_FOG_W, cy=c/WAR_FOG_W;
+            int adx = cx>gx? cx-gx : gx-cx, ady = cy>gy? cy-gy : gy-cy;
+            int f = war_pf_g[c] + 10*(adx>ady? adx:ady) + 4*(adx<ady? adx:ady);   // octile heuristic
+            if (best<0 || f<bf){ best=c; bf=f; }
+        }
+        if (best<0) break;                    // the frontier ran dry: unreachable
+        if (++expansions > 4000) break;       // bounded, always
+        war_pf_closed[best]=1;
+        if (best==goal){ found=1; break; }
+        int bx=best%WAR_FOG_W, by=best/WAR_FOG_W;
+        for (int dy=-1; dy<=1; dy++) for (int dx=-1; dx<=1; dx++){
+            if (!dx && !dy) continue;
+            int nx=bx+dx, ny=by+dy;
+            if (nx<0 || ny<0 || nx>=WAR_FOG_W || ny>=WAR_FOG_H) continue;
+            int nc = ny*WAR_FOG_W+nx;
+            if (war_pf_block[nc] || war_pf_closed[nc]) continue;
+            if (dx && dy && (war_pf_block[by*WAR_FOG_W+nx] || war_pf_block[ny*WAR_FOG_W+bx])) continue;   // no corner cutting
+            int ng = war_pf_g[best] + ((dx && dy)? 14 : 10);
+            if (war_pf_g[nc]<0 || ng<war_pf_g[nc]){ war_pf_g[nc]=ng; war_pf_from[nc]=best; }
+        }
+    }
+    if (!found) return 0;
+    // the came-from chain, goal-first; every step strictly descends
+    // the g-score, so the walk is bounded by the chain itself
+    int pn=0, c=goal;
+    while (c>=0 && pn<WAR_FOG_W*WAR_FOG_H){ war_pf_path[pn++]=c; if (c==start) break; c=war_pf_from[c]; }
+    if (pn<1 || war_pf_path[pn-1]!=start) return 0;
+    // turning points only: walk in travel order, keep a cell when the
+    // direction of travel changes (plus the first and last cells)
+    int tn=0, pdx=0, pdy=0;
+    for (int k=pn-1; k>=0; k--){
+        int cx=war_pf_path[k]%WAR_FOG_W, cy=war_pf_path[k]/WAR_FOG_W;
+        int dx=0, dy=0;
+        if (k>0){ dx = war_pf_path[k-1]%WAR_FOG_W - cx; dy = war_pf_path[k-1]/WAR_FOG_W - cy; }
+        if ((k==pn-1 || k==0 || dx!=pdx || dy!=pdy) && tn<128){
+            war_pf_tpx[tn]=WAR_OX+cx*40.0f+20.0f; war_pf_tpy[tn]=WAR_OY+cy*40.0f+20.0f; tn++;
+        }
+        pdx=dx; pdy=dy;
+    }
+    // LOS shortcut: from wherever we stand, jump to the farthest
+    // turning point with a clear segment (attempts capped)
+    int wn=0, idx=0; float ax=S->war_ux[i], ay=S->war_uy[i];
+    while (idx<tn && wn<31){
+        int jump=idx, tries=0;
+        for (int k=tn-1; k>idx && tries<24; k--, tries++)
+            if (!war_pf_seg_blocked(S, side, ax, ay, war_pf_tpx[k], war_pf_tpy[k])){ jump=k; break; }
+        S->war_wpx[i][wn]=war_pf_tpx[jump]; S->war_wpy[i][wn]=war_pf_tpy[jump]; wn++;
+        ax=war_pf_tpx[jump]; ay=war_pf_tpy[jump]; idx=jump+1;
+    }
+    if (wn<1) return 0;
+    S->war_wpn[i]=(unsigned char)wn; S->war_wpi[i]=0;
+    S->war_ptgx[i]=tx; S->war_ptgy[i]=ty;
+    return 1;
+}
+// one stall window: 1 when a full 0.6s passed with <3u of net
+// movement — the unit is pressing against the world, not travelling
+static int war_pf_stall_tick(BwSim *S, int i, float dt){
+    S->war_stallt[i] += dt;
+    if (S->war_stallt[i] < 0.6f) return 0;
+    float mdx=S->war_ux[i]-S->war_stallx[i], mdy=S->war_uy[i]-S->war_stally[i];
+    int stuck = (mdx*mdx + mdy*mdy < 9.0f);
+    S->war_stallt[i]=0; S->war_stallx[i]=S->war_ux[i]; S->war_stally[i]=S->war_uy[i];
+    return stuck;
+}
+static float war_move_to(BwSim *S, int i, float tx, float ty, float stopd, float dt){
+    float dx=tx-S->war_ux[i], dy=ty-S->war_uy[i];
+    float d=fsqrt(dx*dx+dy*dy);
+    if (S->war_repath[i] > 0) S->war_repath[i] -= dt;
+    if (S->war_wpn[i]>0){
+        float pdx=tx-S->war_ptgx[i], pdy=ty-S->war_ptgy[i];
+        if (pdx*pdx+pdy*pdy > 24.0f*24.0f) S->war_wpn[i]=0;   // the target JUMPED since last frame (a new order, a dead target replaced): the path is stale intent
+        else { S->war_ptgx[i]=tx; S->war_ptgy[i]=ty; }        // a MOVING target (a unit under pursuit) re-anchors every frame: its step-by-step motion is the same intent, not staleness — a cumulative-drift rule here killed every pursuit path within a second (wartest check 5: the bait's ordinary charge-and-return oscillation, ±30u, dropped the bug's path mid-lunge three times in a row)
+    }
+    if (S->war_wpn[i]>0){
+        if (war_pf_stall_tick(S, i, dt)) S->war_wpn[i]=0;   // the path itself jammed (a new wall, a crowd): drop it and re-think below
+        else {
+            while (S->war_wpi[i] < S->war_wpn[i]){
+                float wx=S->war_wpx[i][S->war_wpi[i]], wy=S->war_wpy[i][S->war_wpi[i]];
+                float wdx=wx-S->war_ux[i], wdy=wy-S->war_uy[i];
+                if (wdx*wdx+wdy*wdy <= 100.0f){ S->war_wpi[i]++; continue; }
+                war_move_step(S, i, wx, wy, 6.0f, dt);
+                return d;
+            }
+            S->war_wpn[i]=0;   // waypoints exhausted: the last leg is a straight line at the real target, caller's stopd intact
+        }
+    }
+    if (d > stopd + 1.0f){
+        if (war_pf_stall_tick(S, i, dt) && S->war_repath[i] <= 0.0f)
+            S->war_repath[i] = war_pf_find(S, i, tx, ty)? 1.5f : 2.0f;   // no route (a walled-in Core): keep pressing, ask again later
+    } else { S->war_stallt[i]=0; S->war_stallx[i]=S->war_ux[i]; S->war_stally[i]=S->war_uy[i]; }   // standing to fire never accumulates stall
+    return war_move_step(S, i, tx, ty, stopd, dt);
 }
 static void war_harv_update(int pi, int i, float dt){
     BwSim *S = &BWS[pi];
@@ -17219,7 +17486,7 @@ static void war_harv_update(int pi, int i, float dt){
         if (S->war_uharv[i] <= 0){
             int n = S->war_utarget[i]-1;   // harvesters store the node index+1 in utarget
             if (n>=0 && n<S->war_nn && S->war_namt[n]>0){
-                int take = 20 - S->war_ucarry[i];
+                int take = WAR_CARRY - S->war_ucarry[i];
                 if (take > S->war_namt[n]) take = S->war_namt[n];
                 S->war_namt[n] -= take; S->war_ucarry[i] += take;
             }
@@ -17227,7 +17494,7 @@ static void war_harv_update(int pi, int i, float dt){
         }
         return;
     }
-    if (S->war_ucarry[i] >= 20 || st==4){   // full (or already homeward): dump it at the Core
+    if (S->war_ucarry[i] >= WAR_CARRY || st==4){   // full (or already homeward): dump it at the Core
         int hq = war_find_hq(S);
         if (hq<0 || !war_struct_alive(S, hq)){ S->war_ustate[i]=0; return; }
         float d = war_move_to(S, i, S->war_sx[hq], S->war_sy[hq], WAR_SRAD[WAR_S_HQ]+8.0f, dt);
@@ -17295,7 +17562,7 @@ static void war_unit_update(int pi, int i, float dt){
                 if (type==WAR_U_SIEGE && tref<0 && ft<0) dmg *= 2;
                 if (type==WAR_U_MELEE || type==WAR_U_CRAWL){
                     if (tref>0) war_hurt_unit(pi, tref-1, dmg);
-                    else if (ft>=0) war_hurt_terrain(pi, ft, dmg);
+                    else if (ft>=0) war_hurt_terrain(pi, ft, dmg, side);
                     else war_hurt_struct(pi, -tref-1, dmg);
                 } else war_fire(S, side, x, y, tref, dmg);
             }
@@ -17340,17 +17607,24 @@ static void war_struct_update(int pi, int s, float dt){
             }
         }
     }
-    if (S->war_queue[s] >= 0){   // training: one at a time per building
+    if (S->war_qlen[s] > 0){   // the training QUEUE (addendum 2): the front item cooks on war_qt, the rest wait their turn
         S->war_qt[s] -= dt;
         if (S->war_qt[s] <= 0){
             if (war_count_units(S, 0) < 24){
-                int ut = S->war_queue[s];
+                int ut = S->war_queue[s][0];
                 float a = (float)((s*47) % 6) * 1.1f;
-                war_spawn_unit(S, ut, S->war_sx[s] + fcos(a)*(WAR_SRAD[type]+16),
-                                      S->war_sy[s] + fsin(a)*(WAR_SRAD[type]+16));
-                S->war_queue[s] = -1;
+                int ni = war_spawn_unit(S, ut, S->war_sx[s] + fcos(a)*(WAR_SRAD[type]+16),
+                                              S->war_sy[s] + fsin(a)*(WAR_SRAD[type]+16));
+                if (ni>=0 && S->war_rallyx[s]!=0){   // rally (addendum 3): fresh units walk to the flag — harvesters too; on arrival they think for themselves
+                    S->war_ustate[ni]=1; S->war_utarget[ni]=0;
+                    S->war_utx[ni]=S->war_rallyx[s]; S->war_uty[ni]=S->war_rallyy[s];
+                    S->war_wpn[ni]=0;
+                }
+                for (int k=1;k<S->war_qlen[s];k++) S->war_queue[s][k-1]=S->war_queue[s][k];
+                S->war_qlen[s]--;
+                if (S->war_qlen[s]>0) S->war_qt[s]=WAR_TRAIN_TIME[S->war_queue[s][0]];
                 if (pi==G.my_id) sfx(19);
-            } else S->war_qt[s] = 0.5f;   // army full: the finished unit waits at the door
+            } else S->war_qt[s] = 0.5f;   // army full: the front item waits at the door, and the queue behind it waits too
         }
     }
 }
@@ -17368,6 +17642,7 @@ static void war_separate(BwSim *S){
         }
         for (int s=0;s<WAR_MAXS;s++){
             if (S->war_shp[s]<=0) continue;
+            if (S->war_stype[s]==WAR_S_GATE && war_u_side(S->war_utype[i])==0) continue;   // gates (addendum 1): YOUR units walk straight through; bugs still hit a wall
             float rad = (float)WAR_SRAD[S->war_stype[s]] + 9.0f;
             float dx=S->war_ux[i]-S->war_sx[s], dy=S->war_uy[i]-S->war_sy[s];
             float d2=dx*dx+dy*dy;
@@ -17406,7 +17681,7 @@ static void war_proj_update(int pi, float dt){
         if (d <= sp*dt + 7.0f){
             int ft = war_ref_feat(S->war_ptar[i]);
             if (S->war_ptar[i]>0) war_hurt_unit(pi, S->war_ptar[i]-1, S->war_pdmg[i]);
-            else if (ft>=0) war_hurt_terrain(pi, ft, S->war_pdmg[i]);
+            else if (ft>=0) war_hurt_terrain(pi, ft, S->war_pdmg[i], S->war_pside[i]);
             else war_hurt_struct(pi, -S->war_ptar[i]-1, S->war_pdmg[i]);
             S->war_pt[i]=0;
         } else { S->war_px[i] += dx/d*sp*dt; S->war_py[i] += dy/d*sp*dt; }
@@ -17417,17 +17692,20 @@ static void war_start_battle(int pi, int region){
     BwSim *S = &BWS[pi];
     if (region<0) region=0; if (region>7) region=7;
     war_clear_field(S);
-    S->war_state=1; S->war_region=region; S->war_bits=150; S->war_t=0;
+    S->war_state=1; S->war_region=region; S->war_bits=250; S->war_t=0;   // v1.17: a richer purse to open with (was 150)
     S->war_wavet = war_wave_dt(region)*0.7f;
     S->war_grace=0.35f; S->war_ordt=0; S->war_msgt=0;
     S->war_ltap_t=-10.0f; S->war_ltap_unit=-1; S->war_drag_id=-1;
     war_spawn_struct(S, WAR_S_HQ, 0, WAR_OX+280, WAR_OY+600);       // struct 0 is always the Core
     war_spawn_unit(S, WAR_U_HARV, WAR_OX+336, WAR_OY+652);
     war_spawn_unit(S, WAR_U_MELEE, WAR_OX+336, WAR_OY+548);
-    static const float ND[7][2] = { {430,430},{430,770},{800,300},{800,900},{800,600},{1180,350},{1180,850} };
-    static const int NA[7] = { 300, 300, 400, 400, 500, 500, 500 };
-    S->war_nn=7;
-    for (int n=0;n<7;n++){ S->war_nx[n]=WAR_OX+ND[n][0]; S->war_ny[n]=WAR_OY+ND[n][1]; S->war_namt[n]=NA[n]; }
+    // v1.17: nine nodes, 4,800 bits on the field (was seven / 2,900) —
+    // (620,120) opens the north, (1010,600) is contested ground
+    // between the midfield and the hives
+    static const float ND[9][2] = { {430,430},{430,770},{800,300},{800,900},{800,600},{1180,350},{1180,850},{620,120},{1010,600} };
+    static const int NA[9] = { 400, 400, 500, 500, 600, 600, 600, 500, 700 };
+    S->war_nn=9;
+    for (int n=0;n<9;n++){ S->war_nx[n]=WAR_OX+ND[n][0]; S->war_ny[n]=WAR_OY+ND[n][1]; S->war_namt[n]=NA[n]; }
     int nh = 1 + (region>=3? 1:0) + (region>=6? 1:0);
     static const float HV[3][2] = { {1330,600},{1250,220},{1250,980} };
     for (int h=0;h<nh;h++){
@@ -17445,8 +17723,292 @@ static void war_start_battle(int pi, int region){
       war_note(S, buf); }
     sfx(19);
 }
+static float war_axis(float a);   // defined with the pad code below; the pause menu's pad handler needs it early
+// --- battle snapshots (v1.17, Daniel: leaving must SAVE the battle
+// and pause it) -------------------------------------------------------
+// The canonical text lives in war_snap[pi] (save section): keys wb /
+// wu / ws / wg / wt / wf in the "cw" idiom — ',' inside a record,
+// ';' between records, one space between keys. Coordinates are
+// arena-relative ints EXCEPT the rally (absolute, so 0 stays "unset").
+// The save writer emits the text verbatim; the loader rebuilds it;
+// restore parses it back into the BwSim. Projectiles, attack
+// cooldowns, selection and scorch marks are transient — never saved.
+static void war_snap_serialize(int pi){
+    BwSim *S = &BWS[pi];
+    char *p = war_snap[pi];
+    p = put_key(p, "wb");
+    p = put_int(p, S->war_region); *p++=','; *p=0;
+    p = put_int(p, S->war_bits); *p++=','; *p=0;
+    p = put_int(p, (int)S->war_t); *p++=','; *p=0;
+    p = put_int(p, (int)(S->war_wavet*10.0f + 0.5f)); *p++=','; *p=0;
+    p = put_int(p, (int)(S->war_camx - WAR_OX)); *p++=','; *p=0;
+    p = put_int(p, (int)(S->war_camy - WAR_OY));
+    { int first=1;   // wu: ALIVE units only, slot-stable (dead slots stay dead — refs in utarget must land)
+      for (int i=0;i<WAR_MAXU;i++){
+          if (S->war_uhp[i]<=0) continue;
+          if (first){ *p++=' '; *p=0; p = put_key(p, "wu"); first=0; } else { *p++=';'; *p=0; }
+          p = put_int(p, i); *p++=','; *p=0;
+          p = put_int(p, S->war_utype[i]); *p++=','; *p=0;
+          p = put_int(p, (int)(S->war_ux[i]-WAR_OX)); *p++=','; *p=0;
+          p = put_int(p, (int)(S->war_uy[i]-WAR_OY)); *p++=','; *p=0;
+          p = put_int(p, (int)S->war_uhp[i]); *p++=','; *p=0;
+          p = put_int(p, S->war_umaxhp[i]); *p++=','; *p=0;
+          p = put_int(p, S->war_ustate[i]); *p++=','; *p=0;
+          p = put_int(p, S->war_utarget[i]); *p++=','; *p=0;
+          p = put_int(p, (int)(S->war_utx[i]-WAR_OX)); *p++=','; *p=0;
+          p = put_int(p, (int)(S->war_uty[i]-WAR_OY)); *p++=','; *p=0;
+          p = put_int(p, S->war_ucarry[i]); *p++=','; *p=0;
+          p = put_int(p, (int)(S->war_uharv[i]*10.0f + 0.5f));
+      } }
+    { int first=1;   // ws: ALIVE structs — queue rides as qlen + the queued types (addendum 2), rally last (addendum 3)
+      for (int s=0;s<WAR_MAXS;s++){
+          if (S->war_shp[s]<=0) continue;
+          if (first){ *p++=' '; *p=0; p = put_key(p, "ws"); first=0; } else { *p++=';'; *p=0; }
+          p = put_int(p, s); *p++=','; *p=0;
+          p = put_int(p, S->war_stype[s]); *p++=','; *p=0;
+          p = put_int(p, S->war_sside[s]); *p++=','; *p=0;
+          p = put_int(p, (int)(S->war_sx[s]-WAR_OX)); *p++=','; *p=0;
+          p = put_int(p, (int)(S->war_sy[s]-WAR_OY)); *p++=','; *p=0;
+          p = put_int(p, (int)S->war_shp[s]); *p++=','; *p=0;
+          p = put_int(p, S->war_smaxhp[s]); *p++=','; *p=0;
+          p = put_int(p, S->war_qlen[s]); *p++=','; *p=0;
+          p = put_int(p, (int)(S->war_qt[s]*10.0f + 0.5f)); *p++=','; *p=0;
+          p = put_int(p, (int)(S->war_scd[s]*10.0f + 0.5f));
+          for (int k=0;k<S->war_qlen[s];k++){ *p++=','; *p=0; p = put_int(p, S->war_queue[s][k]); }
+          *p++=','; *p=0; p = put_int(p, (int)S->war_rallyx[s]);
+          *p++=','; *p=0; p = put_int(p, (int)S->war_rallyy[s]);
+      } }
+    *p++=' '; *p=0; p = put_key(p, "wg");   // bit nodes: every slot, amounts may be 0 — indices matter
+    for (int n=0;n<S->war_nn;n++){
+        if (n){ *p++=';'; *p=0; }
+        p = put_int(p, (int)(S->war_nx[n]-WAR_OX)); *p++=','; *p=0;
+        p = put_int(p, (int)(S->war_ny[n]-WAR_OY)); *p++=','; *p=0;
+        p = put_int(p, S->war_namt[n]);
+    }
+    *p++=' '; *p=0; p = put_key(p, "wt");   // terrain: ALL entries — WAR_TREF aims at these indices
+    for (int t=0;t<S->war_tn;t++){
+        if (t){ *p++=';'; *p=0; }
+        p = put_int(p, (int)(S->war_tx[t]-WAR_OX)); *p++=','; *p=0;
+        p = put_int(p, (int)(S->war_ty[t]-WAR_OY)); *p++=','; *p=0;
+        p = put_int(p, S->war_ttype[t]); *p++=','; *p=0;
+        p = put_int(p, S->war_trad[t]); *p++=','; *p=0;
+        p = put_int(p, (int)S->war_thp[t]); *p++=','; *p=0;
+        p = put_int(p, S->war_tmaxhp[t]);
+    }
+    *p++=' '; *p=0; p = put_key(p, "wf");   // fog: explored-or-visible as a 1200-bit set in 38 u32 words
+    for (int w=0;w<38;w++){
+        if (w){ *p++=','; *p=0; }
+        u32 word=0;
+        for (int b=0;b<32;b++){ int c=w*32+b; if (c<WAR_FOG_W*WAR_FOG_H && S->war_fog[c]) word |= (1u<<b); }
+        p = put_int(p, (int)word);
+    }
+    *p=0;
+    war_snap_on[pi]=1;
+}
+static const char *war_snap_for_save(int pi){   // the save writer's door: refresh from a live battle, then hand over the text (0 = nothing parked)
+    if (BWS[pi].war_state==1) war_snap_serialize(pi);
+    return war_snap_on[pi]? war_snap[pi] : 0;
+}
+static const char *war_snap_val(const char *snap, const char *key){
+    int kl = slen(key);
+    const char *s = snap;
+    while (*s){
+        if ((s==snap || s[-1]==' ') && s[0]==key[0]){
+            int ok=1; for (int i=0;i<kl;i++) if (s[i]!=key[i]){ ok=0; break; }
+            if (ok && s[kl]=='=') return s+kl+1;
+        }
+        while (*s && *s!=' ') s++;
+        if (*s==' ') s++;
+    }
+    return 0;
+}
+static int war_rd_int(const char **qp){   // one int, then step over exactly one separator (',' / ';' / ' ')
+    const char *q = *qp;
+    int v = parse_int(q);
+    while (*q && *q!=',' && *q!=';' && *q!=' ') q++;
+    if (*q==',' || *q==';') q++;
+    *qp = q;
+    return v;
+}
+static void war_snap_restore(int pi){
+    BwSim *S = &BWS[pi];
+    const char *snap = war_snap[pi];
+    const char *v;
+    war_clear_field(S);
+    if ((v = war_snap_val(snap, "wb"))){
+        S->war_region = war_rd_int(&v);
+        S->war_bits = war_rd_int(&v);
+        S->war_t = (float)war_rd_int(&v);
+        S->war_wavet = war_rd_int(&v) * 0.1f;
+        S->war_camx = WAR_OX + (float)war_rd_int(&v);
+        S->war_camy = WAR_OY + (float)war_rd_int(&v);
+    }
+    if (S->war_region<0) S->war_region=0; if (S->war_region>7) S->war_region=7;
+    if ((v = war_snap_val(snap, "wu"))){
+        while (*v && *v!=' '){
+            int idx = war_rd_int(&v);
+            int type = war_rd_int(&v);
+            int x = war_rd_int(&v), y = war_rd_int(&v);
+            int hp = war_rd_int(&v), maxhp = war_rd_int(&v);
+            int state = war_rd_int(&v), target = war_rd_int(&v);
+            int tx = war_rd_int(&v), ty = war_rd_int(&v);
+            int carry = war_rd_int(&v), harv = war_rd_int(&v);
+            if (idx>=0 && idx<WAR_MAXU){
+                S->war_utype[idx]=type; S->war_ux[idx]=WAR_OX+(float)x; S->war_uy[idx]=WAR_OY+(float)y;
+                S->war_uhp[idx]=(float)hp; S->war_umaxhp[idx]=maxhp;
+                S->war_ustate[idx]=state; S->war_utarget[idx]=target;
+                S->war_utx[idx]=WAR_OX+(float)tx; S->war_uty[idx]=WAR_OY+(float)ty;
+                S->war_ucarry[idx]=carry; S->war_uharv[idx]=harv*0.1f;
+                S->war_uatk[idx]=0; S->war_usel[idx]=0;
+                S->war_wpn[idx]=0; S->war_wpi[idx]=0; S->war_stallt[idx]=0; S->war_repath[idx]=0;
+                S->war_stallx[idx]=S->war_ux[idx]; S->war_stally[idx]=S->war_uy[idx];
+            }
+        }
+    }
+    if ((v = war_snap_val(snap, "ws"))){
+        while (*v && *v!=' '){
+            int idx = war_rd_int(&v);
+            int type = war_rd_int(&v), side = war_rd_int(&v);
+            int x = war_rd_int(&v), y = war_rd_int(&v);
+            int hp = war_rd_int(&v), maxhp = war_rd_int(&v);
+            int qlen = war_rd_int(&v);
+            int qt = war_rd_int(&v), scd = war_rd_int(&v);
+            int qn = qlen<0? 0 : qlen>9? 9 : qlen;
+            int qt_[9];
+            for (int k=0;k<qn;k++) qt_[k] = war_rd_int(&v);
+            int rx = war_rd_int(&v), ry = war_rd_int(&v);
+            if (idx>=0 && idx<WAR_MAXS){
+                S->war_stype[idx]=type; S->war_sside[idx]=side;
+                S->war_sx[idx]=WAR_OX+(float)x; S->war_sy[idx]=WAR_OY+(float)y;
+                S->war_shp[idx]=(float)hp; S->war_smaxhp[idx]=maxhp;
+                S->war_qlen[idx]=qn;
+                for (int k=0;k<qn;k++) S->war_queue[idx][k]=qt_[k];
+                S->war_qt[idx]=qt*0.1f; S->war_scd[idx]=scd*0.1f;
+                S->war_rallyx[idx]=(float)rx; S->war_rallyy[idx]=(float)ry;
+            }
+        }
+    }
+    if ((v = war_snap_val(snap, "wg"))){
+        int n=0;
+        while (*v && *v!=' ' && n<10){
+            S->war_nx[n]=WAR_OX+(float)war_rd_int(&v);
+            S->war_ny[n]=WAR_OY+(float)war_rd_int(&v);
+            S->war_namt[n]=war_rd_int(&v);
+            n++;
+        }
+        S->war_nn=n;
+    }
+    if ((v = war_snap_val(snap, "wt"))){
+        int t=0;
+        while (*v && *v!=' ' && t<WAR_MAXT){
+            S->war_tx[t]=WAR_OX+(float)war_rd_int(&v);
+            S->war_ty[t]=WAR_OY+(float)war_rd_int(&v);
+            S->war_ttype[t]=war_rd_int(&v);
+            S->war_trad[t]=war_rd_int(&v);
+            S->war_thp[t]=(float)war_rd_int(&v);
+            S->war_tmaxhp[t]=war_rd_int(&v);
+            S->war_tdeadt[t]=0;
+            t++;
+        }
+        S->war_tn=t;
+    }
+    for (int c=0;c<WAR_FOG_W*WAR_FOG_H;c++) S->war_fog[c]=0;
+    if ((v = war_snap_val(snap, "wf"))){
+        for (int w=0;w<38;w++){
+            if (!*v || *v==' ') break;
+            u32 word = (u32)war_rd_int(&v);
+            for (int b=0;b<32;b++){ int c=w*32+b; if (c<WAR_FOG_W*WAR_FOG_H && ((word>>b)&1u)) S->war_fog[c]=1; }
+        }
+    }
+    S->war_state=1; S->war_pause=0; S->war_bcat=-1;
+    S->war_grace=0.35f; S->war_ordt=0; S->war_msgt=0; S->war_endt=0;
+    S->war_ltap_t=-10.0f; S->war_ltap_unit=-1; S->war_drag_id=-1;
+    war_clamp_cam(S);
+    war_fog_update(S);   // stored cells come back explored; this re-marks the visible ones
+    war_note(S, "BATTLE RESTORED. WELCOME BACK, COMMANDER.");
+}
+// --- the pause menu (v1.17) ------------------------------------------
+// Esc in a battle no longer abandons it: the battle freezes behind a
+// three-choice panel — RESUME, RESTART BATTLE, SAVE & QUIT. One set
+// of rects, shared by the renderer and every input path (tap, pad
+// cursor, keys 1-3), so they can never disagree about the buttons.
+static void war_pause_rects(int vx, int vy, int vw2, int vh2, int *px, int *py, int *pw, int *ph){
+    *pw = vw2<420? vw2-24 : 396; *ph = 196;
+    *px = vx+(vw2-*pw)/2; *py = vy+(vh2-*ph)/2 - 10;
+}
+static int war_pause_btn_y(int py, int n){ return py + 56 + n*44; }   // three 36px buttons, 8px apart
+static void war_pause_pick(int pi, int n){
+    BwSim *S = &BWS[pi];
+    if (n==0){ S->war_pause=0; S->war_grace=0.3f; sfx(6); }   // RESUME (the grace keeps the closing press from leaking an order)
+    else if (n==1){   // RESTART BATTLE: this region, fresh, and no snapshot of the old fight survives
+        war_snap_clear(pi);
+        S->war_pause=0;
+        war_start_battle(pi, S->war_region);
+    } else if (n==2){   // SAVE & QUIT: park the battle, persist, back to the map
+        war_snap_serialize(pi);
+        do_save();
+        S->war_pause=0;
+        war_clear_field(S);
+        S->war_state=0; S->war_grace=0.3f;
+        war_note(S, "BATTLE SAVED. IT WILL WAIT FOR YOU.");
+        sfx(19);
+    }
+}
+static void war_pause_tap(int pi, int sx, int sy){
+    int vx, vy, vw2, vh2; p1_view_rect(&vx, &vy, &vw2, &vh2);
+    int px, py, pw, ph; war_pause_rects(vx, vy, vw2, vh2, &px, &py, &pw, &ph);
+    for (int n=0;n<3;n++){
+        int by = war_pause_btn_y(py, n);
+        if (sx>=px+40 && sx<px+pw-40 && sy>=by && sy<by+36){ war_pause_pick(pi, n); return; }
+    }
+    // a tap outside the panel does nothing: the menu is modal
+}
+// the pad in the pause menu: the cursor flies the frozen field, A
+// presses through war_pause_tap, B resumes — war_pad_update's peel
+// logic stays out of it
+static void war_pad_pause(int pi, float dt){
+    BwSim *S = &BWS[pi];
+    if (pi!=G.my_id) return;
+    int vx, vy, vw2, vh2; p1_view_rect(&vx, &vy, &vw2, &vh2);
+    float lx = war_axis(IN.pad_ax[0]), ly = war_axis(IN.pad_ax[1]);
+    int stick = (IN.pad_ax[0]>0.18f || IN.pad_ax[0]<-0.18f || IN.pad_ax[1]>0.18f || IN.pad_ax[1]<-0.18f);
+    u32 pe = IN.pad_edges;
+    u32 btns = (1u<<ACT_FIRE)|(1u<<ACT_INTERACT);
+    if (!S->war_curon){
+        if (!pad_mode() || !(stick || (pe & btns))) return;
+        S->war_curon = 1;
+        S->war_curx = S->war_camx; S->war_cury = S->war_camy + WAR_BAR_H*0.5f;   // wake at the camera's centre, under the panel
+        if (!stick) return;   // a button wake spends the press on waking
+        pe = 0;
+    }
+    if (lx || ly){ S->war_curx += lx * 540.0f * dt; S->war_cury += ly * 540.0f * dt; }
+    if (S->war_curx < WAR_OX) S->war_curx = WAR_OX;
+    if (S->war_curx > WAR_OX+WAR_AW) S->war_curx = WAR_OX+WAR_AW;
+    if (S->war_cury < WAR_OY) S->war_cury = WAR_OY;
+    if (S->war_cury > WAR_OY+WAR_AH) S->war_cury = WAR_OY+WAR_AH;
+    { float csx = (float)vx + vw2/2 + (S->war_curx - S->war_camx);   // no edge-follow: the camera holds still, the cursor stays on screen
+      float csy = (float)vy + vh2/2 + (S->war_cury - S->war_camy - WAR_BAR_H*0.5f);
+      if (csx < vx) S->war_curx += (vx - csx);
+      if (csx > vx+vw2) S->war_curx -= (csx - (vx+vw2));
+      if (csy < vy) S->war_cury += (vy - csy);
+      if (csy > vy+vh2) S->war_cury -= (csy - (vy+vh2));
+    }
+    if (pe & (1u<<ACT_INTERACT)){ war_pause_pick(pi, 0); return; }   // B = RESUME
+    if ((pe & (1u<<ACT_FIRE)) && S->war_grace<=0){
+        int csx = vx + vw2/2 + (int)(S->war_curx - S->war_camx);
+        int csy = vy + vh2/2 + (int)(S->war_cury - S->war_camy - WAR_BAR_H*0.5f);
+        war_pause_tap(pi, csx, csy);
+    }
+}
 static void war_enter(int pi){
     BwSim *S = &BWS[pi]; Buddy *b = &G.bud[pi];
+    if (war_snap_on[pi]){   // v1.17: a parked battle resumes instead of the bare map
+        war_snap_restore(pi);
+        war_snap_clear(pi);   // consumed — the live BwSim is authoritative now; later saves re-serialize from it
+        b->x = WAR_OX+800; b->y = WAR_OY+600;   // parked mid-arena; this mode never draws him
+        b->bw_x = b->x; b->bw_y = b->y;
+        return;
+    }
     war_clear_field(S);
     S->war_state=0;
     S->war_map_sel = b->war_prog<8? b->war_prog : 7;
@@ -17458,28 +18020,63 @@ static void war_enter(int pi){
 // the tap handler so they can never disagree about what's on offer.
 // acts: 0 train harvester, 1-3 place patch/zapper/firewall,
 // 4 train melee, 5 train ranged, 6 cancel placement, 7 hold position,
-// 8 train scout, 9 train siege tank, 10 place assembly plant
+// 8 train scout, 9 train siege tank, 10 place assembly plant,
+// 11 place gate, 20/21/22 the TRAIN / BUILD / DEFENSE categories.
+// v1.17 (addendum 1): structure contexts are TWO-LEVEL — the bar
+// shows categories; opening one puts its options in a strip directly
+// above the bar. war_bar_list stays the single source: it returns
+// the CURRENT row (the open category's options, else the top level).
+// A building with a single category (Patch Bay, Assembly Plant)
+// starts OPEN — no two-tap tax for a menu of one.
+static int war_cat_items(int st, int cat, int acts[5], int costs[5], const char *names[5]){
+    int n=0;
+    if (cat==0){   // TRAIN
+        if (st==WAR_S_HQ){ acts[n]=0; costs[n]=WAR_TRAIN_COST[0]; names[n]="HARVESTER"; n++; }
+        else if (st==WAR_S_PATCH){ acts[n]=4; costs[n]=WAR_TRAIN_COST[1]; names[n]="WRENCH"; n++;
+                                   acts[n]=5; costs[n]=WAR_TRAIN_COST[2]; names[n]="BOLT"; n++; }
+        else if (st==WAR_S_ASM){ acts[n]=8; costs[n]=WAR_TRAIN_COST[5]; names[n]="SCOUT BUGGY"; n++;
+                                 acts[n]=9; costs[n]=WAR_TRAIN_COST[6]; names[n]="SIEGE TANK"; n++; }
+    } else if (cat==1){   // BUILD
+        if (st==WAR_S_HQ){ acts[n]=1; costs[n]=WAR_BUILD_COST[1]; names[n]="PATCH BAY"; n++;
+                           acts[n]=10; costs[n]=WAR_BUILD_COST[5]; names[n]="ASSEMBLY"; n++; }
+    } else {   // DEFENSE
+        if (st==WAR_S_HQ){ acts[n]=2; costs[n]=WAR_BUILD_COST[2]; names[n]="ZAPPER"; n++;
+                           acts[n]=3; costs[n]=WAR_BUILD_COST[3]; names[n]="FIREWALL"; n++;
+                           acts[n]=11; costs[n]=WAR_BUILD_COST[6]; names[n]="GATE"; n++; }
+    }
+    return n;
+}
+// the category row itself: what the main bar shows while a category
+// is open in the strip above it
+static int war_bar_cats(BwSim *S, int acts[5], int costs[5], const char *names[5]){
+    int n=0;
+    if (S->war_selstruct>=0 && war_struct_alive(S, S->war_selstruct)){
+        int st = S->war_stype[S->war_selstruct];
+        int ta[5], tc[5]; const char *tn[5];
+        for (int c=0;c<3;c++) if (war_cat_items(st, c, ta, tc, tn)>0){
+            acts[n]=20+c; costs[n]=0; names[n]= c==0? "TRAIN" : c==1? "BUILD" : "DEFENSE"; n++;
+        }
+    }
+    return n;
+}
 static int war_bar_list(BwSim *S, int acts[5], int costs[5], const char *names[5]){
     if (S->war_place>=0){ acts[0]=6; costs[0]=0; names[0]="CANCEL"; return 1; }
     int n=0;
     if (S->war_selstruct>=0 && war_struct_alive(S, S->war_selstruct)){
         int st = S->war_stype[S->war_selstruct];
-        if (st==WAR_S_HQ){
-            acts[n]=0; costs[n]=WAR_TRAIN_COST[0]; names[n]="HARVESTER"; n++;
-            acts[n]=1; costs[n]=WAR_BUILD_COST[1]; names[n]="PATCH BAY"; n++;
-            acts[n]=2; costs[n]=WAR_BUILD_COST[2]; names[n]="ZAPPER"; n++;
-            acts[n]=3; costs[n]=WAR_BUILD_COST[3]; names[n]="FIREWALL"; n++;
-            acts[n]=10; costs[n]=WAR_BUILD_COST[5]; names[n]="ASSEMBLY"; n++;
-        } else if (st==WAR_S_PATCH){
-            acts[n]=4; costs[n]=WAR_TRAIN_COST[1]; names[n]="WRENCH"; n++;
-            acts[n]=5; costs[n]=WAR_TRAIN_COST[2]; names[n]="BOLT"; n++;
-        } else if (st==WAR_S_ASM){
-            acts[n]=8; costs[n]=WAR_TRAIN_COST[5]; names[n]="SCOUT BUGGY"; n++;
-            acts[n]=9; costs[n]=WAR_TRAIN_COST[6]; names[n]="SIEGE TANK"; n++;
+        if (S->war_bcat>=0){
+            int m = war_cat_items(st, S->war_bcat, acts, costs, names);
+            if (m>0) return m;
+            S->war_bcat=-1;   // the open category has nothing for this building: fall back to the top level
         }
-    } else if (war_sel_count(S)>0){
-        acts[n]=7; costs[n]=0; names[n]="HOLD"; n++;
+        int nc = war_bar_cats(S, acts, costs, names);
+        if (nc==1){   // a menu of one opens itself
+            S->war_bcat = acts[0]-20;
+            return war_cat_items(st, S->war_bcat, acts, costs, names);
+        }
+        return nc;
     }
+    if (war_sel_count(S)>0){ acts[n]=7; costs[n]=0; names[n]="HOLD"; n++; }
     return n;
 }
 static void war_bar_activate(int pi, int slot){
@@ -17488,26 +18085,30 @@ static void war_bar_activate(int pi, int slot){
     int n = war_bar_list(S, acts, costs, names);
     if (slot<0 || slot>=n) return;
     int act = acts[slot], cost = costs[slot];
-    if (act==6){ S->war_place=-1; sfx(6); return; }
+    if (act==6){ S->war_place=-1; S->war_bcat=-1; sfx(6); return; }
     if (act==7){
         for (int i=0;i<WAR_MAXU;i++)
             if (S->war_uhp[i]>0 && S->war_usel[i] && S->war_utype[i]!=WAR_U_HARV){ S->war_ustate[i]=0; S->war_utarget[i]=0; }
         sfx(6); return;
     }
-    if (S->war_bits < cost){ sfx(16); war_note(S, "NOT ENOUGH BITS! SEND THE HARVESTER OUT."); return; }
-    if (act==0 || act==4 || act==5 || act==8 || act==9){
+    if (act>=20 && act<=22){ S->war_bcat = act-20; sfx(6); return; }   // opening a category costs nothing, trains nothing, builds nothing
+    if (act==0 || act==4 || act==5 || act==8 || act==9){   // TRAIN: pay-to-queue (addendum 2)
         int s = S->war_selstruct;
         if (s<0 || !war_struct_alive(S, s)) return;
-        if (S->war_queue[s]>=0){ sfx(16); war_note(S, "ALREADY TRAINING! ONE AT A TIME."); return; }
-        if (war_count_units(S, 0) >= 24){ sfx(16); war_note(S, "THE ARMY IS FULL! (24 BUDDIES)"); return; }
+        if (S->war_qlen[s]>=9){ sfx(16); war_note(S, "QUEUE FULL (9)."); return; }
+        if (S->war_bits < cost){ sfx(16); war_note(S, "NOT ENOUGH BITS TO QUEUE THAT."); return; }
         int ut = act==0? WAR_U_HARV : act==4? WAR_U_MELEE : act==5? WAR_U_RANGED : act==8? WAR_U_SCOUT : WAR_U_SIEGE;
-        S->war_bits -= cost; S->war_queue[s]=ut; S->war_qt[s]=WAR_TRAIN_TIME[ut];
-        sfx(6); return;
+        S->war_bits -= cost;
+        if (S->war_qlen[s]==0) S->war_qt[s]=WAR_TRAIN_TIME[ut];   // an idle building starts its front item NOW — exactly the old feel
+        S->war_queue[s][S->war_qlen[s]++]=ut;
+        sfx(6); return;   // the category stays open: queue the next one
     }
-    if (act==10){ S->war_place = WAR_S_ASM; sfx(6); war_note(S, "TAP GROUND TO PLACE THE ASSEMBLY PLANT."); return; }
-    S->war_place = act;   // acts 1..3 are the struct kinds 1..3
+    if (S->war_bits < cost){ sfx(16); war_note(S, "NOT ENOUGH BITS! SEND THE HARVESTER OUT."); return; }
+    if (act==10){ S->war_place = WAR_S_ASM; S->war_bcat=-1; sfx(6); war_note(S, "TAP GROUND TO PLACE THE ASSEMBLY PLANT."); return; }
+    S->war_place = act==11? WAR_S_GATE : act;   // acts 1..3 are the struct kinds 1..3; act 11 arms the gate
+    S->war_bcat=-1;   // arming a placement hands the bar to [CANCEL]
     sfx(6);
-    war_note(S, act==1? "TAP GROUND TO PLACE THE PATCH BAY." : act==2? "TAP GROUND TO PLACE THE ZAPPER TOWER." : "TAP GROUND TO PLACE THE FIREWALL.");
+    war_note(S, act==1? "TAP GROUND TO PLACE THE PATCH BAY." : act==2? "TAP GROUND TO PLACE THE ZAPPER TOWER." : act==11? "TAP GROUND TO PLACE THE GATE - YOUR UNITS PASS THROUGH IT. BUGS DON'T." : "TAP GROUND TO PLACE THE FIREWALL.");
 }
 // the property rule (Daniel, Nov 16): you build on your own land.
 // Every friendly structure radiates a property zone — its radius + 76
@@ -17521,7 +18122,7 @@ static void war_bar_activate(int pi, int slot){
 // property, so a firewall line (or a chain of buildings) can grow
 // outward step by step.
 static float war_zone_rad(int kind){
-    return kind==WAR_S_WALL? (float)WAR_SRAD[kind] + 52.0f : (float)WAR_SRAD[kind] + 76.0f;
+    return (kind==WAR_S_WALL || kind==WAR_S_GATE)? (float)WAR_SRAD[kind] + 52.0f : (float)WAR_SRAD[kind] + 76.0f;   // a gate is wall family: it radiates the wall's +52 zone, not a building's +76
 }
 static int war_in_property(BwSim *S, int kind, float x, float y){
     float own = (float)WAR_SRAD[kind];
@@ -17541,8 +18142,13 @@ static int war_place_space(BwSim *S, int kind, float x, float y){
         if (S->war_shp[s]<=0) continue;
         float dx=x-S->war_sx[s], dy=y-S->war_sy[s];
         // firewall segments are meant to stand shoulder to shoulder on
-        // the 24u grid: wall-on-wall only needs its own centre clear
-        float rr = (kind==WAR_S_WALL && S->war_stype[s]==WAR_S_WALL)? 20.0f
+        // the 24u grid: wall-family on wall-family (walls AND gates,
+        // either way round) only needs its own centre clear — the
+        // full radii sum (13+13+8 = 34) would reject the 24u spacing
+        // a gate in a wall line depends on
+        int wallfam_new = (kind==WAR_S_WALL || kind==WAR_S_GATE);
+        int wallfam_old = (S->war_stype[s]==WAR_S_WALL || S->war_stype[s]==WAR_S_GATE);
+        float rr = (wallfam_new && wallfam_old)? 20.0f
                  : rad + WAR_SRAD[S->war_stype[s]] + 8.0f;
         if (dx*dx+dy*dy < rr*rr) return 0;
     }
@@ -17568,21 +18174,21 @@ static float war_snap24(float w, float origin){
 static void war_try_place(int pi, float wx, float wy){
     BwSim *S = &BWS[pi];
     int kind = S->war_place, cost = WAR_BUILD_COST[kind];
-    if (S->war_bits < cost){ sfx(16); war_note(S, "NOT ENOUGH BITS!"); S->war_place=-1; return; }
-    if (kind==WAR_S_WALL){ wx = war_snap24(wx, WAR_OX); wy = war_snap24(wy, WAR_OY); }   // segments align on the grid, so lines join up
+    if (S->war_bits < cost){ sfx(16); war_note(S, "NOT ENOUGH BITS!"); S->war_place=-1; S->war_bcat=-1; return; }
+    if (kind==WAR_S_WALL || kind==WAR_S_GATE){ wx = war_snap24(wx, WAR_OX); wy = war_snap24(wy, WAR_OY); }   // wall-family segments align on the grid, so lines (and the doors in them) join up
     if (!war_place_space(S, kind, wx, wy)){ sfx(16); war_note(S, "NO ROOM THERE!"); return; }
     if (!war_in_property(S, kind, wx, wy)){ sfx(16); war_note(S, "TOO FAR FROM YOUR BASE - BUILD ON YOUR OWN LAND!"); return; }
     S->war_bits -= cost;
     int s = war_spawn_struct(S, kind, 0, wx, wy);
-    S->war_place = -1;
+    S->war_place = -1; S->war_bcat=-1;
     for (int i=0;i<WAR_MAXU;i++) S->war_usel[i]=0;
     S->war_selstruct = s;
     sfx(19);
-    war_note(S, kind==1? "PATCH BAY ONLINE! IT TRAINS FIGHTERS." : kind==2? "ZAPPER TOWER ONLINE!" : kind==5? "ASSEMBLY PLANT ONLINE! IT BUILDS VEHICLES." : "FIREWALL UP!");
+    war_note(S, kind==1? "PATCH BAY ONLINE! IT TRAINS FIGHTERS." : kind==2? "ZAPPER TOWER ONLINE!" : kind==5? "ASSEMBLY PLANT ONLINE! IT BUILDS VEHICLES." : kind==6? "GATE UP! YOUR UNITS PASS - BUGS DON'T." : "FIREWALL UP!");
 }
 static void war_select_unit(BwSim *S, int i, int all_of_type){
     for (int j=0;j<WAR_MAXU;j++) S->war_usel[j]=0;
-    S->war_selstruct = -1;
+    S->war_selstruct = -1; S->war_bcat = -1;   // a selection change closes any open category
     if (all_of_type){
         int t = S->war_utype[i];
         for (int j=0;j<WAR_MAXU;j++){
@@ -17599,7 +18205,7 @@ static void war_select_unit(BwSim *S, int i, int all_of_type){
 static void war_select_all_combat(BwSim *S){
     for (int j=0;j<WAR_MAXU;j++)
         S->war_usel[j] = (S->war_uhp[j]>0 && war_u_side(S->war_utype[j])==0 && war_u_combat(S->war_utype[j]))? 1 : 0;
-    S->war_selstruct = -1;
+    S->war_selstruct = -1; S->war_bcat = -1;
     sfx(6);
 }
 static void war_order_move(BwSim *S, float wx, float wy){
@@ -17610,6 +18216,7 @@ static void war_order_move(BwSim *S, float wx, float wy){
         ord++;
         S->war_ustate[i]=1; S->war_utarget[i]=0;
         S->war_utx[i]=wx+ox; S->war_uty[i]=wy+oy;
+        S->war_wpn[i]=0;   // a fresh order drops any old path (v1.17)
     }
 }
 static void war_order_attack(BwSim *S, int eref){
@@ -17619,6 +18226,7 @@ static void war_order_attack(BwSim *S, int eref){
         if (S->war_uhp[i]<=0 || !S->war_usel[i]) continue;
         if (S->war_utype[i]==WAR_U_HARV){ S->war_ustate[i]=1; S->war_utx[i]=tx; S->war_uty[i]=ty; }
         else { S->war_ustate[i]=2; S->war_utarget[i]=eref; }
+        S->war_wpn[i]=0;   // a fresh order drops any old path (v1.17)
     }
 }
 // the heart of every tap: a point on the battlefield (world coords)
@@ -17648,7 +18256,7 @@ static void war_tap_world(int pi, float wx, float wy){
         float dx=wx-S->war_sx[s], dy=wy-S->war_sy[s], rr=(float)WAR_SRAD[S->war_stype[s]]+8.0f;
         if (dx*dx+dy*dy < rr*rr){
             for (int i=0;i<WAR_MAXU;i++) S->war_usel[i]=0;
-            S->war_selstruct=s; sfx(6); return;
+            S->war_selstruct=s; S->war_bcat=-1; sfx(6); return;   // a selection change closes any open category (a lone category reopens itself in the bar)
         }
     }
     int eref=0; float ed=1e18f, edist=1e18f;
@@ -17689,16 +18297,47 @@ static void war_tap_world(int pi, float wx, float wy){
     if (war_sel_count(S)>0){
         war_order_move(S, wx, wy);
         S->war_ordx=wx; S->war_ordy=wy; S->war_ordt=0.5f; sfx(6);
-    } else if (S->war_selstruct>=0){ S->war_selstruct=-1; sfx(6); }
+    } else if (S->war_selstruct>=0){
+        int ss = S->war_selstruct;
+        int st = war_struct_alive(S, ss)? S->war_stype[ss] : -1;
+        if (st==WAR_S_HQ || st==WAR_S_PATCH || st==WAR_S_ASM){
+            // rally point (addendum 3): a field tap with a PRODUCER
+            // selected plants its flag instead of deselecting — the
+            // building stays selected, fresh units walk to the flag
+            S->war_rallyx[ss]=wx; S->war_rallyy[ss]=wy;
+            S->war_ordx=wx; S->war_ordy=wy; S->war_ordt=0.5f;   // the order-marker flash, reused
+            sfx(6);
+        } else { S->war_selstruct=-1; S->war_bcat=-1; sfx(6); }   // a non-producer just deselects, as always
+    }
 }
 static void war_handle_tap(int pi, int sx, int sy){
     BwSim *S = &BWS[pi];
+    if (S->war_pause){ war_pause_tap(pi, sx, sy); return; }   // v1.17: the pause menu is modal — the tap never reaches the field
     int vx, vy, vw2, vh2; p1_view_rect(&vx, &vy, &vw2, &vh2);
-    if (sy >= vy+vh2-WAR_BAR_H){   // the command bar owns the bottom strip
+    if (S->war_bcat>=0 && sy >= vy+vh2-WAR_BAR_H-WAR_SUB_H && sy < vy+vh2-WAR_BAR_H){
+        // the options strip (addendum 1): it holds the row war_bar_list
+        // describes. WAR_BAR_H is untouched — the world view never
+        // resizes; the strip simply owns these taps while it is drawn.
         if (sx>=vx && sx<vx+vw2){
             int rel = sx - vx - 6;
             int slot = rel/90;
             if (rel>=0 && slot<5 && (rel%90)<84) war_bar_activate(pi, slot);
+        }
+        return;
+    }
+    if (sy >= vy+vh2-WAR_BAR_H){   // the command bar owns the bottom strip
+        if (sx>=vx && sx<vx+vw2){
+            int rel = sx - vx - 6;
+            int slot = rel/90;
+            if (rel>=0 && slot<5 && (rel%90)<84){
+                if (S->war_bcat>=0){
+                    // a category is open above: the bar row itself IS
+                    // the categories — tapping one switches the strip
+                    int ca[5], cc[5]; const char *cn[5];
+                    int cn2 = war_bar_cats(S, ca, cc, cn);
+                    if (slot<cn2){ S->war_bcat = ca[slot]-20; S->war_barhl=-1; sfx(6); }
+                } else war_bar_activate(pi, slot);
+            }
         }
         return;
     }
@@ -17860,12 +18499,16 @@ static void war_pad_update(int pi, float dt){
             sfx(6);
         }
     }
-    // B peels one layer: a pending placement, then the bar
-    // highlight, then the selection itself
+    // B peels one layer: a pending placement, then an open
+    // category (v1.17), then the bar highlight, then the selection
+    // itself. A single-category building's menu reopens itself, so
+    // there B skips the category step and deselects as it always did.
     if (pe & (1u<<ACT_INTERACT)){
-        if (S->war_place>=0){ S->war_place = -1; sfx(6); }
+        int ca[5], cc[5]; const char *cn[5];
+        if (S->war_place>=0){ S->war_place = -1; S->war_bcat = -1; sfx(6); }
+        else if (S->war_bcat>=0 && war_bar_cats(S, ca, cc, cn)>1){ S->war_bcat = -1; S->war_barhl = -1; sfx(6); }
         else if (S->war_barhl>=0){ S->war_barhl = -1; }
-        else { for (int i=0;i<WAR_MAXU;i++) S->war_usel[i]=0; S->war_selstruct = -1; sfx(6); }
+        else { for (int i=0;i<WAR_MAXU;i++) S->war_usel[i]=0; S->war_selstruct = -1; S->war_bcat = -1; sfx(6); }
     }
     // A: the finger comes down — on the lit bar button if one is
     // lit, else on the field at the cursor, through the very same
@@ -17893,13 +18536,19 @@ static void war_update(int pi, float dt, const BwIn *in){
         }
         return;
     }
+    if (S->war_pause){   // v1.17: the battle holds its breath — only the pause menu's inputs run; war_t, waves, units and structures all stay frozen
+        if (in->exit_){ S->war_pause=0; S->war_grace=0.3f; sfx(6); return; }   // Esc again = RESUME
+        if (pi==G.my_id){
+            if (IN.tapped){ IN.tapped=0; war_pause_tap(pi, IN.tap_x, IN.tap_y); }
+            if (IN.weapon_key>=1 && IN.weapon_key<=3){ int k=IN.weapon_key; IN.weapon_key=0; war_pause_pick(pi, k-1); }
+        }
+        war_pad_pause(pi, dt);
+        return;
+    }
     S->war_t += dt;
     for (int t=0;t<S->war_tn;t++) if (S->war_tdeadt[t] > 0) S->war_tdeadt[t] -= dt;   // scorch marks fade
-    if (in->exit_){   // Esc in a battle: fall back to the map, no penalty
-        war_clear_field(S);
-        S->war_state=0; S->war_grace=0.3f;
-        war_note(S, "BATTLE ABANDONED. THE REGION WAITS.");
-        sfx(6);
+    if (in->exit_){   // Esc in a battle (v1.17): the pause menu — RESUME / RESTART / SAVE & QUIT — not an abandonment
+        S->war_pause=1; sfx(6);
         return;
     }
     int dragging = (pi==G.my_id)? war_drag_pan(pi) : 0;
@@ -17988,6 +18637,36 @@ static void war_render_map(int pi, int vx, int vy, int vw2, int vh2){
     else draw_text_center(vx+vw2/2, vy+vh2-19, mobile_ui()? "TAP A REGION TO INVADE IT" : "TAP A REGION - OR ARROWS + SPACE", 1, COL(150,160,185));
     if (S->war_msgt>0) draw_text_center(vx+vw2/2, vy+58, S->war_msg, 1, COL(255,170,150));
 }
+static void war_draw_bar_btn(BwSim *S, int bx, int by, int act, int cost, const char *name, int hl){
+    int afford = S->war_bits >= cost;
+    if ((act==0 || act==4 || act==5 || act==8 || act==9) && S->war_selstruct>=0 && S->war_qlen[S->war_selstruct]>=9) afford = 0;   // a full queue greys its train buttons out (addendum 2)
+    u32 fill = afford? COL(38,44,60) : COL(26,26,34);
+    u32 edge = afford? COL(198,164,84) : COL(70,66,84);
+    if (act>=20 && act<=22 && act-20==S->war_bcat){ fill = COL(56,64,88); edge = COL(255,220,120); }   // the open category, lit
+    rect_fill(bx, by+6, 84, 34, fill);
+    rect_line(bx, by+6, 84, 34, edge);
+    draw_text_center(bx+42, by+11, name, 1, afford? COL(240,244,250) : COL(130,126,150));
+    if (cost>0){
+        char cb[16]; char *q=cb; q=sapp_int(q, cost); q=sappend(q, " BITS"); *q=0;
+        draw_text_center(bx+42, by+24, cb, 1, afford? COL(255,205,40) : COL(120,110,90));
+    } else if (act>=20 && act<=22) draw_text_center(bx+42, by+24, act-20==S->war_bcat? "OPEN" : "PICK", 1, COL(160,170,190));
+    else draw_text_center(bx+42, by+24, act==6? "STOP" : "FREE", 1, COL(160,170,190));
+    // a train button carries the building's QUEUE (addendum 2): the
+    // front item's progress tick plus the depth in the corner
+    if ((act==0 || act==4 || act==5 || act==8 || act==9) && S->war_selstruct>=0 && S->war_qlen[S->war_selstruct]>0){
+        int ut = S->war_queue[S->war_selstruct][0];
+        float f = 1.0f - S->war_qt[S->war_selstruct] / WAR_TRAIN_TIME[ut];
+        if (f<0) f=0; if (f>1) f=1;
+        rect_fill(bx+4, by+36, 76, 3, COL(20,18,30));
+        rect_fill(bx+4, by+36, (int)(76*f), 3, COL(120,230,90));
+        char qb[8]; char *q=qb; *q++='x'; q=sapp_int(q, S->war_qlen[S->war_selstruct]); *q=0;
+        draw_text(bx+84-text_w(qb,1)-2, by+8, qb, 1, COL(160,255,190));
+    }
+    if (hl){   // the pad's LB/RB highlight (v1.16): a bright double frame — A presses THIS button
+        rect_line(bx-2, by+4, 88, 38, COL(255,240,160));
+        rect_line(bx, by+6, 84, 34, COL(255,240,160));
+    }
+}
 static void war_render_bar(int pi, int vx, int vy, int vw2, int vh2){
     BwSim *S = &BWS[pi];
     int by = vy + vh2 - WAR_BAR_H;
@@ -17995,38 +18674,33 @@ static void war_render_bar(int pi, int vx, int vy, int vw2, int vh2){
     rect_fill(vx, by, vw2, 2, COL(52,48,74));
     int acts[5], costs[5]; const char *names[5];
     int n = war_bar_list(S, acts, costs, names);
-    for (int i=0;i<n;i++){
-        int bx = vx + 6 + i*90;
-        int afford = S->war_bits >= costs[i];
-        rect_fill(bx, by+6, 84, 34, afford? COL(38,44,60) : COL(26,26,34));
-        rect_line(bx, by+6, 84, 34, afford? COL(198,164,84) : COL(70,66,84));
-        draw_text_center(bx+42, by+11, names[i], 1, afford? COL(240,244,250) : COL(130,126,150));
-        if (costs[i]>0){
-            char cb[16]; char *q=cb; q=sapp_int(q, costs[i]); q=sappend(q, " BITS"); *q=0;
-            draw_text_center(bx+42, by+24, cb, 1, afford? COL(255,205,40) : COL(120,110,90));
-        } else draw_text_center(bx+42, by+24, acts[i]==6? "STOP" : "FREE", 1, COL(160,170,190));
-        // a training button shows its queue ticking down
-        if ((acts[i]==0 || acts[i]==4 || acts[i]==5 || acts[i]==8 || acts[i]==9) && S->war_selstruct>=0 && S->war_queue[S->war_selstruct]>=0){
-            int ut = S->war_queue[S->war_selstruct];
-            float f = 1.0f - S->war_qt[S->war_selstruct] / WAR_TRAIN_TIME[ut];
-            if (f<0) f=0; if (f>1) f=1;
-            rect_fill(bx+4, by+36, 76, 3, COL(20,18,30));
-            rect_fill(bx+4, by+36, (int)(76*f), 3, COL(120,230,90));
-        }
-        if (i==S->war_barhl){   // the pad's LB/RB highlight (v1.16): a bright double frame — A presses THIS button
-            rect_line(bx-2, by+4, 88, 38, COL(255,240,160));
-            rect_line(bx, by+6, 84, 34, COL(255,240,160));
-        }
+    if (S->war_bcat>=0 && S->war_place<0){
+        // two rows (addendum 1): the open category's options in the
+        // strip directly above the bar, the categories in the bar
+        // itself. The pad highlight walks the OPTIONS (the current
+        // row), so it is drawn up there; WAR_BAR_H never changes.
+        int sy2 = by - WAR_SUB_H;
+        rect_fill(vx, sy2, vw2, WAR_SUB_H, COL(18,17,28));
+        rect_fill(vx, sy2, vw2, 2, COL(52,48,74));
+        for (int i=0;i<n;i++) war_draw_bar_btn(S, vx + 6 + i*90, sy2, acts[i], costs[i], names[i], i==S->war_barhl);
+        { const char *cl = S->war_bcat==0? "TRAIN" : S->war_bcat==1? "BUILD" : "DEFENSE";
+          int ix = vx + 6 + n*90 + 10;
+          if (ix + text_w(cl,1) < vx+vw2) draw_text(ix, sy2+17, cl, 1, COL(255,220,120)); }
+        int ca[5], cc[5]; const char *cn[5];
+        int cn2 = war_bar_cats(S, ca, cc, cn);
+        for (int i=0;i<cn2;i++) war_draw_bar_btn(S, vx + 6 + i*90, by, ca[i], cc[i], cn[i], 0);
+    } else {
+        for (int i=0;i<n;i++) war_draw_bar_btn(S, vx + 6 + i*90, by, acts[i], costs[i], names[i], i==S->war_barhl);
     }
     if (vw2 >= VW){   // the info zone only earns its keep at full width
         int ix = vx + 6 + n*90 + 10;
         if (S->war_place>=0) draw_text(ix, by+17, "TAP GROUND TO PLACE IT", 1, COL(255,220,150));
         else if (S->war_selstruct>=0 && war_struct_alive(S, S->war_selstruct)){
             int s = S->war_selstruct;
-            static const char *SN[6] = { "COMPILER CORE", "PATCH BAY", "ZAPPER TOWER", "FIREWALL", "BUG HIVE", "ASSEMBLY PLANT" };
+            static const char *SN[7] = { "COMPILER CORE", "PATCH BAY", "ZAPPER TOWER", "FIREWALL", "BUG HIVE", "ASSEMBLY PLANT", "GATE" };
             char buf[56]; char *q=buf; q=sappend(q, SN[S->war_stype[s]]); q=sappend(q, "  ");
             q=sapp_int(q, (int)S->war_shp[s]); q=sappend(q, "/"); q=sapp_int(q, S->war_smaxhp[s]);
-            if (S->war_queue[s]>=0) q=sappend(q, "  TRAINING...");
+            if (S->war_qlen[s]>0){ q=sappend(q, "  TRAINING x"); q=sapp_int(q, S->war_qlen[s]); }
             *q=0;
             draw_text(ix, by+17, buf, 1, COL(200,214,220));
         }
@@ -18089,6 +18763,22 @@ static void war_draw_struct(BwSim *S, int s){
             tri_fill(fx-4, sy-7, fx+4, sy-7, fx, sy-7-fh, COL(255,170,60));
         }
         if (!armE && !armW && !armN && !armS) draw_text_center(sx, sy+14, "FIREWALL", 1, COL(255,200,150));
+    } else if (type==WAR_S_GATE){
+        // the gate (addendum 1): two gold posts and the energy panel
+        // between them. The panel brightens while any of YOUR units
+        // stands close — the door is open — and dims when the field
+        // is clear. Bugs only ever see it shut.
+        int open = 0;
+        for (int i=0;i<WAR_MAXU;i++){
+            if (S->war_uhp[i]<=0 || war_u_side(S->war_utype[i])!=0) continue;
+            float dx=S->war_ux[i]-x, dy=S->war_uy[i]-y;
+            if (dx*dx+dy*dy < 30.0f*30.0f){ open=1; break; }
+        }
+        blend_rect(sx-11, sy-9, 22, 18, COL(255,205,80), open? 170 : 90);
+        rect_fill(sx-13, sy-11, 4, 22, COL(120,90,20)); rect_line(sx-13, sy-11, 4, 22, COL(255,205,80));
+        rect_fill(sx+9, sy-11, 4, 22, COL(120,90,20)); rect_line(sx+9, sy-11, 4, 22, COL(255,205,80));
+        disc_fill(sx-11, sy-13, 3, COL(255,205,80)); disc_fill(sx+11, sy-13, 3, COL(255,205,80));
+        draw_text_center(sx, sy+16, "GATE", 1, COL(255,225,150));
     } else if (type==WAR_S_ASM){
         rect_fill(sx-26, sy-14, 52, 32, COL(96,88,110)); rect_line(sx-26, sy-14, 52, 32, COL(170,160,190));
         rect_fill(sx-26, sy-14, 52, 7, COL(90,160,220));
@@ -18359,6 +19049,18 @@ static void war_render(int pi){
         circle_out(sx, sy, r, COL(140,255,140));
         disc_fill(sx, sy, 2, COL(140,255,140));
     }
+    if (S->war_selstruct>=0 && war_struct_alive(S, S->war_selstruct) && S->war_rallyx[S->war_selstruct]!=0){
+        // the rally flag (addendum 3): while a producer with a rally
+        // set is selected, a thin line runs from the building to the
+        // flag. Like the order marker, it ignores fog.
+        int ss = S->war_selstruct;
+        int bx = SX(S->war_sx[ss]), by2 = SY(S->war_sy[ss]);
+        int fx = SX(S->war_rallyx[ss]), fy = SY(S->war_rallyy[ss]);
+        line_thick(bx, by2, fx, fy, 1, COL(140,255,140));
+        line_thick(fx, fy, fx, fy-14, 2, COL(200,220,200));
+        tri_fill(fx, fy-14, fx, fy-7, fx+9, fy-10, COL(140,255,140));
+        disc_fill(fx, fy, 2, COL(140,255,140));
+    }
     // the top strip: bits, region, what's left to kill
     rect_fill(vx, vy, vw2, 20, COL(10,10,18));
     disc_fill(vx+12, vy+10, 5, COL(255,205,40));
@@ -18389,6 +19091,22 @@ static void war_render(int pi){
             draw_text_center(px+pw/2, py+62, "THE REGION STAYS WILD. REBUILD AND TRY AGAIN!", 1, COL(220,200,200));
         }
         draw_text_center(px+pw/2, py+ph-16, "TAP TO RETURN TO THE MAP", 1, COL(150,160,185));
+    }
+    if (S->war_pause){   // the pause menu (v1.17): same rects the tap handler and pad use
+        blend_rect(vx, vy, vw2, vh2, COL(8,8,14), 150);
+        int px, py, pw, ph; war_pause_rects(vx, vy, vw2, vh2, &px, &py, &pw, &ph);
+        rect_fill(px, py, pw, ph, COL(16,18,28)); rect_line(px, py, pw, ph, COL(255,205,40));
+        draw_text_center(px+pw/2, py+14, "PAUSED", 2, COL(255,220,120));
+        { char buf[48]; char *q=buf; q=sappend(q, REGION_NAME[rg]); q=sappend(q, " - THE BATTLE WAITS"); *q=0;
+          draw_text_center(px+pw/2, py+36, buf, 1, COL(200,210,230)); }
+        static const char *PLBL[3] = { "RESUME", "RESTART BATTLE", "SAVE & QUIT" };
+        for (int n=0;n<3;n++){
+            int by = war_pause_btn_y(py, n);
+            rect_fill(px+40, by, pw-80, 36, COL(38,44,60));
+            rect_line(px+40, by, pw-80, 36, COL(198,164,84));
+            draw_text_center(px+pw/2, by+12, PLBL[n], 2, COL(240,244,250));
+        }
+        draw_text_center(px+pw/2, py+ph-16, mobile_ui()? "TAP A CHOICE" : "TAP - OR KEYS 1 / 2 / 3 - ESC RESUMES", 1, COL(150,160,185));
     }
 }
 
@@ -19171,7 +19889,7 @@ __attribute__((export_name("dbg_warunitpos"))) int exp_dbg_warunitpos(int i){ in
 __attribute__((export_name("dbg_wartapunit"))) int exp_dbg_wartapunit(int i){ int id = G.my_id>=0? G.my_id : 0; BwSim *S = &BWS[id];
     if (i<0 || i>=WAR_MAXU || S->war_uhp[i]<=0) return -1; war_select_unit(S, i, 0); return war_sel_count(S); }
 __attribute__((export_name("dbg_warbuildat"))) int exp_dbg_warbuildat(int kind){ int id = G.my_id>=0? G.my_id : 0; BwSim *S = &BWS[id];
-    if (G.bud[id].bw_mode!=8 || S->war_state!=1 || (kind<1 || kind>3) && kind!=5) return -1;
+    if (G.bud[id].bw_mode!=8 || S->war_state!=1 || (kind<1 || kind>3) && kind!=5 && kind!=6) return -1;
     int hq = war_find_hq(S); if (hq<0) return -1;
     int cost = WAR_BUILD_COST[kind]; if (S->war_bits < cost) return -1;
     static const float RING[3] = { 78.0f, 108.0f, 138.0f };
@@ -19182,10 +19900,10 @@ __attribute__((export_name("dbg_warbuildat"))) int exp_dbg_warbuildat(int kind){
     }
     return -1; }
 __attribute__((export_name("dbg_warbuildxy"))) int exp_dbg_warbuildxy(int kind, int x, int y){ int id = G.my_id>=0? G.my_id : 0; BwSim *S = &BWS[id];
-    if (G.bud[id].bw_mode!=8 || S->war_state!=1 || (kind<1 || kind>3) && kind!=5) return -1;
+    if (G.bud[id].bw_mode!=8 || S->war_state!=1 || (kind<1 || kind>3) && kind!=5 && kind!=6) return -1;
     int cost = WAR_BUILD_COST[kind]; if (S->war_bits < cost) return -1;
     float wx = WAR_OX + (float)x, wy = WAR_OY + (float)y;
-    if (kind==WAR_S_WALL){ wx = war_snap24(wx, WAR_OX); wy = war_snap24(wy, WAR_OY); }   // same grid snap as a real placement
+    if (kind==WAR_S_WALL || kind==WAR_S_GATE){ wx = war_snap24(wx, WAR_OX); wy = war_snap24(wy, WAR_OY); }   // same grid snap as a real placement
     if (!war_place_space(S, kind, wx, wy)) return -1;   // property bypassed, room still required
     S->war_bits -= cost;
     return war_spawn_struct(S, kind, 0, wx, wy); }
@@ -19205,6 +19923,19 @@ __attribute__((export_name("dbg_warplace"))) int exp_dbg_warplace(void){ int id 
 __attribute__((export_name("dbg_warcur"))) int exp_dbg_warcur(void){ int id = G.my_id>=0? G.my_id : 0; BwSim *S = &BWS[id];
     if (!S->war_curon) return -1; return (int)(S->war_curx-WAR_OX)*10000 + (int)(S->war_cury-WAR_OY); }   // pad cursor: -1 off, else arena-local x*10000+y (dbg_warunitxy packing)
 __attribute__((export_name("dbg_warbarhl"))) int exp_dbg_warbarhl(void){ int id = G.my_id>=0? G.my_id : 0; return BWS[id].war_barhl; }
+__attribute__((export_name("dbg_warpause"))) int exp_dbg_warpause(void){ int id = G.my_id>=0? G.my_id : 0; return BWS[id].war_pause; }   // v1.17: the battle pause menu is up
+__attribute__((export_name("dbg_warregion"))) int exp_dbg_warregion(void){ int id = G.my_id>=0? G.my_id : 0; return BWS[id].war_region; }   // v1.17: the region the current battle is for
+__attribute__((export_name("dbg_warsnap"))) int exp_dbg_warsnap(void){ int id = G.my_id>=0? G.my_id : 0; return war_snap_on[id]; }   // v1.17: a battle snapshot is parked for this player
+__attribute__((export_name("dbg_warbcat"))) int exp_dbg_warbcat(void){ int id = G.my_id>=0? G.my_id : 0; return BWS[id].war_bcat; }   // v1.17: open bar category (-1 top level, 0 TRAIN, 1 BUILD, 2 DEFENSE)
+__attribute__((export_name("dbg_warnodes"))) int exp_dbg_warnodes(void){ int id = G.my_id>=0? G.my_id : 0; BwSim *S = &BWS[id]; int sum=0;
+    for (int n=0;n<S->war_nn;n++) sum += S->war_namt[n]; return S->war_nn*100000 + sum; }   // v1.17: node count *100000 + total bits left on the field
+__attribute__((export_name("dbg_warcarry"))) int exp_dbg_warcarry(void){ int id = G.my_id>=0? G.my_id : 0; BwSim *S = &BWS[id]; int m=-1;
+    for (int i=0;i<WAR_MAXU;i++) if (S->war_uhp[i]>0 && S->war_utype[i]==WAR_U_HARV && S->war_ucarry[i]>m) m = S->war_ucarry[i]; return m; }   // v1.17: the fullest harvester's load
+__attribute__((export_name("dbg_warqueue"))) int exp_dbg_warqueue(int s){ int id = G.my_id>=0? G.my_id : 0; BwSim *S = &BWS[id];
+    if (s<0 || s>=WAR_MAXS || S->war_shp[s]<=0) return -1; return S->war_qlen[s]; }   // v1.17: a building's training-queue depth
+__attribute__((export_name("dbg_warrally"))) int exp_dbg_warrally(int s){ int id = G.my_id>=0? G.my_id : 0; BwSim *S = &BWS[id];
+    if (s<0 || s>=WAR_MAXS || S->war_shp[s]<=0 || S->war_rallyx[s]==0) return -1;
+    return (int)(S->war_rallyx[s]-WAR_OX)*10000 + (int)(S->war_rallyy[s]-WAR_OY); }   // v1.17: a building's rally point, dbg_warunitxy packing, -1 = unset
 __attribute__((export_name("dbg_warterrain"))) int exp_dbg_warterrain(void){ int id = G.my_id>=0? G.my_id : 0; return BWS[id].war_tn; }
 __attribute__((export_name("dbg_warfeatn"))) int exp_dbg_warfeatn(void){ int id = G.my_id>=0? G.my_id : 0; BwSim *S = &BWS[id]; int n=0;
     for (int t=0;t<S->war_tn;t++) if (S->war_thp[t]>0) n++; return n; }   // debris still standing
