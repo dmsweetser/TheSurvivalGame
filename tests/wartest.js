@@ -34,6 +34,17 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   const browser = await chromium.launch({ executablePath: EXE, args: ['--no-sandbox'] });
   const page = await browser.newPage({ viewport: { width: 1000, height: 640 } });
   page.on('pageerror', e => console.log('PAGEERROR', e.message));
+  // a fake standard-mapping gamepad (v1.16 pad checks): the REAL
+  // shell poll reads it every frame, so buttons flow through EX.act
+  // and the analog sticks through EX.pad_axes, exactly like hardware.
+  // The test steers it by mutating window.__FAKEPAD.
+  await page.addInitScript(() => {
+    const buttons = [];
+    for (let i = 0; i < 18; i++) buttons.push({ pressed: false, touched: false, value: 0 });
+    window.__FAKEPAD = { id: 'Fake Standard Pad', index: 0, connected: true, mapping: 'standard',
+                         axes: [0, 0, 0, 0], buttons, timestamp: 0 };
+    navigator.getGamepads = () => [window.__FAKEPAD, null, null, null];
+  });
   await page.goto(URL);
   await page.evaluate(() => localStorage.clear());
   await page.reload({ waitUntil: 'load' });
@@ -43,6 +54,16 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   const key = async (k, ms = 150) => { await page.keyboard.down(k); await sleep(170); await page.keyboard.up(k); await sleep(ms); };
   const hold = async (k, ms = 200) => { await page.keyboard.down(k); await sleep(ms); await page.keyboard.up(k); await sleep(150); };
   const tap = async (x, y) => { await page.evaluate(([tx, ty]) => window.__TSG.evt_tap(tx, ty), [x, y]); await sleep(250); };
+  // the fake pad: axes are (LX, LY, RX, RY) in -1..1 (+Y down);
+  // buttons use the standard mapping (0 A, 1 B, 4 LB, 5 RB). A press
+  // is HELD across many frames — this VM drops instant presses.
+  const padAxes = async (lx, ly, rx, ry) => page.evaluate(([a, b, c, d]) => {
+    window.__FAKEPAD.axes[0] = a; window.__FAKEPAD.axes[1] = b; window.__FAKEPAD.axes[2] = c; window.__FAKEPAD.axes[3] = d;
+  }, [lx, ly, rx, ry]);
+  const padBtn = async (i, down) => page.evaluate(([n, d]) => {
+    const b = window.__FAKEPAD.buttons[n]; b.pressed = d; b.value = d ? 1 : 0;
+  }, [i, down]);
+  const padTap = async (i, holdMs = 120) => { await padBtn(i, true); await sleep(holdMs); await padBtn(i, false); await sleep(60); };
   async function poll(fn, args, want, timeout = 9000, step = 150) {
     const t0 = Date.now();
     while (Date.now() - t0 < timeout) { const v = await call(fn, ...args); if (want(v)) return v; await sleep(step); }
@@ -431,6 +452,132 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     ok(rockHp === 90 - 26, 'debris: the siege shell did PLAIN damage (26, not the x2 structure rate)',
        'rock hp after one shell: ' + rockHp);
   }
+
+  // ================= v1.16 (Nov 16): WAR! on a gamepad ============
+  // The pad cursor is a finger routed through war_handle_tap: the
+  // left stick flies it, A presses it (single / double / triple
+  // musters fall out of the tap streak), LB/RB + A work the command
+  // bar, B peels a layer back, the right stick pans screen-locked.
+  ok((await call('dbg_warenter', 0)) === 1, 'pad: fresh battle for the gamepad checks');
+  await sleep(700);   // entry grace
+  ok((await call('dbg_warcur')) === -1, 'pad: no cursor before any pad input');
+
+  // 1. the left stick summons the cursor and flies it east, then south
+  await padAxes(1, 0, 0, 0); await sleep(450);
+  const cur1 = await call('dbg_warcur');
+  ok(cur1 >= 0, 'pad: left stick summoned the cursor', cur1);
+  const [c1x, c1y] = unxy(Math.max(cur1, 0));
+  ok(c1x > 300, 'pad: stick-right flew the cursor EAST of its spawn', c1x + ',' + c1y + ' (spawn ~280,623)');
+  await padAxes(0, 1, 0, 0); await sleep(450);
+  const [c2x, c2y] = unxy(await call('dbg_warcur'));
+  ok(c2y > c1y + 40, 'pad: stick-down flew the cursor SOUTH', c1y + ' -> ' + c2y);
+  await padAxes(0, 0, 0, 0); await sleep(150);
+
+  // 2. A presses the field at the cursor: select, double-muster,
+  // triple-muster — the tap streak ladder, harvesters excluded
+  await call('dbg_waraddbits', 400);
+  const pbP = await call('dbg_warbuildat', 1);
+  ok(pbP > 0, 'pad: Patch Bay built (a second melee for the musters)', 'idx=' + pbP);
+  await call('dbg_wartrain', 1);
+  ok((await call('dbg_warunits', 0, 1)) === 2, 'pad: two melee buddies on the field');
+  const [ccx, ccy] = unxy(await call('dbg_warcur'));
+  const meleeA = await call('dbg_warfind', 1);
+  const harvI = await call('dbg_warfind', 0);
+  await call('dbg_warmove', meleeA, ccx, ccy);   // park melee A right under the cursor
+  await call('dbg_warmove', harvI, 200, 200);    // the harvester works far away — it must not wander under the cursor mid-streak
+  // melee B: the other friendly near the base (not A, not the
+  // harvester, not a hive guard) — park it beside A, on screen
+  let meleeB = -1;
+  for (let i = 0; i < 80; i++) {
+    if (i === meleeA || i === harvI) continue;
+    const v = await call('dbg_warunitxy', i);
+    if (v < 0) continue;
+    const [ux, uy] = unxy(v);
+    if (Math.hypot(ux - 280, uy - 600) < 300) { meleeB = i; break; }
+  }
+  ok(meleeB >= 0, 'pad: found the second melee for the musters', meleeB);
+  if (meleeB >= 0) await call('dbg_warmove', meleeB, ccx + 120, ccy);
+  await padTap(0);   // A: single press at the cursor
+  ok((await poll('dbg_warsel', [], v => v === 1, 4000)) === 1, 'pad: A at a unit selects exactly it', await call('dbg_warsel'));
+  await padTap(0, 110);   // A again, inside the streak window
+  ok((await poll('dbg_warsel', [], v => v === 2, 4000)) === 2, 'pad: double-A mustered ALL melee on screen', await call('dbg_warsel'));
+  await padTap(0, 110);   // and a third: every combat unit
+  ok((await poll('dbg_warsel', [], v => v === 2, 4000)) === 2 && (await call('dbg_warunits', 0, 0)) === 1,
+     'pad: triple-A mustered all COMBAT units — the harvester stays out', 'sel=' + (await call('dbg_warsel')));
+
+  // 3. A on empty ground issues a move order
+  const mBefore = await call('dbg_warunitxy', meleeA);
+  await padAxes(1, 0, 0, 0); await sleep(400); await padAxes(0, 0, 0, 0); await sleep(150);
+  await padTap(0);
+  const mMoved = await poll('dbg_warunitxy', [meleeA], v => {
+    if (v < 0) return false;
+    const [ax, ay] = unxy(mBefore), [bx, by] = unxy(v);
+    return bx - ax > 40;
+  }, 7000, 200);
+  ok(mMoved >= 0 && mMoved !== mBefore, 'pad: A on open ground marched the selection EAST', mBefore + ' -> ' + mMoved);
+
+  // 6 (early, while the camera is known): the right stick pans and
+  // the cursor keeps its SCREEN position
+  const scrOf = async () => {
+    const [ux, uy] = unxy(await call('dbg_warunitxy', meleeA));
+    const [sx, sy] = unpos(await call('dbg_warunitpos', meleeA));
+    const camx = ux - (sx - 320), camy = uy - (sy - 180 + 23);
+    const [qx, qy] = unxy(await call('dbg_warcur'));
+    return [320 + (qx - camx), 180 + (qy - camy - 23), camx];
+  };
+  const scr0 = await scrOf();
+  await padAxes(0, 0, 1, 0); await sleep(500); await padAxes(0, 0, 0, 0); await sleep(200);
+  const scr1 = await scrOf();
+  ok(Math.abs(scr1[0] - scr0[0]) <= 8 && Math.abs(scr1[1] - scr0[1]) <= 8 && scr1[2] > scr0[2] + 60,
+     'pad: right stick panned the camera, cursor SCREEN-locked',
+     `screen ${scr0[0]},${scr0[1]} -> ${scr1[0]},${scr1[1]}, camx ${scr0[2]} -> ${scr1[2]}`);
+
+  // 4. the command bar by pad: select the Core with A, RB lights a
+  // button, A trains through it. Getting there takes two wakes: the
+  // first B press only summons the cursor (a waking press is spent
+  // waking), the second B peels the unit selection away; then a tap
+  // retires the cursor so A's wake respawns it at the camera centre,
+  // which is where the Core sits. ORDER MATTERS: the cursor must be
+  // OFF before dbg_warcam teleports the camera — a live cursor's
+  // edge-follow quite correctly drags the camera after it (that is
+  // the follow doing its job; real play never teleports the camera).
+  await tap(630, 10);   // a real tap retires the cursor (last device wins; empty field up there)
+  ok((await poll('dbg_warcur', [], v => v === -1, 4000)) === -1, 'pad: a real tap retired the cursor');
+  await padTap(1);   // B: wakes the cursor (spent waking)
+  await padTap(1);   // B again: peels the unit selection away
+  ok((await poll('dbg_warsel', [], v => v === 0, 4000)) === 0, 'pad: B cleared the unit selection');
+  await tap(630, 10);   // retire the cursor again BEFORE moving the camera
+  ok((await poll('dbg_warcur', [], v => v === -1, 4000)) === -1, 'pad: cursor retired before the camera move');
+  await call('dbg_warcam', 280, 600); await sleep(250);
+  await padTap(0);   // A wakes the cursor at the camera's centre (nothing selected now)
+  ok((await poll('dbg_warcur', [], v => v === 2800623, 4000)) === 2800623, 'pad: A summoned the cursor at the camera centre (280,623)',
+     await call('dbg_warcur'));
+  await padTap(0);   // A again: the tap itself — the Core is at the camera's centre
+  ok((await poll('dbg_warselstruct', [], v => v === 0, 4000)) === 0, 'pad: A at the camera centre selected the Core');
+  ok((await call('dbg_warsel')) === 0, 'pad: selecting the Core cleared the unit selection');
+  await padTap(5);   // RB: light the first bar button (HARVESTER)
+  ok((await poll('dbg_warbarhl', [], v => v === 0, 4000)) === 0, 'pad: RB lit bar button 0', await call('dbg_warbarhl'));
+  const bitsBar = await call('dbg_warbits');
+  await padTap(0);   // A presses the lit button
+  ok((await poll('dbg_warbits', [], v => v === bitsBar - 80, 4000)) === bitsBar - 80,
+     'pad: A on the lit button trained (80 bits charged)', bitsBar + ' -> ' + (await call('dbg_warbits')));
+  ok((await poll('dbg_warunits', [0, 0], v => v === 2, 14000)) === 2, 'pad: the bar-trained harvester rolled out');
+
+  // 5. B cancels a pending placement — nothing built, nothing charged
+  await padTap(5); await padTap(5); await padTap(5); await padTap(5);   // RB x4: HARVESTER -> PATCH -> ZAPPER -> FIREWALL
+  ok((await poll('dbg_warbarhl', [], v => v === 3, 4000)) === 3, 'pad: RB walked the highlight to FIREWALL (slot 3)', await call('dbg_warbarhl'));
+  await padTap(0);
+  ok((await poll('dbg_warplace', [], v => v === 3, 4000)) === 3, 'pad: A on FIREWALL armed its placement');
+  const bitsPlace = await call('dbg_warbits'), wallsPlace = await call('dbg_warstructs', 3);
+  await padTap(1);   // B: cancel
+  ok((await poll('dbg_warplace', [], v => v === -1, 4000)) === -1
+     && (await call('dbg_warbits')) === bitsPlace && (await call('dbg_warstructs', 3)) === wallsPlace,
+     'pad: B cancelled the placement — no wall, no charge',
+     'place=' + (await call('dbg_warplace')) + ' bits=' + (await call('dbg_warbits')) + ' walls=' + (await call('dbg_warstructs', 3)));
+
+  // hand the field back to the keyboard for the suite's tail
+  await padAxes(0, 0, 0, 0);
+  await key('ArrowLeft', 200);
 
   // region 2 is unlocked now
   ok((await call('dbg_warenter', 1)) === 1, 'region 2 battle launches');

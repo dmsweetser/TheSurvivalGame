@@ -889,6 +889,8 @@ typedef struct {
     u64 pulse;                        // one-frame key taps (touch buttons)
     u32 act_held, act_edges;          // gamepad actions, in ACT_* space
     u32 act2_held, act2_edges;        // second gamepad (local co-op P2)
+    float pad_ax[4];                  // pad 1's analog sticks, raw -1..1 in web-axes order (LX, LY, RX, RY; +Y is DOWN) — WAR!'s cursor flies on these (v1.16)
+    u32 pad_edges;                    // this frame's act_edges, snapshotted by derive_input before it clears them (WAR!'s pad buttons read here)
     int pad_count;                    // controllers the platform can see
     float dev_t, pad_last, key_last;  // last-device stamps: which input the player is actually USING (drives hint labels)
     int weapon_cycle;                 // derived: -1/0/+1 from gamepad bumpers
@@ -5806,14 +5808,237 @@ static const signed char M4_LEAD[336] = {
        74,   -1,   -1,   -1,   79,   -1,   -1,   -1,   78,   -1,   -1,   -1,   -1,   -1,   79,   -1,
 };
 
+// In the Hall of the Mountain King - Peer Gynt (Grieg, 1875,
+// public domain); the sneaky pizzicato theme in B minor, looped
+// before the final crash. ENTRANCES' music (v1.16).
+static const signed char M5_BASS[128] = {
+       47,  -1,  -1,  -1,  47,  -1,  -1,  -1,  47,  -1,  -1,  -1,  47,  -1,  -1,  -1,
+       47,  -1,  -1,  -1,  47,  -1,  -1,  -1,  47,  -1,  -1,  -1,  47,  -1,  -1,  -1,
+       47,  -1,  -1,  -1,  47,  -1,  -1,  -1,  47,  -1,  -1,  -1,  47,  -1,  -1,  -1,
+       43,  -1,  -1,  -1,  43,  -1,  -1,  -1,  42,  -1,  -1,  -1,  47,  -1,  -1,  -1,
+       47,  -1,  -1,  -1,  47,  -1,  -1,  -1,  47,  -1,  -1,  -1,  47,  -1,  -1,  -1,
+       47,  -1,  -1,  -1,  47,  -1,  -1,  -1,  47,  -1,  -1,  -1,  47,  -1,  -1,  -1,
+       47,  -1,  -1,  -1,  47,  -1,  -1,  -1,  47,  -1,  -1,  -1,  47,  -1,  -1,  -1,
+       43,  -1,  -1,  -1,  43,  -1,  -1,  -1,  42,  -1,  -1,  -1,  47,  -1,  -1,  -1,
+};
+static const signed char M5_MID[128] = {
+       -1,  -1,  62,  -1,  -1,  -1,  66,  -1,  -1,  -1,  62,  -1,  -1,  -1,  66,  -1,
+       -1,  -1,  62,  -1,  -1,  -1,  66,  -1,  -1,  -1,  62,  -1,  -1,  -1,  66,  -1,
+       -1,  -1,  62,  -1,  -1,  -1,  66,  -1,  -1,  -1,  62,  -1,  -1,  -1,  66,  -1,
+       -1,  -1,  59,  -1,  -1,  -1,  62,  -1,  -1,  -1,  61,  -1,  -1,  -1,  58,  -1,
+       -1,  -1,  62,  -1,  -1,  -1,  66,  -1,  -1,  -1,  62,  -1,  -1,  -1,  66,  -1,
+       -1,  -1,  62,  -1,  -1,  -1,  66,  -1,  -1,  -1,  62,  -1,  -1,  -1,  66,  -1,
+       -1,  -1,  62,  -1,  -1,  -1,  66,  -1,  -1,  -1,  62,  -1,  -1,  -1,  66,  -1,
+       -1,  -1,  59,  -1,  -1,  -1,  62,  -1,  -1,  -1,  61,  -1,  -1,  -1,  58,  -1,
+};
+static const signed char M5_LEAD[128] = {
+       59,  -1,  61,  -1,  62,  -1,  64,  -1,  66,  -1,  62,  -1,  66,  -1,  -1,  -1,
+       59,  -1,  61,  -1,  62,  -1,  64,  -1,  66,  -1,  62,  -1,  66,  -1,  -1,  -1,
+       59,  -1,  61,  -1,  62,  -1,  64,  -1,  66,  -1,  62,  -1,  66,  -1,  -1,  -1,
+       67,  -1,  64,  -1,  61,  -1,  58,  -1,  59,  -1,  -1,  -1,  -1,  -1,  -1,  -1,
+       59,  -1,  61,  -1,  62,  -1,  64,  -1,  66,  -1,  62,  -1,  66,  -1,  -1,  -1,
+       59,  -1,  61,  -1,  62,  -1,  64,  -1,  66,  -1,  62,  -1,  66,  -1,  -1,  -1,
+       59,  -1,  61,  -1,  62,  -1,  64,  -1,  66,  -1,  62,  -1,  66,  -1,  -1,  -1,
+       67,  -1,  64,  -1,  61,  -1,  58,  -1,  59,  -1,  -1,  -1,  -1,  -1,  -1,  -1,
+};
+
+// Flight of the Bumblebee - The Tale of Tsar Saltan
+// (Rimsky-Korsakov, 1900, public domain); the A-minor chromatic
+// whirlwind. SUPER BUDDY RUN's music (v1.16) - Daniel's pick.
+static const signed char M6_BASS[192] = {
+       45,  -1,  45,  -1,  45,  -1,  45,  -1,  45,  -1,  45,  -1,  45,  -1,  45,  -1,
+       45,  -1,  45,  -1,  45,  -1,  45,  -1,  45,  -1,  45,  -1,  45,  -1,  45,  -1,
+       40,  -1,  40,  -1,  40,  -1,  40,  -1,  40,  -1,  40,  -1,  40,  -1,  40,  -1,
+       45,  -1,  45,  -1,  45,  -1,  45,  -1,  45,  -1,  45,  -1,  45,  -1,  45,  -1,
+       40,  -1,  40,  -1,  40,  -1,  40,  -1,  40,  -1,  40,  -1,  40,  -1,  40,  -1,
+       40,  -1,  40,  -1,  40,  -1,  40,  -1,  40,  -1,  40,  -1,  40,  -1,  40,  -1,
+       45,  -1,  45,  -1,  45,  -1,  45,  -1,  45,  -1,  45,  -1,  45,  -1,  45,  -1,
+       45,  -1,  45,  -1,  45,  -1,  45,  -1,  45,  -1,  45,  -1,  45,  -1,  45,  -1,
+       45,  -1,  45,  -1,  45,  -1,  45,  -1,  45,  -1,  45,  -1,  45,  -1,  45,  -1,
+       45,  -1,  45,  -1,  45,  -1,  45,  -1,  45,  -1,  45,  -1,  45,  -1,  45,  -1,
+       40,  -1,  40,  -1,  40,  -1,  40,  -1,  40,  -1,  40,  -1,  40,  -1,  40,  -1,
+       40,  -1,  40,  -1,  40,  -1,  40,  -1,  40,  -1,  40,  -1,  40,  -1,  40,  -1,
+};
+static const signed char M6_MID[192] = {
+       57,  60,  64,  60,  57,  60,  64,  60,  57,  60,  64,  60,  57,  60,  64,  60,
+       57,  60,  64,  60,  57,  60,  64,  60,  57,  60,  64,  60,  57,  60,  64,  60,
+       52,  56,  59,  56,  52,  56,  59,  56,  52,  56,  59,  56,  52,  56,  59,  56,
+       57,  60,  64,  60,  57,  60,  64,  60,  57,  60,  64,  60,  57,  60,  64,  60,
+       52,  56,  59,  56,  52,  56,  59,  56,  52,  56,  59,  56,  52,  56,  59,  56,
+       52,  56,  59,  56,  52,  56,  59,  56,  52,  56,  59,  56,  52,  56,  59,  56,
+       57,  60,  64,  60,  57,  60,  64,  60,  57,  60,  64,  60,  57,  60,  64,  60,
+       57,  60,  64,  60,  57,  60,  64,  60,  57,  60,  64,  60,  57,  60,  64,  60,
+       57,  60,  64,  60,  57,  60,  64,  60,  57,  60,  64,  60,  57,  60,  64,  60,
+       57,  60,  64,  60,  57,  60,  64,  60,  57,  60,  64,  60,  57,  60,  64,  60,
+       52,  56,  59,  56,  52,  56,  59,  56,  52,  56,  59,  56,  52,  56,  59,  56,
+       52,  56,  59,  56,  52,  56,  59,  56,  52,  56,  59,  56,  52,  56,  59,  56,
+};
+static const signed char M6_LEAD[192] = {
+       69,  68,  69,  71,  69,  68,  69,  71,  69,  68,  69,  71,  69,  68,  69,  71,
+       69,  68,  69,  71,  69,  68,  69,  71,  69,  68,  69,  71,  69,  68,  69,  71,
+       76,  75,  74,  73,  72,  71,  70,  69,  68,  67,  66,  65,  64,  63,  62,  61,
+       61,  62,  63,  64,  65,  66,  67,  68,  69,  69,  68,  69,  71,  69,  68,  69,
+       64,  63,  64,  66,  64,  63,  64,  66,  64,  63,  64,  66,  64,  63,  64,  66,
+       64,  63,  64,  66,  64,  63,  64,  66,  64,  63,  64,  66,  64,  63,  64,  66,
+       81,  80,  79,  78,  77,  76,  75,  74,  73,  72,  71,  70,  69,  68,  67,  66,
+       65,  66,  67,  68,  69,  71,  72,  74,  76,  78,  76,  74,  72,  71,  69,  68,
+       69,  68,  69,  71,  69,  68,  69,  71,  69,  68,  69,  71,  69,  68,  69,  71,
+       69,  68,  69,  71,  69,  68,  69,  71,  69,  68,  69,  71,  69,  68,  69,  71,
+       76,  75,  74,  73,  72,  71,  70,  69,  68,  67,  66,  65,  64,  63,  62,  61,
+       61,  62,  63,  64,  65,  66,  67,  68,  69,  68,  69,  71,  72,  71,  69,  68,
+};
+
+// Infernal Galop (the Can-Can) - Orpheus in the Underworld
+// (Offenbach, 1858, public domain); the frantic G-major galop.
+// TANK RESCUE's music (v1.16).
+static const signed char M7_BASS[128] = {
+       43,  -1,  -1,  -1,  50,  -1,  -1,  -1,  43,  -1,  -1,  -1,  50,  -1,  -1,  -1,
+       43,  -1,  -1,  -1,  47,  -1,  -1,  -1,  50,  -1,  -1,  -1,  50,  -1,  -1,  -1,
+       43,  -1,  -1,  -1,  50,  -1,  -1,  -1,  43,  -1,  -1,  -1,  50,  -1,  -1,  -1,
+       43,  -1,  -1,  -1,  47,  -1,  -1,  -1,  45,  -1,  -1,  -1,  50,  -1,  -1,  -1,
+       45,  -1,  -1,  -1,  52,  -1,  -1,  -1,  45,  -1,  -1,  -1,  52,  -1,  -1,  -1,
+       43,  -1,  -1,  -1,  50,  -1,  -1,  -1,  43,  -1,  -1,  -1,  50,  -1,  -1,  -1,
+       45,  -1,  -1,  -1,  52,  -1,  -1,  -1,  50,  -1,  -1,  -1,  50,  -1,  -1,  -1,
+       43,  -1,  -1,  -1,  50,  -1,  -1,  -1,  43,  -1,  -1,  -1,  43,  -1,  -1,  -1,
+};
+static const signed char M7_MID[128] = {
+       -1,  -1,  59,  -1,  -1,  -1,  62,  -1,  -1,  -1,  59,  -1,  -1,  -1,  62,  -1,
+       -1,  -1,  59,  -1,  -1,  -1,  62,  -1,  -1,  -1,  66,  -1,  -1,  -1,  62,  -1,
+       -1,  -1,  59,  -1,  -1,  -1,  62,  -1,  -1,  -1,  59,  -1,  -1,  -1,  62,  -1,
+       -1,  -1,  59,  -1,  -1,  -1,  62,  -1,  -1,  -1,  64,  -1,  -1,  -1,  66,  -1,
+       -1,  -1,  60,  -1,  -1,  -1,  64,  -1,  -1,  -1,  60,  -1,  -1,  -1,  64,  -1,
+       -1,  -1,  59,  -1,  -1,  -1,  62,  -1,  -1,  -1,  59,  -1,  -1,  -1,  62,  -1,
+       -1,  -1,  60,  -1,  -1,  -1,  64,  -1,  -1,  -1,  66,  -1,  -1,  -1,  62,  -1,
+       -1,  -1,  59,  -1,  -1,  -1,  62,  -1,  -1,  -1,  59,  -1,  -1,  -1,  -1,  -1,
+};
+static const signed char M7_LEAD[128] = {
+       74,  -1,  71,  -1,  67,  -1,  71,  -1,  74,  -1,  71,  -1,  67,  -1,  71,  -1,
+       74,  -1,  76,  -1,  78,  -1,  79,  -1,  78,  -1,  76,  -1,  74,  -1,  71,  -1,
+       74,  -1,  71,  -1,  67,  -1,  71,  -1,  74,  -1,  71,  -1,  67,  -1,  71,  -1,
+       74,  -1,  76,  -1,  78,  -1,  79,  -1,  81,  -1,  79,  -1,  78,  -1,  76,  -1,
+       76,  -1,  72,  -1,  69,  -1,  72,  -1,  76,  -1,  72,  -1,  69,  -1,  72,  -1,
+       74,  -1,  71,  -1,  67,  -1,  71,  -1,  74,  -1,  71,  -1,  67,  -1,  71,  -1,
+       76,  -1,  72,  -1,  69,  -1,  72,  -1,  78,  -1,  74,  -1,  71,  -1,  74,  -1,
+       79,  -1,  79,  -1,  78,  -1,  76,  -1,  74,  -1,  71,  -1,  67,  -1,  -1,  -1,
+};
+
+// Greensleeves - traditional English air (public domain);
+// A minor, a gentle 6/8 lilt. CASTLE's music (v1.16).
+static const signed char M8_BASS[96] = {
+       45,  -1,  -1,  -1,  -1,  -1,  45,  -1,  -1,  -1,  -1,  -1,  43,  -1,  -1,  -1,
+       -1,  -1,  40,  -1,  -1,  -1,  -1,  -1,  45,  -1,  -1,  -1,  -1,  -1,  40,  -1,
+       -1,  -1,  -1,  -1,  45,  -1,  -1,  -1,  -1,  -1,  45,  -1,  -1,  -1,  -1,  -1,
+       45,  -1,  -1,  -1,  -1,  -1,  45,  -1,  -1,  -1,  -1,  -1,  43,  -1,  -1,  -1,
+       -1,  -1,  40,  -1,  -1,  -1,  -1,  -1,  45,  -1,  -1,  -1,  -1,  -1,  40,  -1,
+       -1,  -1,  -1,  -1,  45,  -1,  -1,  -1,  -1,  -1,  45,  -1,  -1,  -1,  -1,  -1,
+};
+static const signed char M8_MID[96] = {
+       -1,  -1,  -1,  64,  -1,  -1,  -1,  -1,  -1,  60,  -1,  -1,  -1,  -1,  -1,  59,
+       -1,  -1,  -1,  -1,  -1,  62,  -1,  -1,  -1,  -1,  -1,  64,  -1,  -1,  -1,  -1,
+       -1,  59,  -1,  -1,  -1,  -1,  -1,  60,  -1,  -1,  -1,  -1,  -1,  -1,  -1,  -1,
+       -1,  -1,  -1,  64,  -1,  -1,  -1,  -1,  -1,  60,  -1,  -1,  -1,  -1,  -1,  59,
+       -1,  -1,  -1,  -1,  -1,  62,  -1,  -1,  -1,  -1,  -1,  64,  -1,  -1,  -1,  -1,
+       -1,  59,  -1,  -1,  -1,  -1,  -1,  60,  -1,  -1,  -1,  -1,  -1,  -1,  -1,  -1,
+};
+static const signed char M8_LEAD[96] = {
+       72,  -1,  74,  -1,  76,  -1,  77,  -1,  76,  -1,  74,  -1,  71,  -1,  67,  -1,
+       69,  -1,  71,  -1,  72,  -1,  69,  -1,  69,  -1,  68,  -1,  69,  -1,  71,  -1,
+       68,  -1,  64,  -1,  69,  -1,  -1,  -1,  -1,  -1,  -1,  -1,  -1,  -1,  -1,  -1,
+       72,  -1,  74,  -1,  76,  -1,  77,  -1,  76,  -1,  74,  -1,  71,  -1,  67,  -1,
+       69,  -1,  71,  -1,  72,  -1,  69,  -1,  69,  -1,  68,  -1,  69,  -1,  71,  -1,
+       68,  -1,  64,  -1,  69,  -1,  -1,  -1,  -1,  -1,  -1,  -1,  -1,  -1,  -1,  -1,
+};
+
+// William Tell Overture, finale - Rossini, 1829, public
+// domain; the E-major gallop. SUPER BUDDY CART's music (v1.16).
+static const signed char M9_BASS[128] = {
+       40,  -1,  -1,  -1,  47,  -1,  -1,  -1,  40,  -1,  -1,  -1,  47,  -1,  -1,  -1,
+       47,  -1,  -1,  -1,  47,  -1,  -1,  -1,  40,  -1,  -1,  -1,  47,  -1,  -1,  -1,
+       40,  -1,  -1,  -1,  47,  -1,  -1,  -1,  40,  -1,  -1,  -1,  47,  -1,  -1,  -1,
+       40,  -1,  -1,  -1,  47,  -1,  -1,  -1,  40,  -1,  -1,  -1,  40,  -1,  -1,  -1,
+       40,  -1,  -1,  -1,  47,  -1,  -1,  -1,  40,  -1,  -1,  -1,  47,  -1,  -1,  -1,
+       47,  -1,  -1,  -1,  47,  -1,  -1,  -1,  40,  -1,  -1,  -1,  47,  -1,  -1,  -1,
+       40,  -1,  -1,  -1,  47,  -1,  -1,  -1,  45,  -1,  -1,  -1,  47,  -1,  -1,  -1,
+       40,  -1,  -1,  -1,  40,  -1,  -1,  -1,  40,  -1,  -1,  -1,  40,  -1,  -1,  -1,
+};
+static const signed char M9_MID[128] = {
+       -1,  -1,  68,  -1,  -1,  -1,  71,  -1,  -1,  -1,  68,  -1,  -1,  -1,  71,  -1,
+       -1,  -1,  66,  -1,  -1,  -1,  68,  -1,  -1,  -1,  68,  -1,  -1,  -1,  71,  -1,
+       -1,  -1,  68,  -1,  -1,  -1,  71,  -1,  -1,  -1,  68,  -1,  -1,  -1,  71,  -1,
+       -1,  -1,  68,  -1,  -1,  -1,  71,  -1,  -1,  -1,  -1,  -1,  -1,  -1,  -1,  -1,
+       -1,  -1,  68,  -1,  -1,  -1,  71,  -1,  -1,  -1,  68,  -1,  -1,  -1,  71,  -1,
+       -1,  -1,  66,  -1,  -1,  -1,  68,  -1,  -1,  -1,  68,  -1,  -1,  -1,  71,  -1,
+       -1,  -1,  68,  -1,  -1,  -1,  71,  -1,  -1,  -1,  69,  -1,  -1,  -1,  66,  -1,
+       -1,  -1,  68,  -1,  -1,  -1,  -1,  -1,  -1,  -1,  68,  -1,  -1,  -1,  -1,  -1,
+};
+static const signed char M9_LEAD[128] = {
+       71,  -1,  71,  -1,  71,  -1,  76,  -1,  79,  -1,  79,  -1,  78,  -1,  76,  -1,
+       78,  -1,  75,  -1,  76,  -1,  -1,  -1,  71,  -1,  71,  -1,  71,  -1,  76,  -1,
+       79,  -1,  79,  -1,  78,  -1,  76,  -1,  78,  -1,  81,  -1,  79,  -1,  78,  -1,
+       76,  -1,  75,  -1,  76,  -1,  -1,  -1,  -1,  -1,  -1,  -1,  -1,  -1,  -1,  -1,
+       71,  -1,  71,  -1,  71,  -1,  76,  -1,  79,  -1,  79,  -1,  78,  -1,  76,  -1,
+       78,  -1,  75,  -1,  76,  -1,  -1,  -1,  71,  -1,  71,  -1,  71,  -1,  76,  -1,
+       79,  -1,  81,  -1,  83,  -1,  81,  -1,  79,  -1,  78,  -1,  76,  -1,  75,  -1,
+       76,  -1,  -1,  -1,  -1,  -1,  -1,  -1,  -1,  -1,  -1,  -1,  -1,  -1,  -1,  -1,
+};
+
+// Ride of the Valkyries - Die Walkuere (Wagner, 1851, public
+// domain); the famous dotted horn motif in B minor. WAR!'s
+// music (v1.16) - Daniel's pick.
+static const signed char M10_BASS[96] = {
+       47,  -1,  -1,  -1,  -1,  -1,  47,  -1,  -1,  -1,  -1,  -1,  47,  -1,  -1,  -1,
+       -1,  -1,  47,  -1,  -1,  -1,  -1,  -1,  47,  -1,  -1,  -1,  -1,  -1,  47,  -1,
+       -1,  -1,  -1,  -1,  47,  -1,  -1,  -1,  -1,  -1,  42,  -1,  -1,  -1,  -1,  -1,
+       47,  -1,  -1,  -1,  -1,  -1,  47,  -1,  -1,  -1,  -1,  -1,  47,  -1,  -1,  -1,
+       -1,  -1,  47,  -1,  -1,  -1,  -1,  -1,  42,  -1,  -1,  -1,  -1,  -1,  47,  -1,
+       -1,  -1,  -1,  -1,  47,  -1,  -1,  -1,  -1,  -1,  47,  -1,  -1,  -1,  -1,  -1,
+};
+static const signed char M10_MID[96] = {
+       -1,  -1,  -1,  62,  -1,  -1,  -1,  -1,  -1,  66,  -1,  -1,  -1,  -1,  -1,  62,
+       -1,  -1,  -1,  -1,  -1,  66,  -1,  -1,  -1,  -1,  -1,  64,  -1,  -1,  -1,  -1,
+       -1,  62,  -1,  -1,  -1,  -1,  -1,  66,  -1,  -1,  -1,  -1,  -1,  61,  -1,  -1,
+       -1,  -1,  -1,  62,  -1,  -1,  -1,  -1,  -1,  66,  -1,  -1,  -1,  -1,  -1,  62,
+       -1,  -1,  -1,  -1,  -1,  66,  -1,  -1,  -1,  -1,  -1,  66,  -1,  -1,  -1,  -1,
+       -1,  64,  -1,  -1,  -1,  -1,  -1,  62,  -1,  -1,  -1,  -1,  -1,  -1,  -1,  -1,
+};
+static const signed char M10_LEAD[96] = {
+       71,  -1,  -1,  70,  71,  -1,  74,  -1,  -1,  -1,  -1,  -1,  71,  -1,  -1,  70,
+       71,  -1,  78,  -1,  -1,  -1,  -1,  -1,  71,  -1,  -1,  70,  71,  -1,  76,  -1,
+       -1,  -1,  -1,  -1,  74,  -1,  -1,  73,  71,  -1,  70,  -1,  71,  -1,  -1,  -1,
+       71,  -1,  -1,  70,  71,  -1,  74,  -1,  -1,  -1,  -1,  -1,  71,  -1,  -1,  70,
+       71,  -1,  78,  -1,  -1,  -1,  -1,  -1,  78,  -1,  -1,  76,  74,  -1,  73,  -1,
+       -1,  -1,  -1,  -1,  71,  -1,  -1,  -1,  -1,  -1,  -1,  -1,  -1,  -1,  -1,  -1,
+};
+
 typedef struct { const signed char *bass, *mid, *lead; int len; float step; int lv; } Piece;
-static const Piece PIECES[5] = {
+static const Piece PIECES[11] = {
     { M0_BASS, M0_MID, M0_LEAD,  96, 0.205f, 55 },   // Moonlight Sonata I — serene
     { M1_BASS, M1_MID, M1_LEAD,  64, 0.170f, 62 },   // Fur Elise — a story starts
     { M2_BASS, M2_MID, M2_LEAD,  64, 0.145f, 80 },   // Symphony No. 5, I — fate knocks
     { M3_BASS, M3_MID, M3_LEAD, 128, 0.078f, 68 },   // Moonlight Sonata III — the storm itself
     { M4_BASS, M4_MID, M4_LEAD, 336, 0.135f, 60 },   // Sheep May Safely Graze — Banzai World (Nov 5)
+    { M5_BASS, M5_MID, M5_LEAD, 128, 0.140f, 58 },   // Mountain King — ENTRANCES (v1.16)
+    { M6_BASS, M6_MID, M6_LEAD, 192, 0.072f, 70 },   // Flight of the Bumblebee — RUN (v1.16)
+    { M7_BASS, M7_MID, M7_LEAD, 128, 0.100f, 72 },   // Infernal Galop — TANK RESCUE (v1.16)
+    { M8_BASS, M8_MID, M8_LEAD,  96, 0.170f, 55 },   // Greensleeves — CASTLE (v1.16)
+    { M9_BASS, M9_MID, M9_LEAD, 128, 0.095f, 74 },   // William Tell finale — CART (v1.16)
+    { M10_BASS, M10_MID, M10_LEAD, 96, 0.150f, 76 }, // Ride of the Valkyries — WAR! (v1.16)
 };
+// one piece per arcade cabinet (Daniel, Nov 16): Banzai World's
+// default stays Sheep May Safely Graze — the mall/plaza inside the
+// gate (bw_mode 0/1) and Buddy Craft keep it — while each cabinet
+// plays its own. Used by BOTH Banzai-World branches of mus_piece.
+static int bw_piece(int mode){
+    switch (mode){
+        case 2: return 5;    // ENTRANCES — In the Hall of the Mountain King
+        case 3: return 6;    // SUPER BUDDY RUN — Flight of the Bumblebee
+        case 5: return 7;    // TANK RESCUE — Infernal Galop (the Can-Can)
+        case 6: return 8;    // CASTLE — Greensleeves
+        case 7: return 9;    // SUPER BUDDY CART — William Tell finale
+        case 8: return 10;   // WAR! — Ride of the Valkyries
+        default: return 4;   // CRAFT + everywhere else in Banzai World — Sheep
+    }
+}
 // (threat_override is declared up by compute_threat, which honors it too)
 // Daniel's music rule: Beethoven, calm first, fiercer as THREAT climbs.
 // The menu always gets the Moonlight; a zen run never leaves it.
@@ -5822,9 +6047,10 @@ static int mus_piece(void){
     // Banzai World has its own music (Daniel, Nov 5): Bach's Sheep May
     // Safely Graze, pastoral for a pastoral place — it wins over the
     // threat ladder and even over a zen run, but menus still open with
-    // the Moonlight.
-    if (G.state==GS_PLAY && G.bud[G.my_id].in_bw) return G.bud[G.my_id].bw_mode==2? 0 : G.bud[G.my_id].bw_mode==3? 1 : 4;
-    if (G.state==GS_PLAY && G.p2_slot>=0 && G.bud[G.p2_slot].in_bw) return G.bud[G.p2_slot].bw_mode==2? 0 : G.bud[G.p2_slot].bw_mode==3? 1 : 4;
+    // the Moonlight. Since v1.16 each arcade cabinet plays its own
+    // piece instead (see bw_piece); Sheep keeps the plaza and Craft.
+    if (G.state==GS_PLAY && G.bud[G.my_id].in_bw) return bw_piece(G.bud[G.my_id].bw_mode);
+    if (G.state==GS_PLAY && G.p2_slot>=0 && G.bud[G.p2_slot].in_bw) return bw_piece(G.bud[G.p2_slot].bw_mode);
     if (G.zen_run) return 0;
     float t = threat_override>=0? threat_override : G.threat;
     if (t<2.0f) return 0;
@@ -9192,6 +9418,8 @@ static void derive_input(float dt){
     // through the mobile branches) counts as keyboard use.
     IN.dev_t += dt;
     if (IN.act_held || IN.act_edges || IN.act2_held || IN.act2_edges) IN.pad_last = IN.dev_t;
+    { float m=0; for (int i=0;i<4;i++){ float a=IN.pad_ax[i]; if (a<0) a=-a; if (a>m) m=a; }
+      if (m>0.18f) IN.pad_last = IN.dev_t; }   // a stick pushed past the cursor deadzone is pad use too, even below the digital threshold
     if (IN.raw || g_raw_edges || IN.touch_seen) IN.key_last = IN.dev_t;
     int k=0;
     if (raw_dn(G.bind[ACT_UP])    || raw_dn(PK_UP)    || (IN.act_held>>ACT_UP&1))    k|=K_UP;
@@ -9229,6 +9457,7 @@ static void derive_input(float dt){
         }
     } else menu_rep_dir=0;
     prev_raw = IN.raw;
+    IN.pad_edges = IN.act_edges;   // a snapshot for late readers (WAR!'s pad cursor) — act_edges itself is consumed below
     IN.act_edges = 0;   // consumed
 }
 
@@ -9960,6 +10189,13 @@ typedef struct {
     float war_ordx, war_ordy, war_ordt;
     int war_drag_id, war_dragx, war_dragy;
     float war_drag_cx, war_drag_cy;   // camera position when the drag grabbed the world
+    // WAR! on a gamepad (v1.16): the pad cursor — a "finger" in world
+    // coords that presses through the same tap path as touch/mouse.
+    // P1 only. war_barhl is the LB/RB highlight over the selected
+    // structure's command bar; war_barhl_s is the struct it belongs
+    // to, so any change of selection retires the highlight.
+    float war_curx, war_cury; int war_curon;
+    int war_barhl, war_barhl_s;
     char war_msg[72]; float war_msgt;
     float war_ux[80], war_uy[80], war_uhp[80], war_uatk[80];
     float war_utx[80], war_uty[80], war_uharv[80];
@@ -16788,6 +17024,7 @@ static void war_clear_field(BwSim *S){
     for (int i=0;i<WAR_MAXP;i++) S->war_pt[i]=0;
     S->war_selstruct=-1; S->war_place=-1;
     S->war_tn=0; S->war_ltap_n=0; S->war_ltap_unit=-1;
+    S->war_curon=0; S->war_barhl=-1; S->war_barhl_s=-1;   // a fresh field has no pad cursor and no bar highlight
 }
 // --- fog of war ------------------------------------------------------
 // Cells are 40u over the 1600x1200 arena. Explored is sticky: a cell
@@ -17535,6 +17772,113 @@ static void war_map_update(int pi, float dt, const BwIn *in){
         }
     }
 }
+// --- WAR! on a gamepad (v1.16, Daniel) --------------------------------
+// The pad never had a tap channel, so every WAR! verb — select,
+// order, build, the command bar — was touch/mouse only; a pad could
+// pan and nothing more. The fix is a cursor that IS a finger: the
+// left stick flies it, A presses it through war_handle_tap itself
+// (so the double/triple-tap muster ladder falls out of the existing
+// streak code), B peels one layer back, LB/RB walk the command bar.
+// Last device wins, as everywhere in this game: a real tap retires
+// the cursor, and any pad input summons it again. P1 only — P2 keeps
+// its pan + centre-tap.
+static float war_axis(float a){   // deadzone 0.18, rescaled past it so a gentle push is a gentle fly
+    float m = a<0? -a : a;
+    if (m<=0.18f) return 0;
+    float r = (m-0.18f)/0.82f; if (r>1.0f) r=1.0f;
+    return a<0? -r : r;
+}
+static void war_pad_update(int pi, float dt){
+    BwSim *S = &BWS[pi];
+    if (pi!=G.my_id) return;
+    int vx, vy, vw2, vh2; p1_view_rect(&vx, &vy, &vw2, &vh2);
+    float lx = war_axis(IN.pad_ax[0]), ly = war_axis(IN.pad_ax[1]);
+    float rx = war_axis(IN.pad_ax[2]), ry = war_axis(IN.pad_ax[3]);
+    int stick = (IN.pad_ax[0]>0.18f || IN.pad_ax[0]<-0.18f || IN.pad_ax[1]>0.18f || IN.pad_ax[1]<-0.18f
+              || IN.pad_ax[2]>0.18f || IN.pad_ax[2]<-0.18f || IN.pad_ax[3]>0.18f || IN.pad_ax[3]<-0.18f);
+    u32 pe = IN.pad_edges;
+    u32 btns = (1u<<ACT_FIRE)|(1u<<ACT_INTERACT)|(1u<<ACT_WPREV)|(1u<<ACT_WNEXT);
+    if (!S->war_curon){
+        if (!pad_mode() || !(stick || (pe & btns))) return;
+        S->war_curon = 1;
+        // spawn on the first selected unit, else at the camera's centre
+        int si=-1;
+        for (int i=0;i<WAR_MAXU;i++) if (S->war_uhp[i]>0 && S->war_usel[i]){ si=i; break; }
+        if (si>=0){ S->war_curx = S->war_ux[si]; S->war_cury = S->war_uy[si]; }
+        else { S->war_curx = S->war_camx; S->war_cury = S->war_camy + WAR_BAR_H*0.5f; }
+        if (!stick) return;   // a button wake spends the press on waking; it does not also tap
+        pe = 0;               // a stick wake still flies this frame, but its buttons wait
+    }
+    // the bar highlight belongs to one structure's selection; any
+    // change of selection — from any device — retires it
+    if (S->war_barhl_s != S->war_selstruct){ S->war_barhl = -1; S->war_barhl_s = S->war_selstruct; }
+    // left stick: the cursor flies (and retires the bar highlight —
+    // A goes back to pressing the field)
+    if (lx || ly){
+        S->war_curx += lx * 540.0f * dt;
+        S->war_cury += ly * 540.0f * dt;
+        S->war_barhl = -1;
+    }
+    // right stick: pan the camera at key speed; the cursor keeps its
+    // SCREEN spot, so its world coords ride along with the pan
+    if (rx || ry){
+        float ox = S->war_camx, oy = S->war_camy;
+        S->war_camx += rx * 430.0f * dt;
+        S->war_camy += ry * 430.0f * dt;
+        war_clamp_cam(S);
+        S->war_curx += S->war_camx - ox;
+        S->war_cury += S->war_camy - oy;
+    }
+    // world clamp first; then the camera edge-follows a cursor that
+    // pushes to within 28u of the view's edge; then the cursor is
+    // clamped back onto the screen (a key/d-pad pan can strand it)
+    if (S->war_curx < WAR_OX) S->war_curx = WAR_OX;
+    if (S->war_curx > WAR_OX+WAR_AW) S->war_curx = WAR_OX+WAR_AW;
+    if (S->war_cury < WAR_OY) S->war_cury = WAR_OY;
+    if (S->war_cury > WAR_OY+WAR_AH) S->war_cury = WAR_OY+WAR_AH;
+    { float csx = (float)vx + vw2/2 + (S->war_curx - S->war_camx);
+      float csy = (float)vy + vh2/2 + (S->war_cury - S->war_camy - WAR_BAR_H*0.5f);
+      if (csx < vx+28) S->war_camx -= (vx+28 - csx);
+      if (csx > vx+vw2-28) S->war_camx += (csx - (vx+vw2-28));
+      if (csy < vy+28) S->war_camy -= (vy+28 - csy);
+      if (csy > vy+vh2-28) S->war_camy += (csy - (vy+vh2-28));   // the bottom margin sits inside the bar strip, so dropping into the bar itself never pans — only pushing off the screen's edge does
+      war_clamp_cam(S);
+      csx = (float)vx + vw2/2 + (S->war_curx - S->war_camx);
+      csy = (float)vy + vh2/2 + (S->war_cury - S->war_camy - WAR_BAR_H*0.5f);
+      if (csx < vx) S->war_curx += (vx - csx);
+      if (csx > vx+vw2) S->war_curx -= (csx - (vx+vw2));
+      if (csy < vy) S->war_cury += (vy - csy);
+      if (csy > vy+vh2) S->war_cury -= (csy - (vy+vh2));
+    }
+    // LB / RB walk the selected structure's command bar
+    if (S->war_selstruct>=0 && (pe & ((1u<<ACT_WPREV)|(1u<<ACT_WNEXT)))){
+        int acts[5], costs[5]; const char *names[5];
+        int n = war_bar_list(S, acts, costs, names);
+        if (n>0){
+            int dir = (pe & (1u<<ACT_WNEXT))? 1 : -1;
+            S->war_barhl = S->war_barhl<0? (dir>0? 0 : n-1) : (S->war_barhl + dir + n) % n;
+            sfx(6);
+        }
+    }
+    // B peels one layer: a pending placement, then the bar
+    // highlight, then the selection itself
+    if (pe & (1u<<ACT_INTERACT)){
+        if (S->war_place>=0){ S->war_place = -1; sfx(6); }
+        else if (S->war_barhl>=0){ S->war_barhl = -1; }
+        else { for (int i=0;i<WAR_MAXU;i++) S->war_usel[i]=0; S->war_selstruct = -1; sfx(6); }
+    }
+    // A: the finger comes down — on the lit bar button if one is
+    // lit, else on the field at the cursor, through the very same
+    // door a real tap uses (same grace gate, same streak ladder)
+    if ((pe & (1u<<ACT_FIRE)) && S->war_grace<=0){
+        if (S->war_barhl>=0){ int hl = S->war_barhl; S->war_barhl = -1; war_bar_activate(pi, hl); }
+        else {
+            int csx = vx + vw2/2 + (int)(S->war_curx - S->war_camx);
+            int csy = vy + vh2/2 + (int)(S->war_cury - S->war_camy - WAR_BAR_H*0.5f);
+            war_handle_tap(pi, csx, csy);
+        }
+    }
+}
 static void war_update(int pi, float dt, const BwIn *in){
     BwSim *S = &BWS[pi]; Buddy *b = &G.bud[pi];
     if (S->war_msgt > 0) S->war_msgt -= dt;
@@ -17565,9 +17909,13 @@ static void war_update(int pi, float dt, const BwIn *in){
         if (in->keys&K_UP) ky-=1; if (in->keys&K_DOWN) ky+=1;
         if (kx || ky){ S->war_camx += (float)kx*430.0f*dt; S->war_camy += (float)ky*430.0f*dt; war_clamp_cam(S); }
     }
-    if (pi==G.my_id && IN.tapped && S->war_grace<=0){ IN.tapped=0; war_handle_tap(pi, IN.tap_x, IN.tap_y); }
+    if (pi==G.my_id && IN.tapped){
+        S->war_curon=0;   // a real tap: the finger/mouse takes the field back (last device wins)
+        if (S->war_grace<=0){ IN.tapped=0; war_handle_tap(pi, IN.tap_x, IN.tap_y); }
+    }
     else if (pi!=G.my_id && in->interact && S->war_grace<=0) war_tap_world(pi, S->war_camx, S->war_camy);
     if (pi==G.my_id && IN.weapon_key>=1 && IN.weapon_key<=5){ war_bar_activate(pi, IN.weapon_key-1); IN.weapon_key=0; }
+    war_pad_update(pi, dt);
     S->war_wavet -= dt;
     if (S->war_wavet <= 0){
         S->war_wavet = war_wave_dt(S->war_region);
@@ -17664,6 +18012,10 @@ static void war_render_bar(int pi, int vx, int vy, int vw2, int vh2){
             if (f<0) f=0; if (f>1) f=1;
             rect_fill(bx+4, by+36, 76, 3, COL(20,18,30));
             rect_fill(bx+4, by+36, (int)(76*f), 3, COL(120,230,90));
+        }
+        if (i==S->war_barhl){   // the pad's LB/RB highlight (v1.16): a bright double frame — A presses THIS button
+            rect_line(bx-2, by+4, 88, 38, COL(255,240,160));
+            rect_line(bx, by+6, 84, 34, COL(255,240,160));
         }
     }
     if (vw2 >= VW){   // the info zone only earns its keep at full width
@@ -17885,9 +18237,21 @@ static void war_render_zones(BwSim *S){
         circle_out(sx, sy, reach, COL(90,160,190));
     }
 }
-// the placement ghost under your finger: green where the build is
-// legal, red where it is not. (Touch gives no hover, so the ghost
-// lives while a finger or mouse button is down.)
+// the placement ghost: green where the build is legal, red where
+// it is not — drawn at a world point, whoever's finger is asking.
+static void war_ghost_at(BwSim *S, float wx, float wy){
+    int kind = S->war_place;
+    if (kind==WAR_S_WALL){ wx = war_snap24(wx, WAR_OX); wy = war_snap24(wy, WAR_OY); }
+    int okp = war_place_ok(S, kind, wx, wy);
+    int sx = SX(wx), sy = SY(wy), rad = WAR_SRAD[kind];
+    war_blend_disc(sx, sy, rad, okp? COL(120,255,120) : COL(255,90,80), 110);
+    circle_out(sx, sy, rad, okp? COL(140,255,140) : COL(255,110,90));
+}
+// the placement ghost under your finger. (Touch gives no hover, so
+// the ghost lives while a finger or mouse button is down.) The pad
+// cursor is a finger too (v1.16): while it is on and no touch point
+// is asking, the ghost hovers at the cursor instead, so a pad player
+// can judge a placement before pressing A.
 static void war_render_ghost(int pi, int vx, int vy, int vw2, int vh2){
     BwSim *S = &BWS[pi];
     if (pi!=G.my_id || S->war_place<0) return;   // the touch points belong to the local player
@@ -17895,14 +18259,10 @@ static void war_render_ghost(int pi, int vx, int vy, int vw2, int vh2){
         if (!IN.tp[i].active || IN.tp[i].y >= vy+vh2-WAR_BAR_H) continue;
         float wx = S->war_camx + (float)(IN.tp[i].x - vx - vw2/2);
         float wy = S->war_camy + WAR_BAR_H*0.5f + (float)(IN.tp[i].y - vy - vh2/2);
-        int kind = S->war_place;
-        if (kind==WAR_S_WALL){ wx = war_snap24(wx, WAR_OX); wy = war_snap24(wy, WAR_OY); }
-        int okp = war_place_ok(S, kind, wx, wy);
-        int sx = SX(wx), sy = SY(wy), rad = WAR_SRAD[kind];
-        war_blend_disc(sx, sy, rad, okp? COL(120,255,120) : COL(255,90,80), 110);
-        circle_out(sx, sy, rad, okp? COL(140,255,140) : COL(255,110,90));
+        war_ghost_at(S, wx, wy);
         return;
     }
+    if (S->war_curon) war_ghost_at(S, S->war_curx, S->war_cury);
 }
 static void war_render(int pi){
     BwSim *S = &BWS[pi]; Buddy *b = &G.bud[pi];
@@ -17982,6 +18342,17 @@ static void war_render(int pi){
         war_draw_unit(S, b, i);
     }
     war_render_ghost(pi, vx, vy, vw2, vh2);
+    if (pi==G.my_id && S->war_curon && S->war_state==1){   // the pad cursor rides above the fog, like the selected units do (v1.16)
+        int csx = SX(S->war_curx), csy = SY(S->war_cury);
+        int cr = 10 + (int)(fsin(G.anim_t*5.0f)*1.5f);
+        circle_out(csx, csy, cr+3, COL(120,100,40));
+        circle_out(csx, csy, cr, COL(255,240,160));
+        line_thick(csx-cr-5, csy, csx-cr+2, csy, 2, COL(255,240,160));
+        line_thick(csx+cr-2, csy, csx+cr+5, csy, 2, COL(255,240,160));
+        line_thick(csx, csy-cr-5, csx, csy-cr+2, 2, COL(255,240,160));
+        line_thick(csx, csy+cr-2, csx, csy+cr+5, 2, COL(255,240,160));
+        disc_fill(csx, csy, 2, COL(255,240,160));
+    }
     if (S->war_ordt > 0){
         int sx = SX(S->war_ordx), sy = SY(S->war_ordy);
         int r = 6 + (int)((0.5f - S->war_ordt) * 14.0f);
@@ -18435,6 +18806,9 @@ __attribute__((export_name("act2"))) void exp_act2(int a, int down){
     else IN.act2_held &= ~(1u<<a);
 }
 __attribute__((export_name("pads"))) void exp_pads(int n){ IN.pad_count = n; }
+__attribute__((export_name("pad_axes"))) void exp_pad_axes(float lx, float ly, float rx, float ry){
+    IN.pad_ax[0]=lx; IN.pad_ax[1]=ly; IN.pad_ax[2]=rx; IN.pad_ax[3]=ry;   // web Gamepad axes: +Y is down
+}
 __attribute__((export_name("text_mode"))) int exp_text_mode(void){
     // nonzero while a text field owns typing: 1/2 = the menu's name/IP
     // fields, 3 = the Whales Only code entry. The web shell watches
@@ -18828,6 +19202,9 @@ __attribute__((export_name("dbg_wartrain"))) int exp_dbg_wartrain(int kind){ int
     war_spawn_unit(S, kind, S->war_sx[s] + fcos(a)*(WAR_SRAD[S->war_stype[s]]+16), S->war_sy[s] + fsin(a)*(WAR_SRAD[S->war_stype[s]]+16));
     return war_count_type(S, kind); }
 __attribute__((export_name("dbg_warplace"))) int exp_dbg_warplace(void){ int id = G.my_id>=0? G.my_id : 0; return BWS[id].war_place; }
+__attribute__((export_name("dbg_warcur"))) int exp_dbg_warcur(void){ int id = G.my_id>=0? G.my_id : 0; BwSim *S = &BWS[id];
+    if (!S->war_curon) return -1; return (int)(S->war_curx-WAR_OX)*10000 + (int)(S->war_cury-WAR_OY); }   // pad cursor: -1 off, else arena-local x*10000+y (dbg_warunitxy packing)
+__attribute__((export_name("dbg_warbarhl"))) int exp_dbg_warbarhl(void){ int id = G.my_id>=0? G.my_id : 0; return BWS[id].war_barhl; }
 __attribute__((export_name("dbg_warterrain"))) int exp_dbg_warterrain(void){ int id = G.my_id>=0? G.my_id : 0; return BWS[id].war_tn; }
 __attribute__((export_name("dbg_warfeatn"))) int exp_dbg_warfeatn(void){ int id = G.my_id>=0? G.my_id : 0; BwSim *S = &BWS[id]; int n=0;
     for (int t=0;t<S->war_tn;t++) if (S->war_thp[t]>0) n++; return n; }   // debris still standing
@@ -19347,6 +19724,10 @@ static void pad2_set(int a, int down){
 static void win32_pad_apply(XIState *s, int ch){
     u16 b = s->buttons;
     void (*set)(int,int) = ch? pad2_set : pad_set;
+    if (ch==0){   // pad 1's raw sticks for WAR!'s cursor (v1.16); XInput's Y is up-positive, the game's axis order wants down-positive
+        IN.pad_ax[0] = s->lx/32767.0f; IN.pad_ax[1] = -s->ly/32767.0f;
+        IN.pad_ax[2] = s->rx/32767.0f; IN.pad_ax[3] = -s->ry/32767.0f;
+    }
     set(ACT_UP,    (b&0x0001) || s->ly>12000);
     set(ACT_DOWN,  (b&0x0002) || s->ly<-12000);
     set(ACT_LEFT,  (b&0x0004) || s->lx<-12000);
@@ -19376,6 +19757,7 @@ static void win32_pad_poll(void){
         count++;
         win32_pad_apply(&s, ch++);
     }
+    if (!count) IN.pad_ax[0]=IN.pad_ax[1]=IN.pad_ax[2]=IN.pad_ax[3]=0;   // no pad: no phantom sticks
     IN.pad_count = count;
 }
 int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR cmd, int show){
@@ -19683,6 +20065,10 @@ static int linux_js_drain(int *fdp, const char *path, int *retry, int *btn, int 
 }
 static void linux_pad_apply(int *btn, int *ax, int ch){
     void (*set)(int,int) = ch? pad2_set : pad_set;
+    if (ch==0){   // pad 1's raw sticks for WAR!'s cursor (v1.16); js axes 0/1 are the left stick (down-positive, as the digital map below reads them), 3/4 the right stick on the common mapping
+        IN.pad_ax[0] = ax[0]/32767.0f; IN.pad_ax[1] = ax[1]/32767.0f;
+        IN.pad_ax[2] = ax[3]/32767.0f; IN.pad_ax[3] = ax[4]/32767.0f;
+    }
     set(ACT_UP,    ax[1]<-12000 || ax[7]<-12000);
     set(ACT_DOWN,  ax[1]>12000  || ax[7]>12000);
     set(ACT_LEFT,  ax[0]<-12000 || ax[6]<-12000);
@@ -19701,6 +20087,7 @@ static void linux_pad_poll(void){
     int n=0;
     if (linux_js_drain(&js_fd, "/dev/input/js0", &js_retry, js_btn, js_ax)){ linux_pad_apply(js_btn, js_ax, 0); n++; }
     if (linux_js_drain(&js2_fd, "/dev/input/js1", &js2_retry, js2_btn, js2_ax)){ linux_pad_apply(js2_btn, js2_ax, 1); n++; }
+    if (!n) IN.pad_ax[0]=IN.pad_ax[1]=IN.pad_ax[2]=IN.pad_ax[3]=0;   // no pad: no phantom sticks
     IN.pad_count = n;
 }
 int main(int argc, char **argv){

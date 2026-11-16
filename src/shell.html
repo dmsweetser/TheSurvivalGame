@@ -369,6 +369,13 @@ function poll_pad(){
   // while gamepads are plugged in, the line under the game speaks gamepad
   if (pads[0]) apply_pad(pads[0], pad_set); else clear_pad(padPrev, pad_set);
   if (pads[1]) apply_pad(pads[1], pad2_set); else clear_pad(padPrev2, pad2_set);
+  // pad 1's raw analog sticks, every poll (WAR!'s pad cursor flies on
+  // these — the digital action map above can't express a cursor);
+  // zeros while no pad is connected
+  if (EX.pad_axes){
+    const a = pads[0]? pads[0].axes : null;
+    EX.pad_axes(a? (a[0]||0) : 0, a? (a[1]||0) : 0, a? (a[2]||0) : 0, a? (a[3]||0) : 0);
+  }
 }
 // ---------- display sizing: letterbox the 640x360 frame into the window.
 // In the Android app (#apk) leave a small margin around the edges; the

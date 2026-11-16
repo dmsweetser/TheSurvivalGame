@@ -34,10 +34,14 @@ the WAR! sentence below grew to match), and again for
 v1.15 ("OPEN GROUND" — WAR! building is adjacency-based
 on a more generous claim, and battlefield debris can be
 attacked and destroyed; the WAR! sentence below grew
-again to match). Character counts
+again to match), and again for v1.16 ("STICKS AND
+STRINGS" — WAR! is fully playable on a gamepad, and every
+Arcade cabinet now plays its own classical piece; the
+WAR! sentence below grew again and a music sentence was
+added). Character counts
 verified against Play limits (title ≤ 30, short
 description ≤ 80, full description ≤ 4,000).
-Copy describes the current build (v1.15, 2026-11-16) and only what the Android
+Copy describes the current build (v1.16, 2026-11-16) and only what the Android
 build actually contains — no Whales Only purchase links (buying
 is web-only; the Android build has none), no host co-op claims
 (hosting is a native-build feature).
@@ -112,6 +116,14 @@ THREE WAYS TO PLAY
   again — and when a tree, a rock or a wrecked terminal
   stands in your way, order your units to smash it: every
   piece of debris on the field can be broken and cleared.
+  WAR! also takes orders from a gamepad now — a stick-driven
+  cursor, musters on double and triple presses, and the
+  command bar on the bumpers. And every cabinet has its own
+  orchestra: the Flight of the Bumblebee for the Run, the
+  Ride of the Valkyries for WAR!, Greensleeves in the Castle,
+  the Mountain King creeping through Entrances, the can-can
+  for Tank Rescue, the William Tell gallop for the Cart, and
+  Sheep May Safely Graze over Buddy Craft.
 
 TOUCH-FIRST ON ANDROID
 Full touch controls (drag or floating stick), plus keyboard and
