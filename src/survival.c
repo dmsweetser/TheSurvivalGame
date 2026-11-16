@@ -9973,6 +9973,10 @@ typedef struct {
     // 3 cable spool, 4 rubble. Fog cells are 40u: 0 unexplored,
     // 1 explored (permanent for the battle), 2 currently visible.
     float war_tx[72], war_ty[72]; int war_ttype[72], war_trad[72], war_tn;
+    // WAR! round 3 (Nov 16, Daniel's playtest): debris has hit points —
+    // your combat units can shoot, smash and roll over it. war_tdeadt is
+    // the fading scorch mark a destroyed feature leaves behind.
+    float war_thp[72]; int war_tmaxhp[72]; float war_tdeadt[72];
     unsigned char war_fog[40*30];
 } BwSim;
 static BwSim BWS[MAXP];
@@ -16699,6 +16703,9 @@ static const int WAR_BUILD_COST[6] = { 0, 150, 100, 25, 0, 200 }; // patch bay /
 // RAM Flats neon, Cable Jungle deep green, the Depths ashen violet)
 static const u32 WAR_TREE_COL[8] = { COL(46,120,52), COL(96,124,44), COL(110,96,58), COL(120,74,44),
                                      COL(190,220,230), COL(64,240,190), COL(34,110,60), COL(96,80,140) };
+// debris hit points by terrain kind: 0 tree / 1 rock / 2 terminal /
+// 3 spool / 4 rubble — rubble crumbles fast, rock takes a beating
+static const int WAR_THP[5] = { 35, 90, 55, 45, 25 };
 static const u32 WAR_SPCOL[6] = { COL(240,180,90), COL(250,150,70), COL(150,105,70), COL(90,180,170), COL(150,150,160), COL(190,200,210) };
 static int war_u_side(int type){ return (type==WAR_U_CRAWL || type==WAR_U_SPIT)? 1 : 0; }
 static int war_u_hp(int type, int region){
@@ -16729,12 +16736,21 @@ static float war_u_sight(int type){   // fog of war: how far a friendly unit see
 static int war_u_combat(int type){ return type==WAR_U_MELEE || type==WAR_U_RANGED || type==WAR_U_SCOUT || type==WAR_U_SIEGE; }
 static int war_unit_alive(BwSim *S, int i){ return i>=0 && i<WAR_MAXU && S->war_uhp[i]>0; }
 static int war_struct_alive(BwSim *S, int i){ return i>=0 && i<WAR_MAXS && S->war_shp[i]>0; }
+// Target refs: >0 is a unit (index+1), <0 a structure (-(index+1)),
+// and <= -100 a terrain feature — debris — encoded -(100 + t + 1),
+// clear of every structure ref (-1..-28).
+#define WAR_TREF(t) (-(100 + (t) + 1))
+static int war_ref_feat(int ref){ return ref <= -100? -ref - 101 : -1; }
 static int war_ref_alive(BwSim *S, int ref, float *x, float *y){
+    int ft = war_ref_feat(ref);
+    if (ft>=0){ if (ft>=S->war_tn || S->war_thp[ft]<=0) return 0; *x=S->war_tx[ft]; *y=S->war_ty[ft]; return 1; }
     if (ref>0){ int i=ref-1; if (!war_unit_alive(S,i)) return 0; *x=S->war_ux[i]; *y=S->war_uy[i]; return 1; }
     if (ref<0){ int i=-ref-1; if (!war_struct_alive(S,i)) return 0; *x=S->war_sx[i]; *y=S->war_sy[i]; return 1; }
     return 0;
 }
 static float war_ref_radius(BwSim *S, int ref){
+    int ft = war_ref_feat(ref);
+    if (ft>=0) return ft<S->war_tn? (float)S->war_trad[ft] : 0.0f;
     if (ref>0){ int t = S->war_utype[ref-1]; return t==WAR_U_SIEGE? 14.0f : t==WAR_U_SCOUT? 11.0f : 9.0f; }
     if (ref<0) return (float)WAR_SRAD[S->war_stype[-ref-1]];
     return 0.0f;
@@ -16833,6 +16849,7 @@ static void war_gen_terrain(BwSim *S, int region){
         int i = S->war_tn++;
         S->war_tx[i]=x; S->war_ty[i]=y; S->war_ttype[i]=kind;
         S->war_trad[i] = 10 + (int)(hash2(t, 5, seed) % 5u);   // 10..14
+        S->war_tmaxhp[i] = WAR_THP[kind]; S->war_thp[i] = (float)WAR_THP[kind]; S->war_tdeadt[i] = 0;
     }
 }
 static int war_spawn_unit(BwSim *S, int type, float x, float y){
@@ -16903,6 +16920,20 @@ static void war_hurt_struct(int pi, int i, int dmg){
         if (S->war_selstruct == i) S->war_selstruct = -1;
         if (S->war_state == 1 && S->war_stype[i]==WAR_S_HQ) war_lose(pi);
         else if (S->war_state == 1 && S->war_stype[i]==WAR_S_HIVE && war_hives_alive(S)==0) war_win(pi);
+    }
+}
+// debris damage (Daniel, Nov 16): terrain features take plain damage
+// from your combat units — never the siege gun's structure bonus —
+// and at 0 hp they are gone for the rest of the battle: movement
+// frees up at once and all that remains is a scorch mark that fades.
+static void war_hurt_terrain(int pi, int t, int dmg){
+    BwSim *S = &BWS[pi];
+    if (t<0 || t>=S->war_tn || S->war_thp[t]<=0) return;
+    S->war_thp[t] -= (float)dmg;
+    if (S->war_thp[t] <= 0){
+        S->war_thp[t] = 0;
+        S->war_tdeadt[t] = 6.0f;
+        if (pi==G.my_id) sfx(17);   // the wall-crunch: debris gives way
     }
 }
 static void war_fire(BwSim *S, int side, float x, float y, int target_ref, int dmg){
@@ -17020,9 +17051,15 @@ static void war_unit_update(int pi, int i, float dt){
             if (d <= rng + 2.0f && S->war_uatk[i] <= 0){
                 S->war_uatk[i] = war_u_rate(type);
                 int dmg = war_u_dmg(type, S->war_region);
-                if (type==WAR_U_SIEGE && tref<0) dmg *= 2;   // the siege gun is built to crack structures — hives above all
+                int ft = war_ref_feat(tref);
+                // the siege gun is built to crack STRUCTURES — hives
+                // above all. Debris is not a structure: trees, rocks
+                // and rubble take the plain rate, never the x2.
+                if (type==WAR_U_SIEGE && tref<0 && ft<0) dmg *= 2;
                 if (type==WAR_U_MELEE || type==WAR_U_CRAWL){
-                    if (tref>0) war_hurt_unit(pi, tref-1, dmg); else war_hurt_struct(pi, -tref-1, dmg);
+                    if (tref>0) war_hurt_unit(pi, tref-1, dmg);
+                    else if (ft>=0) war_hurt_terrain(pi, ft, dmg);
+                    else war_hurt_struct(pi, -tref-1, dmg);
                 } else war_fire(S, side, x, y, tref, dmg);
             }
             return;
@@ -17103,7 +17140,8 @@ static void war_separate(BwSim *S){
                 else { S->war_ux[i] = S->war_sx[s]+dx/d*rad; S->war_uy[i] = S->war_sy[s]+dy/d*rad; }
             }
         }
-        for (int t=0;t<S->war_tn;t++){   // terrain blocks feet and wheels, never shots
+        for (int t=0;t<S->war_tn;t++){   // terrain blocks feet and wheels, never shots — and felled debris blocks nothing
+            if (S->war_thp[t]<=0) continue;
             float rad = (float)S->war_trad[t] + 9.0f;
             float dx=S->war_ux[i]-S->war_tx[t], dy=S->war_uy[i]-S->war_ty[t];
             float d2=dx*dx+dy*dy;
@@ -17129,7 +17167,9 @@ static void war_proj_update(int pi, float dt){
         float dx=tx-S->war_px[i], dy=ty-S->war_py[i], d=fsqrt(dx*dx+dy*dy);
         float sp = S->war_pside[i]==0? 320.0f : 250.0f;
         if (d <= sp*dt + 7.0f){
+            int ft = war_ref_feat(S->war_ptar[i]);
             if (S->war_ptar[i]>0) war_hurt_unit(pi, S->war_ptar[i]-1, S->war_pdmg[i]);
+            else if (ft>=0) war_hurt_terrain(pi, ft, S->war_pdmg[i]);
             else war_hurt_struct(pi, -S->war_ptar[i]-1, S->war_pdmg[i]);
             S->war_pt[i]=0;
         } else { S->war_px[i] += dx/d*sp*dt; S->war_py[i] += dy/d*sp*dt; }
@@ -17233,19 +17273,25 @@ static void war_bar_activate(int pi, int slot){
     war_note(S, act==1? "TAP GROUND TO PLACE THE PATCH BAY." : act==2? "TAP GROUND TO PLACE THE ZAPPER TOWER." : "TAP GROUND TO PLACE THE FIREWALL.");
 }
 // the property rule (Daniel, Nov 16): you build on your own land.
-// Every friendly structure radiates a property zone — its radius + 44
-// for buildings, + 30 for a firewall segment — and a placement is
-// legal only when the new structure's CENTRE lands inside some zone.
-// Every placed structure extends the property, so a firewall line (or
-// a chain of buildings) can grow outward step by step.
+// Every friendly structure radiates a property zone — its radius + 76
+// for buildings, + 52 for a firewall segment. Round 3 (Daniel, later
+// that day: "make the build region more generous, and require only
+// that the new build be adjacent to the current area"): a placement
+// is legal when the new structure's FOOTPRINT touches the property —
+// its centre within (zone radius + its own radius) of some friendly
+// structure's centre. The build may sit mostly outside the zone as
+// long as it touches it, and every placed structure extends the
+// property, so a firewall line (or a chain of buildings) can grow
+// outward step by step.
 static float war_zone_rad(int kind){
-    return kind==WAR_S_WALL? (float)WAR_SRAD[kind] + 30.0f : (float)WAR_SRAD[kind] + 44.0f;
+    return kind==WAR_S_WALL? (float)WAR_SRAD[kind] + 52.0f : (float)WAR_SRAD[kind] + 76.0f;
 }
-static int war_in_property(BwSim *S, float x, float y){
+static int war_in_property(BwSim *S, int kind, float x, float y){
+    float own = (float)WAR_SRAD[kind];
     for (int s=0;s<WAR_MAXS;s++){
         if (S->war_shp[s]<=0 || S->war_sside[s]!=0) continue;
-        float dx=x-S->war_sx[s], dy=y-S->war_sy[s], zr = war_zone_rad(S->war_stype[s]);
-        if (dx*dx+dy*dy <= zr*zr) return 1;
+        float dx=x-S->war_sx[s], dy=y-S->war_sy[s], rr = war_zone_rad(S->war_stype[s]) + own;
+        if (dx*dx+dy*dy <= rr*rr) return 1;
     }
     return 0;
 }
@@ -17269,13 +17315,14 @@ static int war_place_space(BwSim *S, int kind, float x, float y){
         if (dx*dx+dy*dy < rr*rr) return 0;
     }
     for (int t=0;t<S->war_tn;t++){
+        if (S->war_thp[t]<=0) continue;   // cleared ground can be built on
         float dx=x-S->war_tx[t], dy=y-S->war_ty[t], rr = rad + (float)S->war_trad[t] + 4.0f;
         if (dx*dx+dy*dy < rr*rr) return 0;
     }
     return 1;
 }
 static int war_place_ok(BwSim *S, int kind, float x, float y){
-    return war_place_space(S, kind, x, y) && war_in_property(S, x, y);
+    return war_place_space(S, kind, x, y) && war_in_property(S, kind, x, y);
 }
 static float war_snap24(float w, float origin){
     float l = w - origin;
@@ -17287,7 +17334,7 @@ static void war_try_place(int pi, float wx, float wy){
     if (S->war_bits < cost){ sfx(16); war_note(S, "NOT ENOUGH BITS!"); S->war_place=-1; return; }
     if (kind==WAR_S_WALL){ wx = war_snap24(wx, WAR_OX); wy = war_snap24(wy, WAR_OY); }   // segments align on the grid, so lines join up
     if (!war_place_space(S, kind, wx, wy)){ sfx(16); war_note(S, "NO ROOM THERE!"); return; }
-    if (!war_in_property(S, wx, wy)){ sfx(16); war_note(S, "TOO FAR FROM YOUR BASE - BUILD ON YOUR OWN LAND!"); return; }
+    if (!war_in_property(S, kind, wx, wy)){ sfx(16); war_note(S, "TOO FAR FROM YOUR BASE - BUILD ON YOUR OWN LAND!"); return; }
     S->war_bits -= cost;
     int s = war_spawn_struct(S, kind, 0, wx, wy);
     S->war_place = -1;
@@ -17367,17 +17414,34 @@ static void war_tap_world(int pi, float wx, float wy){
             S->war_selstruct=s; sfx(6); return;
         }
     }
-    int eref=0; float ed=1e18f;
+    int eref=0; float ed=1e18f, edist=1e18f;
     for (int i=0;i<WAR_MAXU;i++){
         if (S->war_uhp[i]<=0 || war_u_side(S->war_utype[i])!=1) continue;
         float dx=wx-S->war_ux[i], dy=wy-S->war_uy[i], d2=dx*dx+dy*dy;
-        if (d2<18.0f*18.0f && d2<ed){ ed=d2; eref=i+1; }
+        if (d2<18.0f*18.0f && d2<ed){ ed=d2; edist=fsqrt(d2); eref=i+1; }
     }
     for (int s=0;s<WAR_MAXS;s++){
         if (S->war_shp[s]<=0 || S->war_sside[s]!=1) continue;
         float dx=wx-S->war_sx[s], dy=wy-S->war_sy[s], rr=(float)WAR_SRAD[S->war_stype[s]]+8.0f;
-        if (dx*dx+dy*dy < rr*rr){ eref=-(s+1); break; }
+        if (dx*dx+dy*dy < rr*rr){ eref=-(s+1); edist=fsqrt(dx*dx+dy*dy); break; }
     }
+    // debris (Daniel, Nov 16): a tap on a terrain feature is an attack
+    // order on it — your combat units can clear the field — unless an
+    // enemy unit or structure sits even closer to the tap point.
+    // Harvesters in the selection just walk there, as for any tap.
+    { int fref=0; float fdist=1e18f;
+      for (int t=0;t<S->war_tn;t++){
+          if (S->war_thp[t]<=0) continue;
+          float dx=wx-S->war_tx[t], dy=wy-S->war_ty[t], rr=(float)S->war_trad[t]+6.0f, d2=dx*dx+dy*dy;
+          if (d2 < rr*rr){ float d=fsqrt(d2); if (d<fdist){ fdist=d; fref=WAR_TREF(t); } }
+      }
+      if (fref && (!eref || fdist < edist)){
+          if (war_sel_count(S)>0){
+              war_order_attack(S, fref);
+              S->war_ordx=wx; S->war_ordy=wy; S->war_ordt=0.5f; sfx(6);
+          }
+          return;
+      } }
     if (eref){
         if (war_sel_count(S)>0){
             war_order_attack(S, eref);
@@ -17486,6 +17550,7 @@ static void war_update(int pi, float dt, const BwIn *in){
         return;
     }
     S->war_t += dt;
+    for (int t=0;t<S->war_tn;t++) if (S->war_tdeadt[t] > 0) S->war_tdeadt[t] -= dt;   // scorch marks fade
     if (in->exit_){   // Esc in a battle: fall back to the map, no penalty
         war_clear_field(S);
         S->war_state=0; S->war_grace=0.3f;
@@ -17764,6 +17829,14 @@ static void war_draw_terrain(BwSim *S, int t){
     float x = S->war_tx[t], y = S->war_ty[t];
     int sx = SX(x), sy = SY(y), kind = S->war_ttype[t], rad = S->war_trad[t];
     u32 vary = hash2(t, 11, 0x7E44u);
+    if (S->war_thp[t]<=0){   // destroyed: only the fading scorch remains
+        if (S->war_tdeadt[t]>0){
+            ellipse_fill(sx, sy + rad*3/4, rad, rad/3, COL(28,24,22));
+            disc_fill(sx - rad/3, sy + rad/2, 2, COL(44,38,32));
+            disc_fill(sx + rad/4, sy + rad*2/3, 2, COL(38,32,28));
+        }
+        return;
+    }
     ellipse_fill(sx, sy + rad*3/4, rad, rad/3, COL(16,14,24));
     if (kind==0){   // a tree: trunk, then a two-tone canopy in the region's tint
         u32 can = WAR_TREE_COL[S->war_region];
@@ -17791,17 +17864,25 @@ static void war_draw_terrain(BwSim *S, int t){
         tri_fill(sx - 2, sy + 4, sx + rad/3, sy - rad/3, sx + rad, sy + 4, COL(88,80,74));
         disc_fill(sx + 2, sy + 1, 2, COL(130,120,108));
     }
+    if (S->war_thp[t] < (float)S->war_tmaxhp[t])   // the house health bar, same as units and buildings
+        war_hp_bar(sx - rad, sy - rad - 12, rad*2, S->war_thp[t] / (float)S->war_tmaxhp[t], 0);
 }
 // the property tint, drawn while a build is in hand: your land glows
 // softly, so you can see exactly how far your building rights reach.
+// The faint outer ring is the adjacency reach for the build in hand:
+// its footprint may poke that far past the zone edge and still count
+// as touching your land (the ghost is the exact judge either way).
 static void war_render_zones(BwSim *S){
     if (S->war_place<0) return;
     for (int s=0;s<WAR_MAXS;s++){
         if (S->war_shp[s]<=0 || S->war_sside[s]!=0) continue;
         int sx = SX(S->war_sx[s]), sy = SY(S->war_sy[s]);
         int zr = (int)war_zone_rad(S->war_stype[s]);
+        int reach = zr + WAR_SRAD[S->war_place];
+        war_blend_disc(sx, sy, reach, COL(120,220,255), 12);
         war_blend_disc(sx, sy, zr, COL(120,220,255), 34);
         circle_out(sx, sy, zr, COL(120,220,255));
+        circle_out(sx, sy, reach, COL(90,160,190));
     }
 }
 // the placement ghost under your finger: green where the build is
@@ -17896,10 +17977,9 @@ static void war_render(int pi){
           if (f==0) rect_fill(sx, sy, 41, 41, COL(6,6,12));
           else blend_rect(sx, sy, 41, 41, COL(4,4,10), 145);
       } }
-    for (int i=0;i<WAR_MAXU;i++){   // selection rings stay bright above the fog
-        if (S->war_uhp[i]<=0 || !S->war_usel[i]) continue;
-        int t = S->war_utype[i];
-        circle_out(SX(S->war_ux[i]), SY(S->war_uy[i])+4, t==WAR_U_SIEGE? 20 : t==WAR_U_SCOUT? 15 : 12, COL(140,255,140));
+    for (int i=0;i<WAR_MAXU;i++){   // selected units redraw above the fog, marker disc and all —
+        if (S->war_uhp[i]<=0 || !S->war_usel[i]) continue;   // a bare circle_out here would bury the buddy under its own marker
+        war_draw_unit(S, b, i);
     }
     war_render_ghost(pi, vx, vy, vw2, vh2);
     if (S->war_ordt > 0){
@@ -18749,6 +18829,18 @@ __attribute__((export_name("dbg_wartrain"))) int exp_dbg_wartrain(int kind){ int
     return war_count_type(S, kind); }
 __attribute__((export_name("dbg_warplace"))) int exp_dbg_warplace(void){ int id = G.my_id>=0? G.my_id : 0; return BWS[id].war_place; }
 __attribute__((export_name("dbg_warterrain"))) int exp_dbg_warterrain(void){ int id = G.my_id>=0? G.my_id : 0; return BWS[id].war_tn; }
+__attribute__((export_name("dbg_warfeatn"))) int exp_dbg_warfeatn(void){ int id = G.my_id>=0? G.my_id : 0; BwSim *S = &BWS[id]; int n=0;
+    for (int t=0;t<S->war_tn;t++) if (S->war_thp[t]>0) n++; return n; }   // debris still standing
+__attribute__((export_name("dbg_warfeat"))) int exp_dbg_warfeat(int t){ int id = G.my_id>=0? G.my_id : 0; BwSim *S = &BWS[id];
+    if (t<0 || t>=S->war_tn) return -1; return (int)S->war_thp[t]*100 + S->war_ttype[t]; }   // hp*100 + kind (0 tree / 1 rock / 2 terminal / 3 spool / 4 rubble)
+__attribute__((export_name("dbg_warfeatxy"))) int exp_dbg_warfeatxy(int t){ int id = G.my_id>=0? G.my_id : 0; BwSim *S = &BWS[id];
+    if (t<0 || t>=S->war_tn) return -1; return (int)(S->war_tx[t]-WAR_OX)*10000 + (int)(S->war_ty[t]-WAR_OY); }
+__attribute__((export_name("dbg_warfeatpos"))) int exp_dbg_warfeatpos(int t){ int id = G.my_id>=0? G.my_id : 0; BwSim *S = &BWS[id];
+    if (t<0 || t>=S->war_tn) return -1;
+    int vx, vy, vw2, vh2; p1_view_rect(&vx, &vy, &vw2, &vh2);
+    int sx = vx + vw2/2 + (int)(S->war_tx[t] - S->war_camx);
+    int sy = vy + vh2/2 + (int)(S->war_ty[t] - S->war_camy - WAR_BAR_H/2);
+    if (sx<0) sx=0; if (sy<0) sy=0; return sx + sy*10000; }
 __attribute__((export_name("dbg_warfog"))) int exp_dbg_warfog(int x, int y){ int id = G.my_id>=0? G.my_id : 0; BwSim *S = &BWS[id];
     if (S->war_state==0) return -1; return war_fog_at(S, WAR_OX + (float)x, WAR_OY + (float)y); }
 __attribute__((export_name("dbg_warmove"))) int exp_dbg_warmove(int i, int x, int y){ int id = G.my_id>=0? G.my_id : 0; BwSim *S = &BWS[id];

@@ -1,10 +1,43 @@
 # THE SURVIVAL GAME — Google Play listing copy (ready to paste)
 
 Prepared 2026-11-07; Banzai World / Arcade section revised
-2026-11-10 for the "THE ARCADE OPENS" build (v1.3). Character
-counts verified against Play limits (title ≤ 30, short
+2026-11-10 for the "THE ARCADE OPENS" build (v1.3), the
+Arcade section revised again 2026-11-14 for the v1.5 build
+("A CASTLE IN THE ARCADE" — fifth cabinet, CASTLE), and again
+the same day for v1.6 ("START YOUR ENGINES" — sixth cabinet,
+SUPER BUDDY CART, and a second row of cabinets), and again
+the same day for v1.7 ("MODE 7" — SUPER BUDDY CART rebuilt
+into a behind-the-kart SNES-style racer driven by the Banzai
+Buddies themselves, and TANK RESCUE gentler with switchable
+grenades). Version line updated the same day for v1.9
+("THE BUDDIES TAKE THE WHEEL" — the v1.7 game build
+renumbered at Daniel's direction; no game-code change, so
+the copy below is unchanged), and again for v1.10
+("FIRE IS GO" — the kart overhaul build: hold FIRE to go,
+prettier track; the copy below never described the kart
+control scheme, so it is still unchanged), and again for
+v1.11 ("OUT FROM THE EPICENTER" — Run and Cart aligned to
+the main game's 8 regions, the kart Grand Prix, craft
+search, the castle key lock; the copy below describes none
+of those specifics, so it is still unchanged), and again
+for v1.12 ("STEADY FEET" — the Run slowed with a touch
+deck under it, the kart grandstand resized, the wall
+health pool made exact; the copy below describes none of
+those specifics either, so it is still unchanged), and
+again for v1.13 ("WAR!" — a seventh Arcade cabinet: a
+real-time strategy game of harvesting, base-building and
+region conquest; this time the Arcade list below DID
+change — it gained WAR!), and again for v1.14 ("WAR
+MACHINES" — WAR! gained vehicles, property-line building,
+connected firewalls, terrain and permanent fog of war;
+the WAR! sentence below grew to match), and again for
+v1.15 ("OPEN GROUND" — WAR! building is adjacency-based
+on a more generous claim, and battlefield debris can be
+attacked and destroyed; the WAR! sentence below grew
+again to match). Character counts
+verified against Play limits (title ≤ 30, short
 description ≤ 80, full description ≤ 4,000).
-Copy describes the current Nov 10 build and only what the Android
+Copy describes the current build (v1.15, 2026-11-16) and only what the Android
 build actually contains — no Whales Only purchase links (buying
 is web-only; the Android build has none), no host co-op claims
 (hosting is a native-build feature).
@@ -57,7 +90,28 @@ THREE WAYS TO PLAY
   and camping; and TANK RESCUE, where your buddy drives a tank
   through scrolling battlefields, cracks open prison huts to free
   captives, and takes on a fortress-core boss at the end of
-  every level.
+  every level — now with switchable grenades that clear cover
+  in an area blast; and CASTLE, a DOS-castle treasure hunt in the
+  spirit of the 1984 original — fetch the sword, brave the
+  Dungeon for the gate key, gather the 13 treasures, and escape
+  through the courtyard gate; and SUPER BUDDY CART, a three-lap
+  kart racer in SNES Mode 7 style, viewed from right behind
+  your kart — and the driver in it is your own Banzai Buddy,
+  racing five rival buddies on a dressed circuit with boost
+  pads, drift mini-boosts, and a best finish and time with
+  your name on them; and WAR!, a real-time strategy game —
+  harvest bits from code nodes, raise a Compiler Core base,
+  train melee and ranged buddies, hold the line with zapper
+  towers and firewalls, raze the bug hives, and conquer all
+  eight regions of the world map one battle at a time —
+  building on land your structures claim, each new build
+  needing only to touch it, behind
+  firewalls that join into real barriers, with an Assembly
+  Plant rolling out scout buggies and siege tanks, under a
+  fog of war that lifts as you explore and never falls
+  again — and when a tree, a rock or a wrecked terminal
+  stands in your way, order your units to smash it: every
+  piece of debris on the field can be broken and cleared.
 
 TOUCH-FIRST ON ANDROID
 Full touch controls (drag or floating stick), plus keyboard and
@@ -74,9 +128,11 @@ How heavy can your hat get?
 
 ## Assets in this packet
 
-- `assets/icon-512.png` — 512×512, generated from the locked
-  icon master (`~/workspace/survival-game/android/icon-master-1024.png`,
-  Nov 3 — the orange spider, rear abdomen removed, unchanged since).
+- `assets/icon-512.png` — 512×512, regenerated 2026-11-14 from
+  the current icon master
+  (`~/workspace/survival-game/android/icon-master-1024.png` — the
+  orange spider with the thicker, darker frown Daniel asked for
+  that morning, so the listing icon matches the shipped app icon).
 - `assets/feature-graphic-1024x500.png` — 1024×500, 24-bit, no alpha.
 - `assets/screenshot-01..07-*.png` — phone screenshots, 1920×1080
   (see below).
@@ -91,6 +147,12 @@ Every capture was visually verified against the scene it claims
 to show. Seven shots (Play allows 2–8), each exactly 1920×1080 PNG:
 
 - `assets/screenshot-01-title.png` — title screen and menu.
+  RECAPTURED 2026-11-14 from the v1.5 build (game HTML md5
+  8d6dd084c977278108a5985e796e5d99) via `tests/playtitleshot.js`:
+  the trimmed header band (150→96px), the menu stack shifted up,
+  and the records strip clear at the bottom are all visible;
+  visually verified against the Nov 9 capture it replaced.
+  The other six shots depict scenes v1.5 did not visibly change.
 - `assets/screenshot-02-combat.png` — Free Play combat in Clean Code
   Meadows wearing a 71 KG carcass hat, bugs engaged, buddy alongside.
 - `assets/screenshot-03-mall.png` — Bug Mall interior: Bug Bank,

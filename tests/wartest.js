@@ -15,7 +15,11 @@
 // / 2 visible), dbg_warmove(i,x,y) (teleport), dbg_warbuildxy (exact-
 // spot build, walls grid-snapped, property bypassed), and touch_point
 // drags for the pan checks. Struct kinds: 1 patch, 2 zapper, 3 wall,
-// 5 assembly plant.
+// 5 assembly plant. Round 3 (Nov 16) adds the debris hooks:
+// dbg_warfeatn() (features still standing), dbg_warfeat(t)
+// (hp*100 + kind; kinds 0 tree / 1 rock / 2 terminal / 3 spool /
+// 4 rubble), dbg_warfeatxy(t) and dbg_warfeatpos(t) (packed coords,
+// same conventions as the unit ones).
 const { chromium } = require('playwright-core');
 const EXE = process.env.HOME + '/.cache/ms-playwright/chromium-1248/chrome-linux64/chrome';
 const URL = 'http://localhost:8903/the-survival-game.html';
@@ -219,19 +223,51 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
 
   // the property rule through the REAL tap flow: the Core's bar arms
   // a Zapper; a tap way outside your land is refused (and you stay in
-  // placement); a tap inside the Core's zone builds.
+  // placement); a tap inside the Core's zone builds. Round 3: zones
+  // grew (Core 34+76 = 110) and only ADJACENCY is required — the new
+  // build's footprint must touch the property (centre within zone +
+  // its own radius: 110 + 14 = 124 for a Zapper off the Core).
   await call('dbg_warcam', 280, 600); await sleep(250);
   await tap(320, 157);
   ok((await poll('dbg_warselstruct', [], v => v === 0, 4000)) === 0, 'property: tapping the Core selects it');
   await tap(228, 337);   // bar slot 2: ZAPPER
   ok((await poll('dbg_warplace', [], v => v === 2, 4000)) === 2, 'property: the bar armed Zapper placement');
-  await tap(600, 60);    // world (560,503): ~296u from the Core, far outside its 78u zone
+  await tap(600, 60);    // world (560,503): ~296u from the Core — beyond even the 124u adjacency reach
   await sleep(300);
   ok((await call('dbg_warstructs', 2)) === 0 && (await call('dbg_warplace')) === 2,
      'property: a build outside your land is refused, placement kept');
-  await tap(386, 157);   // world (346,600): 66u from the Core — inside the zone, clear of its hull
+  await tap(386, 157);   // world (346,600): 66u from the Core — inside its 110u zone, clear of its hull
   ok((await poll('dbg_warstructs', [2], v => v === 1, 4000)) === 1 && (await call('dbg_warplace')) === -1,
      'property: a build on your own land goes up');
+
+  // the round-3 boundary case, exact: a Zapper centred 118u from the
+  // Core is OUTSIDE every zone (Core 110, the first Zapper's 90) but
+  // its footprint TOUCHES the Core's zone edge (118 <= 110 + 14), so
+  // adjacency alone must let it build. Pick the first of eight ring
+  // spots that also clears the first Zapper's zone and all terrain.
+  const tnB = await call('dbg_warterrain');
+  const featsB = [];
+  for (let t = 0; t < tnB; t++) { const v = await call('dbg_warfeatxy', t); if (v >= 0) featsB.push(unxy(v)); }
+  const ringB = [[398, 600], [363, 683], [280, 718], [197, 683], [162, 600], [197, 517], [280, 482], [363, 517]];
+  let spotB = null;
+  for (const [cx, cy] of ringB) {
+    const dCore = Math.hypot(cx - 280, cy - 600), dZap = Math.hypot(cx - 346, cy - 600);
+    if (!(dCore > 110 && dCore <= 124 && dZap > 90)) continue;
+    if (featsB.some(([fx, fy]) => Math.hypot(fx - cx, fy - cy) < 40)) continue;
+    spotB = [cx, cy]; break;
+  }
+  ok(!!spotB, 'property: an exact boundary spot exists (centre outside every zone, footprint touching)');
+  if (spotB) {
+    await call('dbg_waraddbits', 200);
+    await tap(320, 157);
+    ok((await poll('dbg_warselstruct', [], v => v === 0, 4000)) === 0, 'property: the Core re-selected');
+    await tap(228, 337);   // arm the Zapper again
+    ok((await poll('dbg_warplace', [], v => v === 2, 4000)) === 2, 'property: Zapper placement re-armed');
+    await tap(320 + (spotB[0] - 280), 157 + (spotB[1] - 600));
+    ok((await poll('dbg_warstructs', [2], v => v === 2, 4000)) === 2 && (await call('dbg_warplace')) === -1,
+       'property: a build whose footprint only TOUCHES your land goes up (adjacency, not containment)',
+       'structs(2)=' + (await call('dbg_warstructs', 2)) + ' at ' + spotB.join(','));
+  }
 
   // vehicles: the Assembly Plant, a Scout Buggy and a Siege Tank
   await call('dbg_waraddbits', 2000);
@@ -319,6 +355,82 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   }
   ok(bugIdx >= 0 && minBugX > 490, 'the firewall line held: the crawler never crossed',
      'bugIdx=' + bugIdx + ' minX=' + minBugX);
+
+  // ================= round 3 (Nov 16): destructible debris ========
+  // terrain features have hp now: a melee buddy ordered onto one
+  // through the REAL tap flow smashes it, the ground frees up, and
+  // the siege gun gets NO x2 structure bonus against a rock.
+  const tn3 = await call('dbg_warterrain');
+  const alive0 = await call('dbg_warfeatn');
+  ok(alive0 === tn3 && tn3 > 30, 'debris: every feature starts standing', alive0 + '/' + tn3);
+  const featHp = async t => { const f = await call('dbg_warfeat', t); return f < 0 ? -1 : Math.floor(f / 100); };
+  // a low-hp feature (tree 35 / rubble 25) in the western half, well
+  // clear of the firewall line and its crawler (510,432)
+  let featT = -1, featXY = null;
+  for (let t = 0; t < tn3; t++) {
+    const f = await call('dbg_warfeat', t);
+    if (f < 0) continue;
+    const kind = f % 100;
+    if (kind !== 0 && kind !== 4) continue;
+    const xy = unxy(await call('dbg_warfeatxy', t));
+    if (xy[0] > 700 || Math.hypot(xy[0] - 510, xy[1] - 432) < 220) continue;
+    featT = t; featXY = xy; break;
+  }
+  ok(featT >= 0, 'debris: found a tree/rubble feature to fell', 't=' + featT);
+  if (featT >= 0) {
+    const miD = await call('dbg_warfind', 1);
+    await call('dbg_warmove', miD, featXY[0] + 30, featXY[1]);
+    ok((await call('dbg_wartapunit', miD)) === 1, 'debris: melee buddy selected');
+    await call('dbg_warcam', featXY[0], featXY[1]); await sleep(250);
+    const hpStart = await featHp(featT);
+    let hpMid = hpStart;
+    for (let attempt = 0; attempt < 2 && hpMid >= hpStart; attempt++) {   // one re-order if the first tap got eaten
+      const fp = unpos(await call('dbg_warfeatpos', featT));
+      await tap(fp[0], fp[1]);   // tap the feature itself: attack order
+      const pv = await poll('dbg_warfeat', [featT], v => v >= 0 && Math.floor(v / 100) < hpStart, 5000, 200);
+      hpMid = pv >= 0 ? Math.floor(pv / 100) : hpStart;
+    }
+    ok(hpMid < hpStart && hpMid > 0, 'debris: the melee buddy is smashing the feature', hpStart + ' -> ' + hpMid);
+    await cv.screenshot({ path: __dirname + '/war3-debris.png' });
+    ok((await poll('dbg_warfeat', [featT], v => v >= 0 && Math.floor(v / 100) === 0, 20000, 250)) >= 0
+       && (await featHp(featT)) === 0, 'debris: the feature is destroyed');
+    ok((await call('dbg_warfeatn')) === alive0 - 1, 'debris: the standing count dropped by one',
+       (await call('dbg_warfeatn')) + ' vs ' + alive0);
+    // the ground is free now: the buddy can stand where it stood
+    await call('dbg_warmove', miD, featXY[0], featXY[1]);
+    await sleep(700);
+    const [ux2, uy2] = unxy(await call('dbg_warunitxy', miD));
+    ok(Math.hypot(ux2 - featXY[0], uy2 - featXY[1]) < 8, 'debris: the buddy stands on the cleared ground (no push-out)',
+       ux2 + ',' + uy2 + ' vs ' + featXY.join(','));
+  }
+
+  // the siege gun's x2 is for structures only: one shell in a rock
+  // (90 hp) must do the plain 26, never 52
+  await call('dbg_waraddbits', 1000);
+  const asm3 = await call('dbg_warbuildat', 5);
+  ok(asm3 > 0, 'debris: Assembly Plant built for the siege check', 'idx=' + asm3);
+  ok((await call('dbg_wartrain', 6)) === 1, 'debris: a Siege Tank rolled out');
+  let rockT = -1, rockXY = null;
+  for (let t = 0; t < tn3; t++) {
+    const f = await call('dbg_warfeat', t);
+    if (f < 0 || f % 100 !== 1 || Math.floor(f / 100) <= 0) continue;
+    const xy = unxy(await call('dbg_warfeatxy', t));
+    if (xy[0] > 700 || Math.hypot(xy[0] - 510, xy[1] - 432) < 220) continue;
+    rockT = t; rockXY = xy; break;
+  }
+  ok(rockT >= 0, 'debris: found a rock for the siege check', 't=' + rockT);
+  if (rockT >= 0) {
+    const sgD = await call('dbg_warfind', 6);
+    await call('dbg_warmove', sgD, rockXY[0] + 100, rockXY[1]);
+    ok((await call('dbg_wartapunit', sgD)) === 1, 'debris: siege tank selected');
+    await call('dbg_warcam', rockXY[0], rockXY[1]); await sleep(250);
+    const rp = unpos(await call('dbg_warfeatpos', rockT));
+    await tap(rp[0], rp[1]);   // tap the rock: attack order
+    const pv2 = await poll('dbg_warfeat', [rockT], v => v >= 0 && Math.floor(v / 100) < 90, 15000, 200);
+    const rockHp = pv2 >= 0 ? Math.floor(pv2 / 100) : -1;
+    ok(rockHp === 90 - 26, 'debris: the siege shell did PLAIN damage (26, not the x2 structure rate)',
+       'rock hp after one shell: ' + rockHp);
+  }
 
   // region 2 is unlocked now
   ok((await call('dbg_warenter', 1)) === 1, 'region 2 battle launches');
