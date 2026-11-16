@@ -41,10 +41,15 @@ WAR! sentence below grew again and a music sentence was
 added), and again for v1.17 ("SUPPLY LINES" — WAR! battles
 pause and save mid-fight, training queues stack nine deep,
 rally points, gates, and pathfinding for everyone; the WAR!
-sentence below grew again, trimmed elsewhere to fit). Character counts
+sentence below grew again, trimmed elsewhere to fit), and
+again for v1.18 ("SHIFTING GROUND" — every WAR! battle rolls
+a fresh field: hives nest somewhere new on the far side,
+debris scatters fresh, indestructible barrier lines stand in
+new places with a gap in every one; the WAR! passage below
+was rewritten to say so, trimmed to fit). Character counts
 verified against Play limits (title ≤ 30, short
 description ≤ 80, full description ≤ 4,000).
-Copy describes the current build (v1.17, 2026-11-16) and only what the Android
+Copy describes the current build (v1.18, 2026-11-16) and only what the Android
 build actually contains — no Whales Only purchase links (buying
 is web-only; the Android build has none), no host co-op claims
 (hosting is a native-build feature).
@@ -106,22 +111,22 @@ THREE WAYS TO PLAY
   your kart — and the driver in it is your own Banzai Buddy,
   racing five rival buddies on a dressed circuit with boost
   pads, drift mini-boosts, and a best finish and time with
-  your name on them; and WAR!, a real-time strategy game —
-  harvest bits from code nodes, raise a Compiler Core base,
-  train melee and ranged buddies, hold the line with zapper
-  towers and firewalls, raze the bug hives, and conquer all
-  eight regions of the world map —
-  building on land your structures claim, each new build
-  needing only to touch it, behind
-  firewalls that join into real barriers, with an Assembly
-  Plant rolling out scout buggies and siege tanks, under a
-  fog of war that lifts as you explore and never falls
-  again — and when a tree, a rock or a wrecked terminal
-  stands in your way, order your units to smash it: every
-  piece of debris on the field can be broken and cleared. Battles pause
-  and save mid-fight; queues stack nine deep; rally points aim
-  fresh troops; gates pass your army, not the bugs; all
-  pathfind around walls.
+  your name on them; and WAR!, a real-time strategy game — harvest bits from code
+nodes, raise a Compiler Core base, train melee and ranged
+buddies, hold the line with zapper towers and firewalls,
+raze the bug hives, and conquer all eight regions of the
+world map — building on land your structures claim, behind
+firewalls that join into real barriers, with an Assembly
+Plant rolling out scout buggies and siege tanks, under a fog
+of war that lifts as you explore and never falls again. And
+no two battles are alike: the hives nest somewhere new on
+the far side every fight, the debris scatters fresh, and
+indestructible barrier lines stand in new places with a gap
+in every one — your army pathfinds through, and so do the
+bugs. Trees, rocks and wrecked terminals in your way can
+still be smashed flat. Battles pause and save mid-fight;
+queues stack nine deep; rally points aim troops; gates pass
+your army, not the bugs.
   WAR! also takes orders from a gamepad now — a stick-driven
   cursor, musters on double and triple presses, and the
   command bar on the bumpers. And every cabinet has its own

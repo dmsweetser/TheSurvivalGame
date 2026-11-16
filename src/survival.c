@@ -6369,17 +6369,22 @@ static char slotbuf[SAVE_CAP];
 static void refresh_has_save(void){ G.has_save = (G.slot_has[1]||G.slot_has[2]||G.slot_has[3])? 1:0; }
 // WAR! battle snapshots (v1.17): a parked mid-battle state per player,
 // stored as the canonical save-token text ("wb=... wu=... ws=...
-// wn=... wt=... wf=...") so the writer can emit it verbatim and the
+// wg=... wt=... wf=...") so the writer can emit it verbatim and the
 // loader can rebuild it token by token. Sized for the worst case:
-// 80 unit records, 28 structs, 72 terrain, the 38-word fog bitset —
-// ~6.8K of text with arena-relative coordinates; 12K leaves margin.
-// (SAVE_CAP audit, Nov 16: existing per-player worst ~3.5K of pl-line
-// + <=6.8K war + 420 walls ~19.7K + headers ~0.4K = ~61.3K worst case
-// across 4 players, inside the 65536 cap with ~4.2K to spare.)
+// 80 unit records, 28 structs, 160 terrain (v1.18: barriers joined
+// the wt record, and a barrier's hp field is 5 digits), the 38-word
+// fog bitset — wb ~40 + wu ~3.8K + ws ~1.9K + wg ~0.1K + wt ~4.3K
+// + wf ~0.5K = ~10.7K of text worst case; the 12288 cap holds it
+// with ~1.6K to spare.
+// (SAVE_CAP audit, redone Nov 16 for v1.18: per-player worst ~3.5K
+// of pl-line + <=10.7K war snapshot = ~14.2K; x4 players = ~56.8K
+// + ~420 shared walls + ~0.4K headers = ~57.6K worst case, inside
+// the 65536 cap with ~7.9K to spare.)
 #define WAR_SNAP_CAP 12288
 static char war_snap[MAXP][WAR_SNAP_CAP];
 static int war_snap_on[MAXP];
-static void war_snap_clear(int pi){ war_snap_on[pi]=0; war_snap[pi][0]=0; }
+static int war_snap_reg[MAXP] = { -1, -1, -1, -1 };   // v1.18: WHICH region the parked battle belongs to — the map needs it to offer a resume instead of a restart
+static void war_snap_clear(int pi){ war_snap_on[pi]=0; war_snap[pi][0]=0; war_snap_reg[pi]=-1; }
 static void do_save(void){
     char *p = savebuf;
     p = sappend(p, "TSG3\n");   // v3: weapon counts written raw (stacks are uncapped now); v2 was base-6 packed, v1 a bitmask — both still load
@@ -6741,7 +6746,7 @@ static void continue_run(int slot){
                   // a space) and are rebuilt into war_snap[idx] below.
                   // The nodes key is "wg", NOT the spec's "wn" — wn is
                   // already whale_on in this same token tail.
-                  char twb[64], twu[4096], tws[1664], twg[160], twt[1664], twf[448];
+                  char twb[64], twu[4096], tws[2688], twg[192], twt[4800], twf[512];   // v1.18: caps re-audited — wt must hold 160 terrain entries now, and the old tws/twf caps could already clip a big battle's tail
                   int twar=0; twb[0]=twu[0]=tws[0]=twg[0]=twt[0]=twf[0]=0;
                   while (*q==' '){
                       q++;
@@ -6865,6 +6870,7 @@ static void continue_run(int slot){
                           sp = sappend(sp, " wt="); sp = sappend(sp, twt);
                           sp = sappend(sp, " wf="); sp = sappend(sp, twf);
                           *sp = 0; war_snap_on[idx] = 1;
+                          war_snap_reg[idx] = parse_int(twb);   // v1.18: the wb header's first field is the region
                       }
                       bd->craft_gn = tcd_gn;
                       for (int gi=0;gi<tcd_gn;gi++) bd->craft_gone[gi]=tcd_g[gi];
@@ -10112,6 +10118,7 @@ typedef struct {
 // their own sim — own roamers, own battle, own notes — so in split-screen
 // co-op one player can be in Banzai World in their half while the other
 // keeps playing the field. LAN play never enters (denied at the gate).
+#define WAR_MAXT 160   // WAR! terrain capacity (debris + barrier segments): v1.18 raised it from 72 — worst case is 68 debris + ~81 barrier segments = 149 (defined here, before BwSim; the WAR! block below points back at this)
 typedef struct {
     BwBattle bat;
     BWHack roam[BW_ROAMN];
@@ -10234,6 +10241,7 @@ typedef struct {
     // (never compacted — refs stay stable for the whole battle).
     int war_state;               // 0 world map, 1 battle, 2 won, 3 lost
     int war_region, war_bits, war_map_sel;
+    u32 war_bseed;               // v1.18: this battle's novelty seed (hives + terrain rolled from it; never saved — structs and terrain ride the snapshot themselves)
     float war_camx, war_camy, war_t, war_wavet, war_endt, war_grace;
     int war_selstruct, war_place;
     float war_ltap_t; int war_ltap_x, war_ltap_y, war_ltap_unit, war_ltap_n;
@@ -10271,11 +10279,12 @@ typedef struct {
     // the fog of war. Terrain kinds: 0 tree, 1 rock, 2 broken terminal,
     // 3 cable spool, 4 rubble. Fog cells are 40u: 0 unexplored,
     // 1 explored (permanent for the battle), 2 currently visible.
-    float war_tx[72], war_ty[72]; int war_ttype[72], war_trad[72], war_tn;
+    float war_tx[WAR_MAXT], war_ty[WAR_MAXT]; int war_ttype[WAR_MAXT], war_trad[WAR_MAXT], war_tn;
     // WAR! round 3 (Nov 16, Daniel's playtest): debris has hit points —
     // your combat units can shoot, smash and roll over it. war_tdeadt is
     // the fading scorch mark a destroyed feature leaves behind.
-    float war_thp[72]; int war_tmaxhp[72]; float war_tdeadt[72];
+    // v1.18: kind 5 is a BARRIER segment — indestructible (see WAR_THP).
+    float war_thp[WAR_MAXT]; int war_tmaxhp[WAR_MAXT]; float war_tdeadt[WAR_MAXT];
     unsigned char war_fog[40*30];
     // v1.17 pathfinding: per-unit waypoint runs (turning points of a
     // grid A* path, LOS-shortcut). war_ptg is the target the path was
@@ -17002,7 +17011,7 @@ static void crt_render(int pi){ crt_render_view(pi, pi); }
 #define WAR_S_HIVE 4
 #define WAR_S_ASM 5
 #define WAR_S_GATE 6
-#define WAR_MAXT 72
+// WAR_MAXT lives up by BwSim (it sizes the struct's terrain arrays)
 #define WAR_FOG_W 40
 #define WAR_FOG_H 30
 #define WAR_CARRY 25          // bits a harvester hauls per trip (v1.17: 20 -> 25)
@@ -17018,11 +17027,16 @@ static const int WAR_BUILD_COST[7] = { 0, 150, 100, 25, 0, 200, 35 }; // patch b
 static const u32 WAR_TREE_COL[8] = { COL(46,120,52), COL(96,124,44), COL(110,96,58), COL(120,74,44),
                                      COL(190,220,230), COL(64,240,190), COL(34,110,60), COL(96,80,140) };
 // debris hit points by terrain kind: 0 tree / 1 rock / 2 terminal /
-// 3 spool / 4 rubble — rubble crumbles fast, rock takes a beating
-static const int WAR_THP[5] = { 35, 90, 55, 45, 25 };
+// 3 spool / 4 rubble — rubble crumbles fast, rock takes a beating.
+// Kind 5 (v1.18) is a BARRIER segment: 99999 is a sentinel, not a
+// real pool — war_hurt_terrain refuses kind 5 outright, so its hp
+// never moves and the collision/A* tests that key off thp>0 hold
+// forever.
+static const int WAR_THP[6] = { 35, 90, 55, 45, 25, 99999 };
 // debris bounties (v1.17): felling terrain with PLAYER-side damage pays
 // bits by kind — tree / rock / terminal / spool / rubble. Bugs pay none.
-static const int WAR_TBITS[5] = { 10, 25, 40, 30, 15 };
+// Barriers pay nothing (and can never be felled anyway).
+static const int WAR_TBITS[6] = { 10, 25, 40, 30, 15, 0 };
 static const u32 WAR_SPCOL[7] = { COL(240,180,90), COL(250,150,70), COL(150,105,70), COL(90,180,170), COL(150,150,160), COL(190,200,210), COL(255,205,80) };   // last: the gate's warm gold — "yours, walk through"
 static int war_u_side(int type){ return (type==WAR_U_CRAWL || type==WAR_U_SPIT)? 1 : 0; }
 static int war_u_hp(int type, int region){
@@ -17139,12 +17153,15 @@ static void war_fog_update(BwSim *S){
     }
 }
 // --- terrain ---------------------------------------------------------
-// Deterministic per region: WAR battles have fixed node/hive layouts
-// (no per-battle seed exists), so the scatter is a pure function of
-// the region index — the same woods every time you fight a region.
-static void war_gen_terrain(BwSim *S, int region){
+// v1.18 (Daniel: "novel every time you play"): the scatter is rolled
+// from the battle's own seed (bseed), with the region mixed in for
+// flavour — the same region never grows the same woods twice. Hive
+// clearances below read the ACTUAL hive structs, which
+// war_start_battle has already placed from the same seed.
+static void war_gen_terrain(BwSim *S, u32 bseed){
+    int region = S->war_region;
     S->war_tn = 0;
-    u32 seed = 0x7E44u + (u32)region * 977u;
+    u32 seed = bseed ^ (0x7E44u + (u32)region * 977u);
     int want = 52 + (int)(hash2(region, 7, seed) % 17u);   // 52..68 features
     for (int t=0; t<600 && S->war_tn<want; t++){
         float x = WAR_OX + 44.0f + hash_f(t, 1, seed) * (WAR_AW - 88.0f);
@@ -17170,6 +17187,47 @@ static void war_gen_terrain(BwSim *S, int region){
         S->war_trad[i] = 10 + (int)(hash2(t, 5, seed) % 5u);   // 10..14
         S->war_tmaxhp[i] = WAR_THP[kind]; S->war_thp[i] = (float)WAR_THP[kind]; S->war_tdeadt[i] = 0;
     }
+    // v1.18: BARRIER LINES (terrain kind 5) — vertical runs of
+    // indestructible slabs with a gap rolled into every line, so
+    // each battle has walls to think around AND a path through
+    // every one of them. Lines never span the full arena height,
+    // so a Core->hive route always exists even ignoring the gaps.
+    // Segments ride the same arrays as debris: collision
+    // (war_separate), the A* blocked grid and the snapshot all key
+    // off thp>0, and war_hurt_terrain refuses kind 5 — they can
+    // never be removed, only routed around.
+    { int debris_n = S->war_tn;   // the 30u spacing test below runs against DEBRIS only — a line's own segments stand 24u apart by design
+      int lines = region>=2? 3 : 2;
+      for (int k=0;k<lines;k++){
+          float xk = 560.0f + (float)k*230.0f + hash_f(k, 21, bseed)*120.0f;
+          float ylen = 420.0f + hash_f(k, 22, bseed)*320.0f;
+          float y0 = 60.0f + hash_f(k, 23, bseed)*((1200.0f-120.0f)-ylen);
+          float gy = y0 + 90.0f + hash_f(k, 24, bseed)*(ylen-180.0f);
+          for (float y=y0; y<=y0+ylen; y+=24.0f){
+              if (S->war_tn >= WAR_MAXT-2) break;
+              float gdy = y-gy; if (gdy<0) gdy=-gdy;
+              if (gdy < 55.0f) continue;   // the gap: a ~110u path through the line
+              float wx = WAR_OX + xk, wy = WAR_OY + y;
+              float dx, dy;
+              dx = wx-(WAR_OX+280); dy = wy-(WAR_OY+600); if (dx*dx+dy*dy < 130.0f*130.0f) continue;   // the Core's clearing, wider than debris' — a wall must never pen the base in
+              int bad = 0;
+              for (int s=0;s<WAR_MAXS && !bad;s++){
+                  if (S->war_shp[s]<=0 || S->war_stype[s]!=WAR_S_HIVE) continue;
+                  dx = wx-S->war_sx[s]; dy = wy-S->war_sy[s]; if (dx*dx+dy*dy < 115.0f*115.0f) bad = 1;
+              }
+              for (int n=0;n<S->war_nn && !bad;n++){
+                  dx = wx-S->war_nx[n]; dy = wy-S->war_ny[n]; if (dx*dx+dy*dy < 75.0f*75.0f) bad = 1;
+              }
+              for (int j=0;j<debris_n && !bad;j++){
+                  dx = wx-S->war_tx[j]; dy = wy-S->war_ty[j]; if (dx*dx+dy*dy < 30.0f*30.0f) bad = 1;
+              }
+              if (bad) continue;
+              int i = S->war_tn++;
+              S->war_tx[i]=wx; S->war_ty[i]=wy; S->war_ttype[i]=5;
+              S->war_trad[i]=15;
+              S->war_tmaxhp[i]=WAR_THP[5]; S->war_thp[i]=(float)WAR_THP[5]; S->war_tdeadt[i]=0;
+          }
+      } }
 }
 static int war_spawn_unit(BwSim *S, int type, float x, float y){
     for (int i=0;i<WAR_MAXU;i++) if (S->war_uhp[i]<=0){
@@ -17207,7 +17265,7 @@ static void war_spawn_bug(BwSim *S, int hive, int wave){
 static void war_win(int pi){
     BwSim *S = &BWS[pi]; Buddy *b = &G.bud[pi];
     S->war_state = 2; S->war_endt = 3.2f; S->war_pause = 0;
-    war_snap_clear(pi);   // the battle is decided: no snapshot survives it (cleared BEFORE the save below)
+    if (!war_snap_on[pi] || war_snap_reg[pi]==S->war_region) war_snap_clear(pi);   // the battle is decided: ITS snapshot does not survive it (cleared BEFORE the save below) — but a battle parked in ANOTHER region is not this fight's to discard (v1.18)
     if (S->war_region == b->war_prog && b->war_prog < 8){ b->war_prog++; do_save(); }
     war_note(S, "REGION CONQUERED!");
     qnote(0, 0, 60, 80, 6); qnote(0.12f, 0, 64, 80, 6); qnote(0.24f, 0, 67, 80, 6); qnote(0.36f, 0, 72, 90, 10);
@@ -17215,7 +17273,7 @@ static void war_win(int pi){
 static void war_lose(int pi){
     BwSim *S = &BWS[pi];
     S->war_state = 3; S->war_endt = 3.2f; S->war_pause = 0;
-    war_snap_clear(pi);   // a fallen Core leaves nothing to resume
+    if (!war_snap_on[pi] || war_snap_reg[pi]==S->war_region) war_snap_clear(pi);   // a fallen Core leaves nothing of THIS battle to resume — a park in another region still stands (v1.18)
     war_note(S, "THE COMPILER CORE HAS FALLEN!");
     qnote(0, 0, 48, 80, 8); qnote(0.2f, 0, 43, 80, 8); qnote(0.4f, 0, 36, 90, 12);
 }
@@ -17255,6 +17313,7 @@ static void war_hurt_struct(int pi, int i, int dmg){
 static void war_hurt_terrain(int pi, int t, int dmg, int side){
     BwSim *S = &BWS[pi];
     if (t<0 || t>=S->war_tn || S->war_thp[t]<=0) return;
+    if (S->war_ttype[t]==5) return;   // v1.18: barrier slabs are truly indestructible — collision and the A* grid key off thp>0, so this hp must never reach 0
     S->war_thp[t] -= (float)dmg;
     if (S->war_thp[t] <= 0){
         S->war_thp[t] = 0;
@@ -17692,6 +17751,17 @@ static void war_start_battle(int pi, int region){
     BwSim *S = &BWS[pi];
     if (region<0) region=0; if (region>7) region=7;
     war_clear_field(S);
+    // v1.18 (Daniel: "novel every time you play"): this battle's
+    // seed mixes the region, the run clock and a per-process
+    // battle counter — RESTARTs included — through the unsigned
+    // hash, so no two starts ever lay out the same field. The seed
+    // itself is never saved: hives are structs and the terrain
+    // rides the battle snapshot, so a parked battle restores its
+    // own rolled field exactly.
+    { static u32 war_battle_ctr = 0;
+      war_battle_ctr += 1u;
+      u32 tbits = (u32)(int)(G.time * 4.0f);
+      S->war_bseed = hash2((i32)(tbits + (u32)region * 977u), (i32)(war_battle_ctr * 131u + (u32)region), 0x5EEDu ^ (war_battle_ctr * 2654435761u)); }
     S->war_state=1; S->war_region=region; S->war_bits=250; S->war_t=0;   // v1.17: a richer purse to open with (was 150)
     S->war_wavet = war_wave_dt(region)*0.7f;
     S->war_grace=0.35f; S->war_ordt=0; S->war_msgt=0;
@@ -17707,13 +17777,20 @@ static void war_start_battle(int pi, int region){
     S->war_nn=9;
     for (int n=0;n<9;n++){ S->war_nx[n]=WAR_OX+ND[n][0]; S->war_ny[n]=WAR_OY+ND[n][1]; S->war_namt[n]=NA[n]; }
     int nh = 1 + (region>=3? 1:0) + (region>=6? 1:0);
-    static const float HV[3][2] = { {1330,600},{1250,220},{1250,980} };
-    for (int h=0;h<nh;h++){
-        int hi = war_spawn_struct(S, WAR_S_HIVE, 1, WAR_OX+HV[h][0], WAR_OY+HV[h][1]);
-        war_spawn_bug(S, hi, 0); war_spawn_bug(S, hi, 0);
-        if (region>=2) war_spawn_bug(S, hi, 0);
-    }
-    war_gen_terrain(S, region);
+    // v1.18: the hives land along the FAR side, banded-random — the
+    // arena height is cut into nh equal bands and each hive rolls
+    // its spot inside its own band (x deep in the east, y anywhere
+    // in the band), so the swarm is always spread out but never
+    // where it stood last time. No more "just go to the far right".
+    { float band_h = 1200.0f / (float)nh;
+      for (int h=0;h<nh;h++){
+          float hx = 1240.0f + hash_f(h, 11, S->war_bseed) * 150.0f;
+          float hy = (float)h * band_h + 130.0f + hash_f(h, 12, S->war_bseed) * (band_h - 260.0f);
+          int hi = war_spawn_struct(S, WAR_S_HIVE, 1, WAR_OX+hx, WAR_OY+hy);
+          war_spawn_bug(S, hi, 0); war_spawn_bug(S, hi, 0);
+          if (region>=2) war_spawn_bug(S, hi, 0);
+      } }
+    war_gen_terrain(S, S->war_bseed);
     for (int i=0;i<WAR_FOG_W*WAR_FOG_H;i++) S->war_fog[i]=0;   // a fresh battle starts in the dark
     war_fog_update(S);
     S->war_camx = WAR_OX+280; S->war_camy = WAR_OY+600;
@@ -17804,9 +17881,15 @@ static void war_snap_serialize(int pi){
     }
     *p=0;
     war_snap_on[pi]=1;
+    war_snap_reg[pi]=S->war_region;
 }
 static const char *war_snap_for_save(int pi){   // the save writer's door: refresh from a live battle, then hand over the text (0 = nothing parked)
-    if (BWS[pi].war_state==1) war_snap_serialize(pi);
+    // v1.18: a live battle in a DIFFERENT region than the parked one
+    // must NOT re-serialize over the park — the autosave would
+    // silently evict the saved battle from the file (Daniel's
+    // playtest: SAVE & QUIT, tap a region, fresh fight, saved
+    // fight gone). The parked text is returned as-is instead.
+    if (BWS[pi].war_state==1 && !(war_snap_on[pi] && war_snap_reg[pi]!=BWS[pi].war_region)) war_snap_serialize(pi);
     return war_snap_on[pi]? war_snap[pi] : 0;
 }
 static const char *war_snap_val(const char *snap, const char *key){
@@ -17940,8 +18023,8 @@ static int war_pause_btn_y(int py, int n){ return py + 56 + n*44; }   // three 3
 static void war_pause_pick(int pi, int n){
     BwSim *S = &BWS[pi];
     if (n==0){ S->war_pause=0; S->war_grace=0.3f; sfx(6); }   // RESUME (the grace keeps the closing press from leaking an order)
-    else if (n==1){   // RESTART BATTLE: this region, fresh, and no snapshot of the old fight survives
-        war_snap_clear(pi);
+    else if (n==1){   // RESTART BATTLE: this region, fresh, and no snapshot of the old fight survives — unless the park belongs to another region (v1.18 scoping, as in war_win/war_lose)
+        if (!war_snap_on[pi] || war_snap_reg[pi]==S->war_region) war_snap_clear(pi);
         S->war_pause=0;
         war_start_battle(pi, S->war_region);
     } else if (n==2){   // SAVE & QUIT: park the battle, persist, back to the map
@@ -18277,6 +18360,7 @@ static void war_tap_world(int pi, float wx, float wy){
     { int fref=0; float fdist=1e18f;
       for (int t=0;t<S->war_tn;t++){
           if (S->war_thp[t]<=0) continue;
+          if (S->war_ttype[t]==5) continue;   // v1.18: barriers are NOT attack targets — a tap on one falls through to a plain move order below
           float dx=wx-S->war_tx[t], dy=wy-S->war_ty[t], rr=(float)S->war_trad[t]+6.0f, d2=dx*dx+dy*dy;
           if (d2 < rr*rr){ float d=fsqrt(d2); if (d<fdist){ fdist=d; fref=WAR_TREF(t); } }
       }
@@ -18384,16 +18468,31 @@ static void war_node_pos(int vx, int vy, int vw2, int vh2, int r, int *nx, int *
     *nx = (int)(cx + fcos(a) * (float)vw2 * 0.36f);
     *ny = (int)(cy + fsin(a) * (float)vh2 * 0.295f);
 }
-static void war_map_update(int pi, float dt, const BwIn *in){
+// v1.18: the ONE door into a battle from the map. A region with a
+// battle parked in it (SAVE & QUIT) RESUMES that battle — before
+// this helper existed, both confirm paths called war_start_battle
+// unconditionally, so the natural player move (walk to the map, tap
+// the region you were fighting) silently started a fresh fight and
+// the autosave then overwrote the parked one in the save file.
+static void war_map_launch(int pi, int r){
     BwSim *S = &BWS[pi]; Buddy *b = &G.bud[pi];
+    if (war_snap_on[pi] && war_snap_reg[pi]==r){
+        war_snap_restore(pi);   // sets war_state=1 and posts the RESTORED note itself
+        war_snap_clear(pi);     // consumed — the live BwSim is authoritative now
+        return;
+    }
+    if (r <= b->war_prog){ war_start_battle(pi, r); }
+    else { sfx(16); war_note(S, "THAT REGION IS STILL WILD. CONQUER THE ONES BEFORE IT!"); }
+}
+static void war_map_update(int pi, float dt, const BwIn *in){
+    BwSim *S = &BWS[pi];
     (void)dt;
     if (in->exit_){ bw_exit(pi, 0); return; }
     if (S->war_grace > 0) return;
     if ((in->keys&K_LEFT) || in->up) { S->war_map_sel = (S->war_map_sel+7)%8; sfx(6); }
     if ((in->keys&K_RIGHT) || in->down) { S->war_map_sel = (S->war_map_sel+1)%8; sfx(6); }
     if (in->sel || in->interact){
-        if (S->war_map_sel <= b->war_prog){ war_start_battle(pi, S->war_map_sel); }
-        else { sfx(16); war_note(S, "THAT REGION IS STILL WILD. CONQUER THE ONES BEFORE IT!"); }
+        war_map_launch(pi, S->war_map_sel);
         return;
     }
     if (pi==G.my_id && IN.tapped){
@@ -18404,8 +18503,7 @@ static void war_map_update(int pi, float dt, const BwIn *in){
             int dx=IN.tap_x-nx, dy=IN.tap_y-ny;
             if (dx*dx+dy*dy < 34*34){
                 S->war_map_sel = r;
-                if (r <= b->war_prog) war_start_battle(pi, r);
-                else { sfx(16); war_note(S, "THAT REGION IS STILL WILD. CONQUER THE ONES BEFORE IT!"); }
+                war_map_launch(pi, r);
                 return;
             }
         }
@@ -18612,6 +18710,11 @@ static void war_render_map(int pi, int vx, int vy, int vw2, int vh2){
         if (frontier){
             int pr = 27 + (int)(fsin(G.anim_t*4.0f)*2.5f);
             circle_out(nx, ny, pr, COL(255,240,200));
+        }
+        if (war_snap_on[pi] && war_snap_reg[pi]==r){   // v1.18: a battle is parked HERE — tapping this node resumes it, and the player must be able to see that
+            int pr2 = 34 + (int)(fsin(G.anim_t*4.0f + 1.5f)*3.0f);
+            circle_out(nx, ny, pr2, COL(140,255,170));
+            draw_text_center(nx, ny+44, "IN PROGRESS", 1, COL(160,255,190));
         }
         if (r == S->war_map_sel) circle_out(nx, ny, 31, COL(255,220,90));
         disc_fill(nx, ny, 24, done? REGION_GA[r] : frontier? col_shade(REGION_GA[r], 0.75f) : COL(52,50,66));
@@ -18901,10 +19004,16 @@ static void war_draw_terrain(BwSim *S, int t){
         ellipse_fill(sx, sy, rad*2/3, rad/2, COL(84,60,36));
         disc_fill(sx, sy, 3, COL(52,40,26));
         line_thick(sx - rad*2/3, sy - rad/4, sx + rad*2/3, sy + rad/4, 2, COL(38,34,48));
-    } else {   // rubble
+    } else if (kind==4){   // rubble
         tri_fill(sx - rad, sy + 4, sx - rad/3, sy - rad/2, sx + 1, sy + 4, COL(104,96,88));
         tri_fill(sx - 2, sy + 4, sx + rad/3, sy - rad/3, sx + rad, sy + 4, COL(88,80,74));
         disc_fill(sx + 2, sy + 1, 2, COL(130,120,108));
+    } else {   // kind 5 (v1.18): a barrier slab — dark slate, a lit top edge, one cyan seam. It will outlive us all.
+        u32 sl = col_shade(COL(52,58,72), 0.9f + (float)(vary % 20u) * 0.01f);
+        rect_fill(sx-rad, sy-rad, rad*2, rad*2, sl);
+        rect_fill(sx-rad, sy-rad, rad*2, 3, col_shade(sl, 1.45f));
+        rect_fill(sx-1, sy-rad+4, 2, rad*2-8, COL(110,225,235));
+        rect_line(sx-rad, sy-rad, rad*2, rad*2, col_shade(sl, 0.6f));
     }
     if (S->war_thp[t] < (float)S->war_tmaxhp[t])   // the house health bar, same as units and buildings
         war_hp_bar(sx - rad, sy - rad - 12, rad*2, S->war_thp[t] / (float)S->war_tmaxhp[t], 0);
@@ -19940,7 +20049,11 @@ __attribute__((export_name("dbg_warterrain"))) int exp_dbg_warterrain(void){ int
 __attribute__((export_name("dbg_warfeatn"))) int exp_dbg_warfeatn(void){ int id = G.my_id>=0? G.my_id : 0; BwSim *S = &BWS[id]; int n=0;
     for (int t=0;t<S->war_tn;t++) if (S->war_thp[t]>0) n++; return n; }   // debris still standing
 __attribute__((export_name("dbg_warfeat"))) int exp_dbg_warfeat(int t){ int id = G.my_id>=0? G.my_id : 0; BwSim *S = &BWS[id];
-    if (t<0 || t>=S->war_tn) return -1; return (int)S->war_thp[t]*100 + S->war_ttype[t]; }   // hp*100 + kind (0 tree / 1 rock / 2 terminal / 3 spool / 4 rubble)
+    if (t<0 || t>=S->war_tn) return -1; return (int)S->war_thp[t]*100 + S->war_ttype[t]; }   // hp*100 + kind (0 tree / 1 rock / 2 terminal / 3 spool / 4 rubble / 5 barrier)
+__attribute__((export_name("dbg_warbarriers"))) int exp_dbg_warbarriers(void){ int id = G.my_id>=0? G.my_id : 0; BwSim *S = &BWS[id]; int n=0;
+    for (int t=0;t<S->war_tn;t++) if (S->war_ttype[t]==5 && S->war_thp[t]>0) n++; return n; }   // v1.18: live barrier segments
+__attribute__((export_name("dbg_warhivexy"))) int exp_dbg_warhivexy(void){ int id = G.my_id>=0? G.my_id : 0; BwSim *S = &BWS[id];
+    for (int s=0;s<WAR_MAXS;s++) if (S->war_shp[s]>0 && S->war_stype[s]==WAR_S_HIVE) return (int)(S->war_sx[s]-WAR_OX)*10000 + (int)(S->war_sy[s]-WAR_OY); return -1; }   // v1.18: the first live hive, dbg_warunitxy packing
 __attribute__((export_name("dbg_warfeatxy"))) int exp_dbg_warfeatxy(int t){ int id = G.my_id>=0? G.my_id : 0; BwSim *S = &BWS[id];
     if (t<0 || t>=S->war_tn) return -1; return (int)(S->war_tx[t]-WAR_OX)*10000 + (int)(S->war_ty[t]-WAR_OY); }
 __attribute__((export_name("dbg_warfeatpos"))) int exp_dbg_warfeatpos(int t){ int id = G.my_id>=0? G.my_id : 0; BwSim *S = &BWS[id];

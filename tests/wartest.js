@@ -27,6 +27,13 @@
 // (packed rally point, -1 = unset). The bar is two-level now: the
 // bar row shows categories (slots at y=337), the open category's
 // options live in the strip directly above it (slots at y=291).
+// v1.18 "SHIFTING GROUND" adds dbg_warbarriers (live barrier
+// segments) and dbg_warhivexy (first live hive, packed): battles
+// are RANDOMIZED now (per-battle seed — banded hives along the far
+// side, re-rolled debris, indestructible barrier lines), so every
+// position a check needs is read live or scanned for, never
+// assumed. Checks 20-24 (the tail) cover the SAVE & QUIT map
+// resume and the randomization itself.
 const { chromium } = require('playwright-core');
 const EXE = process.env.HOME + '/.cache/ms-playwright/chromium-1248/chrome-linux64/chrome';
 const URL = 'http://localhost:8903/the-survival-game.html';
@@ -147,10 +154,22 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   // ground with it selected plants its rally flag instead of
   // deselecting (the plain deselect case lives in check 19, on a
   // Zapper, which is not a producer)
-  await call('dbg_warcam', 500, 300); await sleep(200);
-  await tap(320, 157);   // world (500,300): empty ground
+  // v1.18: the rally point is scanned for, not fixed — random debris
+  // on the tap point would swallow the tap (the debris branch eats
+  // it before the rally branch), so pick a clear spot near (500,300)
+  const tnR0 = await call('dbg_warterrain');
+  const featsR0 = [];
+  for (let t = 0; t < tnR0; t++) { const v = await call('dbg_warfeatxy', t); if (v >= 0) featsR0.push(unxy(v)); }
+  let rallyPt = null;
+  for (const [cx, cy] of [[500, 300], [560, 300], [440, 300], [500, 380], [500, 220], [580, 380], [420, 220], [620, 300]]) {
+    if (featsR0.some(([fx, fy]) => Math.hypot(fx - cx, fy - cy) < 32)) continue;
+    rallyPt = [cx, cy]; break;
+  }
+  ok(!!rallyPt, 'rally: a clear field point exists near (500,300)');
+  await call('dbg_warcam', rallyPt[0], rallyPt[1]); await sleep(200);
+  await tap(320, 157);   // the scanned point: empty ground
   ok((await poll('dbg_warselstruct', [], v => v === 0, 4000)) === 0, 'rally: the Core STAYS selected after a field tap');
-  ok((await call('dbg_warrally', 0)) === 5000300, 'rally: the field tap set the Core rally point', await call('dbg_warrally', 0));
+  ok((await call('dbg_warrally', 0)) === rallyPt[0] * 10000 + rallyPt[1], 'rally: the field tap set the Core rally point', await call('dbg_warrally', 0));
 
   // the harvest loop pays: two harvesters now work the near nodes
   const bits0 = await call('dbg_warbits');
@@ -364,9 +383,12 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   // the siege gun cracks structures: ordered onto the hive, its shots
   // (double damage vs structures) bite chunks out of it
   const sg = await call('dbg_warfind', 6);
-  await call('dbg_warmove', sg, 1190, 600);   // 140u west of the hive: inside its 125+30 range
+  // v1.18: the hive lands banded-random along the far side now —
+  // read its live position and set up relative to IT
+  const [hvx, hvy] = unxy(await call('dbg_warhivexy'));
+  await call('dbg_warmove', sg, hvx - 140, hvy);   // 140u west of the hive: inside its 125+30 range
   ok((await call('dbg_wartapunit', sg)) === 1, 'siege tank selected for the order');
-  await call('dbg_warcam', 1330, 600); await sleep(250);
+  await call('dbg_warcam', hvx, hvy); await sleep(250);
   const hiveHp0 = await call('dbg_warhurt', 1, 1, 0);
   await tap(320, 157);   // the hive, dead centre: attack order
   ok((await poll('dbg_warhurt', [1, 1, 0], v => v >= 0 && v <= hiveHp0 - 50, 20000, 300)) <= hiveHp0 - 50,
@@ -415,32 +437,41 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   const alive0 = await call('dbg_warfeatn');
   ok(alive0 === tn3 && tn3 > 30, 'debris: every feature starts standing', alive0 + '/' + tn3);
   const featHp = async t => { const f = await call('dbg_warfeat', t); return f < 0 ? -1 : Math.floor(f / 100); };
-  // a low-hp feature (tree 35 / rubble 25) in the western half, well
-  // clear of the firewall line and its crawler (510,432)
-  let featT = -1, featXY = null;
+  // low-hp features (tree 35 / rubble 25) in the western half, well
+  // clear of the firewall line and its crawler (510,432) — and
+  // (v1.18) with >=55u of open ground around them: a tree penned in
+  // by barrier segments can be impossible to stand next to, so the
+  // check works down a CANDIDATE LIST and fells the first one the
+  // melee can actually reach and damage
+  const pts3 = [];
   for (let t = 0; t < tn3; t++) {
     const f = await call('dbg_warfeat', t);
     if (f < 0) continue;
-    const kind = f % 100;
-    if (kind !== 0 && kind !== 4) continue;
     const xy = unxy(await call('dbg_warfeatxy', t));
-    if (xy[0] > 700 || Math.hypot(xy[0] - 510, xy[1] - 432) < 220) continue;
-    featT = t; featXY = xy; break;
+    if (xy[0] >= 0) pts3.push([t, f % 100, xy]);
   }
-  ok(featT >= 0, 'debris: found a tree/rubble feature to fell', 't=' + featT);
-  if (featT >= 0) {
-    const miD = await call('dbg_warfind', 1);
-    await call('dbg_warmove', miD, featXY[0] + 30, featXY[1]);
+  const cand3 = pts3.filter(([t, kind, xy]) =>
+    (kind === 0 || kind === 4) && xy[0] <= 700 && Math.hypot(xy[0] - 510, xy[1] - 432) >= 220 &&
+    !pts3.some(([t2, , xy2]) => t2 !== t && Math.hypot(xy2[0] - xy[0], xy2[1] - xy[1]) < 55));
+  ok(cand3.length > 0, 'debris: found a reachable tree/rubble feature to fell', 'candidates=' + cand3.length);
+  let featT = -1, featXY = null, hpStart = -1, hpMid = -1;
+  const miD = await call('dbg_warfind', 1);
+  for (const [ct, , cxy] of cand3.slice(0, 3)) {
+    await call('dbg_warmove', miD, cxy[0] + 30, cxy[1]);
     ok((await call('dbg_wartapunit', miD)) === 1, 'debris: melee buddy selected');
-    await call('dbg_warcam', featXY[0], featXY[1]); await sleep(250);
-    const hpStart = await featHp(featT);
-    let hpMid = hpStart;
-    for (let attempt = 0; attempt < 2 && hpMid >= hpStart; attempt++) {   // one re-order if the first tap got eaten
-      const fp = unpos(await call('dbg_warfeatpos', featT));
+    await call('dbg_warcam', cxy[0], cxy[1]); await sleep(250);
+    const hs = await featHp(ct);
+    let hm = hs;
+    for (let attempt = 0; attempt < 2 && hm >= hs; attempt++) {   // one re-order if the first tap got eaten
+      const fp = unpos(await call('dbg_warfeatpos', ct));
       await tap(fp[0], fp[1]);   // tap the feature itself: attack order
-      const pv = await poll('dbg_warfeat', [featT], v => v >= 0 && Math.floor(v / 100) < hpStart, 5000, 200);
-      hpMid = pv >= 0 ? Math.floor(pv / 100) : hpStart;
+      const pv = await poll('dbg_warfeat', [ct], v => v >= 0 && Math.floor(v / 100) < hs, 5000, 200);
+      hm = pv >= 0 ? Math.floor(pv / 100) : hs;
     }
+    if (hm < hs) { featT = ct; featXY = cxy; hpStart = hs; hpMid = hm; break; }   // this one is taking damage — fell it
+  }
+  ok(featT >= 0, 'debris: a candidate feature is taking damage', 't=' + featT);
+  if (featT >= 0) {
     ok(hpMid < hpStart && hpMid > 0, 'debris: the melee buddy is smashing the feature', hpStart + ' -> ' + hpMid);
     await cv.screenshot({ path: __dirname + '/war3-debris.png' });
     ok((await poll('dbg_warfeat', [featT], v => v >= 0 && Math.floor(v / 100) === 0, 20000, 250)) >= 0
@@ -708,21 +739,49 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   ok((await call('dbg_warenter', 0)) === 1, 'v1.17 check 5: fresh battle');
   await sleep(400);
   await call('dbg_waraddbits', 2000);
+  // v1.18: the wall's column is picked by clearance, not fixed at
+  // 700 — a random barrier line can stand near x=700 and refuse
+  // half the segments, and a bug approaching from the east can get
+  // POCKETED between the wall and a parallel barrier line (the A*
+  // grid sees no free cell in a ~25u corridor). So the column
+  // anchors ~200u WEST of the westernmost barrier line: the bait
+  // (lineX-60), the wall and the bug's spawn (lineX+90) all stay
+  // clear of every barrier, and the bug's detour around the wall's
+  // ends never meets one. The bait/bug geometry translates with
+  // the column, keeping the aggro math the comment above describes.
+  const tn5 = await call('dbg_warterrain');
+  const feats5 = [];
+  let barWest5 = 1e9;
+  for (let t = 0; t < tn5; t++) {
+    const v = await call('dbg_warfeatxy', t); if (v < 0) continue;
+    const xy = unxy(v); feats5.push(xy);
+    const f = await call('dbg_warfeat', t);
+    if (f >= 0 && f % 100 === 5 && xy[0] < barWest5) barWest5 = xy[0];
+  }
+  const baseX5 = Math.max(440, Math.min(720, barWest5 - 200));
+  let lineX5 = baseX5, bestOpen5 = -1;
+  for (const lx of [baseX5, baseX5 - 60, baseX5 + 60, baseX5 - 120, baseX5 + 120]) {
+    if (lx < 380 || lx > 760) continue;
+    if (lx + 110 > barWest5) continue;   // the bug's spawn (lx+90) and its whole approach stay WEST of the first barrier line
+    let open = 0;
+    for (let y = 384; y <= 816; y += 24) { if (y === 600) continue; if (!feats5.some(([fx, fy]) => Math.hypot(fx - lx, fy - y) < 40)) open++; }
+    if (open > bestOpen5) { bestOpen5 = open; lineX5 = lx; }
+  }
   let wallN5 = 0;
-  for (let y = 384; y <= 816; y += 24) { if (y === 600) continue; if ((await call('dbg_warbuildxy', 3, 700, y)) >= 0) wallN5++; }
-  ok(wallN5 >= 16, 'v1.17 check 5: the wall line went up (gap at y=600)', 'segments=' + wallN5);
+  for (let y = 384; y <= 816; y += 24) { if (y === 600) continue; if ((await call('dbg_warbuildxy', 3, lineX5, y)) >= 0) wallN5++; }
+  ok(wallN5 >= 16, 'v1.17 check 5: the wall line went up (gap at y=600)', 'segments=' + wallN5 + ' at x=' + lineX5);
   const miBait = await call('dbg_warfind', 1);
-  await call('dbg_warmove', miBait, 640, 430);
+  await call('dbg_warmove', miBait, lineX5 - 60, 430);
   const harvBait = await call('dbg_warfind', 0);
   await call('dbg_warmove', harvBait, 200, 1100);   // park the harvester far west — east-side nodes would make IT the bug's nearest unit target
-  await call('dbg_warspawnbug', 790, 470);
+  await call('dbg_warspawnbug', lineX5 + 90, 470);
   let bugI = -1;
   for (let i = 0; i < 80; i++) {
-    await call('dbg_warmove', miBait, 640, 430);   // keep the bait glued down while we look — unpinned, it charges the bug and kills it east of the line
+    await call('dbg_warmove', miBait, lineX5 - 60, 430);   // keep the bait glued down while we look — unpinned, it charges the bug and kills it east of the line
     const v = await call('dbg_warunitxy', i);
     if (v < 0) continue;
     const [ux, uy] = unxy(v);
-    if (ux > 715 && Math.abs(uy - 470) < 60) { bugI = i; break; }
+    if (ux > lineX5 + 15 && Math.abs(uy - 470) < 60) { bugI = i; break; }
   }
   ok(bugI >= 0, 'v1.17 check 5: the spawned bug is tracked', 'idx=' + bugI);
   let crossed5 = false;
@@ -735,9 +794,9 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
       // pursuit path reads the jump as a stale target and drops
       // mid-route (the bug lunged to the wall's end three times and
       // fell back). ~120ms keeps the bait within ~15u of its post.
-      await call('dbg_warmove', miBait, 640, 430);   // pin the bait west of the line
+      await call('dbg_warmove', miBait, lineX5 - 60, 430);   // pin the bait west of the line
       const v = await call('dbg_warunitxy', bugI);
-      if (v >= 0 && Math.floor(v / 10000) <= 686) { crossed5 = true; break; }
+      if (v >= 0 && Math.floor(v / 10000) <= lineX5 - 14) { crossed5 = true; break; }
       await sleep(120);
     }
   }
@@ -759,7 +818,10 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   ok(gateI >= 0 && (await call('dbg_warstructs', 6)) === 1, 'v1.17 check 11: the gate went up in the wall line', 'idx=' + gateI);
   if (gateI >= 0) {
     const gateHp0 = await call('dbg_warhurt', 1, gateI, 0);
-    await call('dbg_warspawnbug', 570, 600);
+    // v1.18: spawned at 545, not 570 — barrier lines start at
+    // x>=560, and one standing at the old spawn could detour the
+    // bug around the wall's end instead of onto the gate
+    await call('dbg_warspawnbug', 545, 600);
     let bugG = -1;
     for (let i = 0; i < 80; i++) {
       const v = await call('dbg_warunitxy', i);
@@ -791,16 +853,24 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   ok((await call('dbg_warenter', 0)) === 1, 'v1.17 check 12: fresh battle');
   await sleep(400);
   await call('dbg_waraddbits', 4000);
-  // neither the line's x nor its gate spot is fixed: region terrain
-  // is deterministic and dense along any one line, so scan the
-  // debris field and put the line + gate where the clearance is
+  // neither the line's x nor its gate spot is fixed: scan the
+  // terrain field and put the line + gate where the clearance is
   // best (clearance >= 62 also covers the gate's wall neighbours:
-  // debris refusal reaches ~37u, and a neighbour sits 24u away)
+  // debris refusal reaches ~37u, and a neighbour sits 24u away).
+  // v1.18: candidate columns also keep >=64u from any BARRIER
+  // line's x — a parallel barrier would refuse the wall's segments
+  // en masse along its whole span, which the spot scan can't see.
   const tn12 = await call('dbg_warterrain');
   const feats12 = [];
-  for (let t = 0; t < tn12; t++) feats12.push(unxy(await call('dbg_warfeatxy', t)));
+  const barrierXs = new Set();
+  for (let t = 0; t < tn12; t++) {
+    feats12.push(unxy(await call('dbg_warfeatxy', t)));
+    const f = await call('dbg_warfeat', t);
+    if (f >= 0 && f % 100 === 5) barrierXs.add(feats12[t][0]);
+  }
   let lineX = -1, gateY = -1, bestClear = -1;
   for (const lx of [816, 864, 912, 960]) {
+    if ([...barrierXs].some(bx => Math.abs(bx - lx) < 64)) continue;
     for (let y = 408; y <= 792; y += 24) {
       let clear = 1e9;
       for (const [fx, fy] of feats12) if (Math.abs(fx - lx) < 60) clear = Math.min(clear, Math.abs(fy - y));
@@ -844,7 +914,18 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   ok((await call('dbg_warenter', 0)) === 1, 'v1.17 check 13: fresh battle');
   await sleep(400);
   await call('dbg_waraddbits', 500);
-  const gateS = await call('dbg_warbuildxy', 6, 600, 300);
+  // v1.18: the gate's spot is scanned for — the old fixed (600,300)
+  // sits in barrier-line country now and a line there refuses it
+  const tn13 = await call('dbg_warterrain');
+  const feats13 = [];
+  for (let t = 0; t < tn13; t++) { const v = await call('dbg_warfeatxy', t); if (v >= 0) feats13.push(unxy(v)); }
+  let gateSpot = null;
+  for (const [cx, cy] of [[600, 300], [500, 300], [700, 300], [600, 450], [450, 450], [750, 450], [600, 200], [500, 800], [700, 800], [400, 300]]) {
+    if (feats13.some(([fx, fy]) => Math.hypot(fx - cx, fy - cy) < 48)) continue;
+    gateSpot = [cx, cy]; break;
+  }
+  ok(!!gateSpot, 'v1.17 check 13: a clear gate spot exists');
+  const gateS = gateSpot ? await call('dbg_warbuildxy', 6, gateSpot[0], gateSpot[1]) : -1;
   ok(gateS >= 0 && (await call('dbg_warstructs', 6)) === 1, 'v1.17 check 13: gate built', 'idx=' + gateS);
   if (gateS >= 0) {
     const gateHpS = await call('dbg_warhurt', 1, gateS, 0);
@@ -946,11 +1027,27 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   await tap(320, 157);
   if ((await call('dbg_warselstruct')) !== pbR) { await sleep(500); await tap(320, 157); }
   ok((await poll('dbg_warselstruct', [], v => v === pbR, 4000)) === pbR, 'v1.17 check 17: Patch Bay selected');
-  const rdx = rx >= 280 ? 120 : -120;   // rally AWAY from the Core, so the tap can't land on it
-  await tap(320 + rdx, 157);
+  // v1.18: the rally offset is scanned for — random debris on the
+  // tap point would swallow the tap before it could plant the flag
+  const tn17r = await call('dbg_warterrain');
+  const feats17r = [];
+  for (let t = 0; t < tn17r; t++) { const v = await call('dbg_warfeatxy', t); if (v >= 0) feats17r.push(unxy(v)); }
+  const structs17r = [];
+  for (let s = 0; s < 28; s++) { const v = await call('dbg_warstructxy', s); if (v >= 0) structs17r.push(unxy(v)); }
+  let rallyOff = null;
+  for (const [ox, oy] of [[120, 0], [-120, 0], [0, 120], [0, -120], [120, 120], [-120, -120], [120, -120], [-120, 120]]) {
+    const px = rx + ox, py = ry + oy;
+    if (px < 60 || px > 1540 || py < 60 || py > 1140) continue;
+    if (feats17r.some(([fx, fy]) => Math.hypot(fx - px, fy - py) < 32)) continue;
+    if (structs17r.some(([sx2, sy2]) => Math.hypot(sx2 - px, sy2 - py) < 48)) continue;   // never on a building (the Core included)
+    rallyOff = [ox, oy]; break;
+  }
+  ok(!!rallyOff, 'v1.17 check 17: a clear rally offset exists');
+  const rdx = rallyOff ? rallyOff[0] : 120, rdy = rallyOff ? rallyOff[1] : 0;
+  await tap(320 + rdx, 157 + rdy);
   const rallyV = await call('dbg_warrally', pbR);
-  ok(rallyV >= 0 && Math.abs(Math.floor(rallyV / 10000) - (rx + rdx)) <= 1 && Math.abs((rallyV % 10000) - ry) <= 1,
-     'v1.17 check 17: the rally point is where the field was tapped', 'rally=' + rallyV + ' want ~' + (rx + rdx) + ',' + ry);
+  ok(rallyV >= 0 && Math.abs(Math.floor(rallyV / 10000) - (rx + rdx)) <= 1 && Math.abs((rallyV % 10000) - (ry + rdy)) <= 1,
+     'v1.17 check 17: the rally point is where the field was tapped', 'rally=' + rallyV + ' want ~' + (rx + rdx) + ',' + (ry + rdy));
   ok((await call('dbg_warselstruct')) === pbR, 'v1.17 check 17: the building stayed selected');
   const idxBefore17 = new Set();
   for (let i = 0; i < 80; i++) if ((await call('dbg_warunitxy', i)) >= 0) idxBefore17.add(i);
@@ -966,7 +1063,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     const reached = await poll('dbg_warunitxy', [newI17], v => {
       if (v < 0) return false;
       const [ux, uy] = unxy(v);
-      return Math.hypot(ux - (rx + rdx), uy - ry) < 30;
+      return Math.hypot(ux - (rx + rdx), uy - (ry + rdy)) < 30;
     }, 25000, 200);
     ok(reached >= 0, 'v1.17 check 17: it walked to the rally point', 'xy=' + reached);
   }
@@ -978,7 +1075,20 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   await tap(320, 157);   // select the Core
   if ((await call('dbg_warselstruct')) !== 0) { await sleep(600); await tap(320, 157); }
   ok((await poll('dbg_warselstruct', [], v => v === 0, 4000)) === 0, 'v1.17 check 18: Core selected');
-  await tap(420, 200);   // world (380,643): the rally tap
+  // v1.18: the rally tap point is scanned for — the old fixed
+  // (380,643) sits just outside the Core's debris clearance, where
+  // a random piece can now swallow the tap. Any clear point on the
+  // ~110u ring does; the round trip below reads it back live.
+  const tn18 = await call('dbg_warterrain');
+  const feats18 = [];
+  for (let t = 0; t < tn18; t++) { const v = await call('dbg_warfeatxy', t); if (v >= 0) feats18.push(unxy(v)); }
+  let rallyPt18 = null;
+  for (const [cx, cy] of [[390, 600], [380, 643], [280, 490], [280, 710], [170, 600], [358, 522], [358, 678], [202, 522], [202, 678]]) {
+    if (feats18.some(([fx, fy]) => Math.hypot(fx - cx, fy - cy) < 45)) continue;
+    rallyPt18 = [cx, cy]; break;
+  }
+  ok(!!rallyPt18, 'v1.17 check 18: a clear rally point exists near the Core');
+  await tap(320 + (rallyPt18[0] - 280), 157 + (rallyPt18[1] - 600));   // the scanned point: the rally tap
   const rally18 = await call('dbg_warrally', 0);
   ok(rally18 >= 0, 'v1.17 check 18: rally set on the Core', 'rally=' + rally18);
   await key('Escape', 300);
@@ -1049,7 +1159,24 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   await tap(320, 157);   // select the Zapper
   if ((await call('dbg_warselstruct')) !== zpS) { await sleep(500); await tap(320, 157); }
   ok((await poll('dbg_warselstruct', [], v => v === zpS, 4000)) === zpS, 'v1.17 check 19: Zapper selected');
-  await tap(320, 60);   // empty field north of it
+  // v1.18: the "empty field" tap point is scanned for — random
+  // debris there would eat the tap (the debris branch returns
+  // before the deselect fallthrough) and the Zapper would stay
+  // selected. Barriers are safe (the scan skips them); debris not.
+  const tn19 = await call('dbg_warterrain');
+  const feats19 = [];
+  for (let t = 0; t < tn19; t++) { const v = await call('dbg_warfeatxy', t); if (v >= 0) feats19.push(unxy(v)); }
+  const structs19 = [];
+  for (let s = 0; s < 28; s++) { const v = await call('dbg_warstructxy', s); if (v >= 0) structs19.push(unxy(v)); }
+  let deselOff = null;
+  for (const [ox, oy] of [[0, -97], [120, -97], [-120, -97], [0, 120], [150, 60], [-150, 60], [180, 0], [-180, 0]]) {
+    const px = szx + ox, py = szy + oy;
+    if (feats19.some(([fx, fy]) => Math.hypot(fx - px, fy - py) < 28)) continue;
+    if (structs19.some(([sx2, sy2]) => Math.hypot(sx2 - px, sy2 - py) < 44)) continue;
+    deselOff = [ox, oy]; break;
+  }
+  ok(!!deselOff, 'v1.17 check 19: a clear deselect point exists');
+  await tap(320 + deselOff[0], 157 + deselOff[1]);   // empty field by the Zapper
   ok((await poll('dbg_warselstruct', [], v => v === -1, 4000)) === -1, 'v1.17 check 19: with a Zapper selected, a field tap still just deselects');
 
   // region 2 is unlocked now
@@ -1166,6 +1293,178 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   ok((await call('dbg_warstate')) === 1, 'v1.17 check 9: after Continue, the parked battle was restored from the save file');
   ok((await call('dbg_warconq')) === 1, 'after Continue: region 1 is STILL conquered');
   ok((await call('dbg_warregion')) === 1, 'v1.17 check 9: the restored battle is region 2 (unlocked, and still in progress)');
+
+  // ================= v1.18 "SHIFTING GROUND" (Nov 16) =============
+  // checks 20-24. Check 20 is Daniel's repro, folded in from the
+  // old probe-sqmap.js: SAVE & QUIT, then tap the SAME region's
+  // node on the world map — v1.17 started a FRESH battle there and
+  // the next autosave erased the parked one. Map node positions
+  // come from war_node_pos over the 640x360 view (centre (320,194),
+  // radii (230.4, 106.2), region r at angle -PI/2 + r*PI/4).
+  const nodeXY = r => {
+    const a = -Math.PI / 2 + r * Math.PI / 4;
+    return [Math.round(320 + Math.cos(a) * 230.4), Math.round(194 + Math.sin(a) * 106.2)];
+  };
+  // readings taken with the pause menu open read a frozen battle
+  // exactly (the check-7 pattern); leaves the pause menu UP
+  const frozenReadings = async () => {
+    await key('Escape', 300);
+    await poll('dbg_warpause', [], v => v === 1, 4000);
+    return { bits: await call('dbg_warbits'), units: await call('dbg_warunits', 0, -1), nodes: await call('dbg_warnodes') };
+  };
+  const saveQuitToMap = async () => {   // the pause menu is open
+    await tap(320, 234);   // SAVE & QUIT
+    await poll('dbg_warstate', [], v => v === 0, 4000);
+    await sleep(600);   // SAVE & QUIT arms a 0.3s map grace (the closing press must not leak a launch) — let it lapse before tapping a node
+  };
+  const sameReadings = (a, b) => a.bits === b.bits && a.units === b.units && a.nodes === b.nodes;
+  const readingsStr = r => r.bits + '/' + r.units + '/' + r.nodes;
+  // state+region+snap read in ONE evaluate, between frames: a
+  // restore consumes the snapshot, but the 5s autosave re-fills the
+  // buffer from the live battle — separate reads race that refill,
+  // so assertions about the consumption instant read all three at
+  // the same instant the battle appears
+  const instantWar = () => page.evaluate(() => [window.__TSG.dbg_warstate(), window.__TSG.dbg_warregion(), window.__TSG.dbg_warsnap()]);
+  const pollInstant = async () => { const t0 = Date.now(); let v = await instantWar(); while (v[0] !== 1 && Date.now() - t0 < 6000) { await sleep(120); v = await instantWar(); } return v; };
+
+  // check 20: park the frontier (region 2) battle, tap region 2's
+  // node on the map — the PARKED battle must come back, consumed
+  const r20 = await frozenReadings();
+  await saveQuitToMap();
+  ok((await call('dbg_warstate')) === 0 && (await call('dbg_warsnap')) === 1, 'v1.18 check 20: battle parked, back on the map');
+  await cv.screenshot({ path: __dirname + '/war-map-progress.png' });   // the IN PROGRESS marker lives here
+  const [n1x, n1y] = nodeXY(1);
+  await tap(n1x, n1y);   // region 2's node — the player move from the repro
+  const inst20 = await pollInstant();
+  ok(inst20[0] === 1, 'v1.18 check 20: the map tap re-entered a battle');
+  ok(inst20[1] === 1 && inst20[2] === 0,
+     'v1.18 check 20: the PARKED battle was restored (snapshot consumed), not a fresh one',
+     'region=' + inst20[1] + ' snap=' + inst20[2]);
+  const r20b = await frozenReadings();
+  ok(sameReadings(r20b, r20), 'v1.18 check 20: bits, army and nodes match the parked battle exactly',
+     readingsStr(r20b) + ' vs parked ' + readingsStr(r20));
+  await tap(320, 146);   // RESUME — close the pause menu again
+
+  // check 21: the park survives a detour — park the frontier
+  // battle, REPLAY a conquered region from the map, win it, leave
+  // the cabinet, re-enter: the FRONTIER battle must restore
+  const r21 = await frozenReadings();
+  await saveQuitToMap();
+  ok((await call('dbg_warsnap')) === 1, 'v1.18 check 21: frontier battle parked again');
+  const [n0x, n0y] = nodeXY(0);
+  await tap(n0x, n0y);   // region 1: conquered — a fresh replay
+  ok((await poll('dbg_warstate', [], v => v === 1, 5000)) === 1 && (await call('dbg_warregion')) === 0,
+     'v1.18 check 21: the conquered region started a fresh replay');
+  ok((await call('dbg_warsnap')) === 1, 'v1.18 check 21: the frontier park survived starting another battle');
+  await call('dbg_warhurt', 1, 1, 99999);   // raze the replay's hive (struct 1)
+  ok((await poll('dbg_warstate', [], v => v === 2, 5000)) === 2, 'v1.18 check 21: replay won');
+  ok((await poll('dbg_warstate', [], v => v === 0, 8000)) === 0, 'v1.18 check 21: back on the map');
+  ok((await call('dbg_warsnap')) === 1, 'v1.18 check 21: winning the replay did NOT clear the frontier park');
+  await key('Escape', 300);
+  ok((await poll('dbg_bwmode', [], v => v === -1, 4000)) === -1, 'v1.18 check 21: left WAR!');
+  await call('dbg_bwentm', 8); await sleep(500);
+  const inst21 = await pollInstant();
+  ok(inst21[0] === 1, 'v1.18 check 21: re-entering the cabinet restored a battle');
+  ok(inst21[1] === 1, 'v1.18 check 21: it is the FRONTIER battle, not the replay', 'region=' + inst21[1]);
+  const r21b = await frozenReadings();
+  ok(sameReadings(r21b, r21), 'v1.18 check 21: bits, army and nodes match the frontier park exactly',
+     readingsStr(r21b) + ' vs parked ' + readingsStr(r21));
+  await tap(320, 146);   // RESUME
+
+  // check 22: novelty — two consecutive battles of the SAME region
+  // (RESTART between) roll different fields: the hive moves along
+  // the far side, the terrain re-rolls
+  ok((await call('dbg_warenter', 0)) === 1, 'v1.18 check 22: battle A');
+  await sleep(500);
+  const hiveA = await call('dbg_warhivexy'), tnA22 = await call('dbg_warterrain'), barA22 = await call('dbg_warbarriers');
+  const fA0 = await call('dbg_warfeatxy', 0), fA10 = await call('dbg_warfeatxy', 10);
+  await key('Escape', 300);
+  ok((await poll('dbg_warpause', [], v => v === 1, 4000)) === 1, 'v1.18 check 22: pause menu up');
+  await tap(320, 190);   // RESTART BATTLE — a fresh roll of the same region
+  ok((await poll('dbg_warpause', [], v => v === 0, 4000)) === 0 && (await call('dbg_warstate')) === 1,
+     'v1.18 check 22: RESTART rolled battle B');
+  await sleep(300);
+  const hiveB = await call('dbg_warhivexy'), tnB22 = await call('dbg_warterrain'), barB22 = await call('dbg_warbarriers');
+  const fB0 = await call('dbg_warfeatxy', 0), fB10 = await call('dbg_warfeatxy', 10);
+  ok(hiveA >= 0 && hiveB >= 0 && hiveA !== hiveB, 'v1.18 check 22: the hive MOVED between battles of the same region',
+     'hive ' + hiveA + ' -> ' + hiveB);
+  ok(Math.floor(hiveA / 10000) >= 1200 && Math.floor(hiveB / 10000) >= 1200,
+     'v1.18 check 22: both hives sit along the far (east) side', hiveA + ' / ' + hiveB);
+  ok(tnA22 !== tnB22 || barA22 !== barB22 || fA0 !== fB0 || fA10 !== fB10,
+     'v1.18 check 22: the terrain re-rolled too', 'tn ' + tnA22 + '->' + tnB22 + ', barriers ' + barA22 + '->' + barB22);
+
+  // check 23: barriers — they exist, a unit paths THROUGH the gap
+  // (or around an end), and tapping one is a move order, never an
+  // attack (they are indestructible)
+  ok((await call('dbg_warenter', 0)) === 1, 'v1.18 check 23: fresh battle');
+  await sleep(500);
+  const barN = await call('dbg_warbarriers');
+  ok(barN > 20, 'v1.18 check 23: barrier segments stand on the field', 'count=' + barN);
+  const tn23 = await call('dbg_warterrain');
+  const segs23 = [];   // [terrainIdx, x, y] of every barrier segment
+  for (let t = 0; t < tn23; t++) {
+    const f = await call('dbg_warfeat', t);
+    if (f < 0 || f % 100 !== 5) continue;
+    const [fx, fy] = unxy(await call('dbg_warfeatxy', t));
+    segs23.push([t, fx, fy]);
+  }
+  let lineX23 = 1e9; for (const [, sx] of segs23) lineX23 = Math.min(lineX23, sx);
+  const lineYs = segs23.filter(([, sx]) => Math.abs(sx - lineX23) < 6).map(([, , sy]) => sy).sort((a, b) => a - b);
+  // the passage: the widest internal gap in the line, else an open end
+  let gapY23 = -1, widest = 0;
+  for (let i = 1; i < lineYs.length; i++) {
+    const jump = lineYs[i] - lineYs[i - 1];
+    if (jump > widest) { widest = jump; gapY23 = (lineYs[i] + lineYs[i - 1]) / 2; }
+  }
+  if (widest < 96) gapY23 = lineYs[0] >= 200 ? lineYs[0] - 70 : lineYs[lineYs.length - 1] + 70;
+  ok(lineYs.length >= 8 && gapY23 > 0, 'v1.18 check 23: the west barrier line has a passage', 'segments=' + lineYs.length + ' gapY=' + Math.round(gapY23));
+  const mi23 = await call('dbg_warfind', 1);
+  await call('dbg_warmove', mi23, lineX23 - 80, Math.round(gapY23));
+  ok((await call('dbg_wartapunit', mi23)) === 1, 'v1.18 check 23: melee selected');
+  await call('dbg_warcam', lineX23, Math.round(gapY23)); await sleep(250);
+  await cv.screenshot({ path: __dirname + '/war-barrier.png' });
+  await tap(440, 157);   // world (lineX+120, gapY): east of the line
+  const crossed23 = await poll('dbg_warunitxy', [mi23], v => v >= 0 && Math.floor(v / 10000) > lineX23 + 60, 30000, 250);
+  ok(crossed23 >= 0 && Math.floor(crossed23 / 10000) > lineX23 + 60,
+     'v1.18 check 23: the melee crossed the barrier line (through the gap / around an end)', 'xy=' + crossed23);
+  // tapping a barrier segment: a ranged unit ordered onto one must
+  // WALK to it (move order) — an attack order would stop it at
+  // range (~110u out) and leave it shooting a wall it cannot hurt
+  await call('dbg_waraddbits', 1000);
+  ok((await call('dbg_warbuildat', 1)) > 0, 'v1.18 check 23: Patch Bay built');
+  ok((await call('dbg_wartrain', 2)) === 1, 'v1.18 check 23: a bolt buddy trained');
+  let segFar = null;   // the line segment farthest from the passage
+  for (const s of segs23) if (Math.abs(s[1] - lineX23) < 6 && (!segFar || Math.abs(s[2] - gapY23) > Math.abs(segFar[2] - gapY23))) segFar = s;
+  const bolt23 = await call('dbg_warfind', 2);
+  await call('dbg_warmove', bolt23, lineX23 - 170, segFar[2]);
+  ok((await call('dbg_wartapunit', bolt23)) === 1, 'v1.18 check 23: bolt buddy selected');
+  await call('dbg_warcam', segFar[1], segFar[2]); await sleep(250);
+  const segPos = unpos(await call('dbg_warfeatpos', segFar[0]));
+  await tap(segPos[0], segPos[1]);   // tap the barrier segment itself
+  const walked23 = await poll('dbg_warunitxy', [bolt23], v => {
+    if (v < 0) return false;
+    const [ux, uy] = unxy(v);
+    return Math.hypot(ux - segFar[1], uy - segFar[2]) < 45;
+  }, 40000, 250);
+  ok(walked23 >= 0, 'v1.18 check 23: the bolt buddy WALKED to the tapped barrier (a move order, not an attack)',
+     'xy=' + walked23 + ' segment at ' + segFar[1] + ',' + segFar[2]);
+  const segHp = await call('dbg_warfeat', segFar[0]);
+  ok(Math.floor(segHp / 100) === 99999 && (await call('dbg_warbarriers')) === barN,
+     'v1.18 check 23: the barrier is untouched — indestructible', 'hp=' + Math.floor(segHp / 100));
+
+  // check 24: barriers ride the snapshot — park this battle, leave
+  // the cabinet, re-enter: the same wall stands
+  const barBefore = await call('dbg_warbarriers'), tnBefore = await call('dbg_warterrain');
+  await frozenReadings();
+  await saveQuitToMap();
+  ok((await call('dbg_warsnap')) === 1, 'v1.18 check 24: battle with barriers parked');
+  await key('Escape', 300);
+  ok((await poll('dbg_bwmode', [], v => v === -1, 4000)) === -1, 'v1.18 check 24: left WAR!');
+  await call('dbg_bwentm', 8); await sleep(500);
+  ok((await poll('dbg_warstate', [], v => v === 1, 5000)) === 1, 'v1.18 check 24: battle restored');
+  ok((await call('dbg_warbarriers')) === barBefore && (await call('dbg_warterrain')) === tnBefore,
+     'v1.18 check 24: the barrier count survived the snapshot round trip',
+     (await call('dbg_warbarriers')) + '/' + (await call('dbg_warterrain')) + ' vs ' + barBefore + '/' + tnBefore);
 
   console.log(`\nwartest: ${pass} passed, ${fail} failed`);
   await browser.close();
