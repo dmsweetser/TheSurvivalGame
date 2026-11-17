@@ -499,6 +499,16 @@ typedef struct {
     // to, so any change of selection retires the highlight.
     float war_curx, war_cury; int war_curon;
     int war_barhl, war_barhl_s;
+    // v1.20: command-bar CAPTURE (Daniel's design). When a building
+    // becomes selected through the pad's own A-tap, the bar takes
+    // the pad over: war_barcap is set, the field cursor freezes and
+    // hides, and the stick/bumpers walk war_barhl instead — moving
+    // the stick no longer retires the highlight. war_barhl_row says
+    // which row the highlight walks: 0 = the war_bar_list row (the
+    // open category's options, or the top level itself), 1 = the
+    // category row in the bar. war_capnx/war_capny hold the stick's
+    // previous-frame signs, for edge detection while captured.
+    int war_barcap, war_barhl_row, war_capnx, war_capny;
     // v1.17: the battle pause menu (Esc in a battle) and the
     // categorized command bar. war_bcat: -1 top level (categories),
     // 0 TRAIN, 1 BUILD, 2 DEFENSE. war_pause freezes the battle.

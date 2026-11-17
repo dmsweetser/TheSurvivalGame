@@ -152,7 +152,7 @@ static void war_clear_field(BwSim *S){
     for (int i=0;i<WAR_MAXP;i++) S->war_pt[i]=0;
     S->war_selstruct=-1; S->war_place=-1;
     S->war_tn=0; S->war_ltap_n=0; S->war_ltap_unit=-1;
-    S->war_curon=0; S->war_barhl=-1; S->war_barhl_s=-1;   // a fresh field has no pad cursor and no bar highlight
+    S->war_curon=0; S->war_barhl=-1; S->war_barhl_s=-1; S->war_barcap=0; S->war_barhl_row=0;   // a fresh field has no pad cursor, no bar highlight and no bar capture (v1.20)
     S->war_pause=0; S->war_bcat=-1;   // v1.17: no pause menu, bar at its top level
     // v1.19: a cleared field is a CAMPAIGN field at full size —
     // war_setup_battle overrides these for a skirmish right after
@@ -1893,6 +1893,81 @@ static void war_pad_update(int pi, float dt){
     // the bar highlight belongs to one structure's selection; any
     // change of selection — from any device — retires it
     if (S->war_barhl_s != S->war_selstruct){ S->war_barhl = -1; S->war_barhl_s = S->war_selstruct; }
+    // v1.20: command-bar CAPTURE (Daniel's design — the cursor is
+    // NOT flown down to the bar; the bar takes the pad over). A
+    // building selected through the pad's own A-tap (the entry is at
+    // the A press below) captures: the highlight lands on the first
+    // option of the current row, the field cursor freezes and hides
+    // (war_render), the camera holds still, and the stick walks the
+    // menu — moving it no longer retires the highlight. Capture is
+    // validated every frame: it lives only while its building does.
+    if (S->war_barcap && (S->war_selstruct<0 || !war_struct_alive(S, S->war_selstruct))){
+        S->war_barcap = 0; S->war_barhl = -1; S->war_barhl_row = 0;
+    }
+    if (S->war_barcap){
+        int acts[5], costs[5]; const char *names[5];
+        int ca[5], cc[5]; const char *cn[5];
+        // stick edges: a fresh deflection steps once — holding the
+        // stick does not spin the highlight
+        int navx = (IN.pad_ax[0]>0.18f)? 1 : (IN.pad_ax[0]<-0.18f)? -1 : 0;
+        int navy = (IN.pad_ax[1]>0.18f)? 1 : (IN.pad_ax[1]<-0.18f)? -1 : 0;
+        int ex = (navx!=0 && navx!=S->war_capnx)? navx : 0;
+        int ey = (navy!=0 && navy!=S->war_capny)? navy : 0;
+        S->war_capnx = navx; S->war_capny = navy;
+        if ((pe & (1u<<ACT_WNEXT)) && !ex) ex = 1;   // the bumpers walk the same row
+        if ((pe & (1u<<ACT_WPREV)) && !ex) ex = -1;
+        if (ex){
+            int n = S->war_barhl_row==1? war_bar_cats(S, ca, cc, cn) : war_bar_list(S, acts, costs, names);
+            if (n>0){ S->war_barhl = S->war_barhl<0? (ex>0? 0 : n-1) : (S->war_barhl + ex + n) % n; sfx(6); }
+        }
+        if (ey && S->war_bcat>=0){   // two rows are up: up/down hops between the options row and the category row
+            if (ey>0 && S->war_barhl_row==0){
+                int cn2 = war_bar_cats(S, ca, cc, cn);
+                S->war_barhl_row = 1; S->war_barhl = 0;
+                for (int i=0;i<cn2;i++) if (ca[i]==20+S->war_bcat){ S->war_barhl = i; break; }   // land on the open category
+                sfx(6);
+            } else if (ey<0 && S->war_barhl_row==1){
+                S->war_barhl_row = 0; S->war_barhl = 0; sfx(6);
+            }
+        }
+        // A works the menu: on the category row it switches the
+        // category and hands back its options row; on the options
+        // row it activates through war_bar_activate — a TRAIN option
+        // queues and KEEPS capture (queue several), while arming a
+        // placement hands the field cursor back for the placement
+        if ((pe & (1u<<ACT_FIRE)) && S->war_grace<=0 && S->war_barhl>=0){
+            if (S->war_barhl_row==1){
+                int cn2 = war_bar_cats(S, ca, cc, cn);
+                if (S->war_barhl<cn2){ S->war_bcat = ca[S->war_barhl]-20; S->war_barhl_row = 0; S->war_barhl = 0; sfx(6); }
+            } else {
+                int n = war_bar_list(S, acts, costs, names);
+                if (S->war_barhl<n){
+                    int act = acts[S->war_barhl];
+                    war_bar_activate(pi, S->war_barhl);
+                    if (S->war_place>=0){ S->war_barcap = 0; S->war_barhl = -1; S->war_barhl_row = 0; }
+                    else if (act>=20 && act<=22) S->war_barhl = 0;   // a category opened from the top level: its options row starts at the first option
+                }
+            }
+        }
+        // B peels, captured-style: an open category on a
+        // multi-category building closes back to the top-level row,
+        // still captured; anything else exits capture AND clears the
+        // selection — Daniel's "cancel to get out of the selection"
+        if (pe & (1u<<ACT_INTERACT)){
+            int cn2 = war_bar_cats(S, ca, cc, cn);
+            if (S->war_bcat>=0 && cn2>1){
+                int old = S->war_bcat;
+                S->war_bcat = -1; S->war_barhl_row = 0; S->war_barhl = 0;
+                for (int i=0;i<cn2;i++) if (ca[i]==20+old){ S->war_barhl = i; break; }
+                sfx(6);
+            } else {
+                S->war_barcap = 0; S->war_barhl = -1; S->war_barhl_row = 0;
+                for (int i=0;i<WAR_MAXU;i++) S->war_usel[i]=0;
+                S->war_selstruct = -1; S->war_bcat = -1; sfx(6);
+            }
+        }
+        return;   // captured: no cursor flight, no pan, no edge-follow this frame
+    }
     // left stick: the cursor flies (and retires the bar highlight —
     // A goes back to pressing the field)
     if (lx || ly){
@@ -1922,7 +1997,7 @@ static void war_pad_update(int pi, float dt){
       if (csx < vx+28) S->war_camx -= (vx+28 - csx);
       if (csx > vx+vw2-28) S->war_camx += (csx - (vx+vw2-28));
       if (csy < vy+28) S->war_camy -= (vy+28 - csy);
-      if (csy > vy+vh2-28) S->war_camy += (csy - (vy+vh2-28));   // the bottom margin sits inside the bar strip, so dropping into the bar itself never pans — only pushing off the screen's edge does
+      if (csy > vy+vh2-28) S->war_camy += (csy - (vy+vh2-28));
       war_clamp_cam(S);
       csx = (float)vx + vw2/2 + (S->war_curx - S->war_camx);
       csy = (float)vy + vh2/2 + (S->war_cury - S->war_camy - WAR_BAR_H*0.5f);
@@ -1960,7 +2035,19 @@ static void war_pad_update(int pi, float dt){
         else {
             int csx = vx + vw2/2 + (int)(S->war_curx - S->war_camx);
             int csy = vy + vh2/2 + (int)(S->war_cury - S->war_camy - WAR_BAR_H*0.5f);
+            int ssb = S->war_selstruct;
             war_handle_tap(pi, csx, csy);
+            // v1.20: a building that became selected through THIS
+            // pad tap captures the command bar (the capture block
+            // above) — if it has a menu at all. Selections of units,
+            // deselects and rally taps never capture.
+            if (S->war_selstruct>=0 && S->war_selstruct!=ssb){
+                int ta[5], tc[5]; const char *tn[5];
+                if (war_bar_list(S, ta, tc, tn)>0){
+                    S->war_barcap = 1; S->war_barhl = 0; S->war_barhl_row = 0;
+                    S->war_barhl_s = S->war_selstruct; S->war_capnx = 0; S->war_capny = 0;
+                }
+            }
         }
     }
 }
@@ -2003,6 +2090,7 @@ static void war_update(int pi, float dt, const BwIn *in){
     }
     if (pi==G.my_id && IN.tapped){
         S->war_curon=0;   // a real tap: the finger/mouse takes the field back (last device wins)
+        if (S->war_barcap){ S->war_barcap=0; S->war_barhl=-1; S->war_barhl_row=0; }   // v1.20: ...and it ends a bar capture the same way
         if (S->war_grace<=0){ IN.tapped=0; war_handle_tap(pi, IN.tap_x, IN.tap_y); }
     }
     else if (pi!=G.my_id && in->interact && S->war_grace<=0) war_tap_world(pi, S->war_camx, S->war_camy);
@@ -2131,18 +2219,22 @@ static void war_render_bar(int pi, int vx, int vy, int vw2, int vh2){
         // strip directly above the bar, the categories in the bar
         // itself. The pad highlight walks the OPTIONS (the current
         // row), so it is drawn up there; WAR_BAR_H never changes.
+        // v1.20: under bar capture the highlight may walk the
+        // category row instead — each row draws it only when it is
+        // the walked row (war_barhl_row); outside capture the row
+        // is always 0 and this renders exactly as before.
         int sy2 = by - WAR_SUB_H;
         rect_fill(vx, sy2, vw2, WAR_SUB_H, COL(18,17,28));
         rect_fill(vx, sy2, vw2, 2, COL(52,48,74));
-        for (int i=0;i<n;i++) war_draw_bar_btn(S, vx + 6 + i*90, sy2, acts[i], costs[i], names[i], i==S->war_barhl);
+        for (int i=0;i<n;i++) war_draw_bar_btn(S, vx + 6 + i*90, sy2, acts[i], costs[i], names[i], i==S->war_barhl && S->war_barhl_row==0);
         { const char *cl = S->war_bcat==0? "TRAIN" : S->war_bcat==1? "BUILD" : "DEFENSE";
           int ix = vx + 6 + n*90 + 10;
           if (ix + text_w(cl,1) < vx+vw2) draw_text(ix, sy2+17, cl, 1, COL(255,220,120)); }
         int ca[5], cc[5]; const char *cn[5];
         int cn2 = war_bar_cats(S, ca, cc, cn);
-        for (int i=0;i<cn2;i++) war_draw_bar_btn(S, vx + 6 + i*90, by, ca[i], cc[i], cn[i], 0);
+        for (int i=0;i<cn2;i++) war_draw_bar_btn(S, vx + 6 + i*90, by, ca[i], cc[i], cn[i], i==S->war_barhl && S->war_barhl_row==1);
     } else {
-        for (int i=0;i<n;i++) war_draw_bar_btn(S, vx + 6 + i*90, by, acts[i], costs[i], names[i], i==S->war_barhl);
+        for (int i=0;i<n;i++) war_draw_bar_btn(S, vx + 6 + i*90, by, acts[i], costs[i], names[i], i==S->war_barhl && S->war_barhl_row==0);
     }
     if (vw2 >= VW){   // the info zone only earns its keep at full width
         int ix = vx + 6 + n*90 + 10;
@@ -2495,7 +2587,7 @@ static void war_render(int pi){
         war_draw_unit(S, b, i);
     }
     war_render_ghost(pi, vx, vy, vw2, vh2);
-    if (pi==G.my_id && S->war_curon && S->war_state==1){   // the pad cursor rides above the fog, like the selected units do (v1.16)
+    if (pi==G.my_id && S->war_curon && S->war_state==1 && !S->war_barcap){   // the pad cursor rides above the fog, like the selected units do (v1.16). v1.20: while the command bar has captured pad control, the field cursor hides — the highlight is the pointer now
         int csx = SX(S->war_curx), csy = SY(S->war_cury);
         int cr = 10 + (int)(fsin(G.anim_t*5.0f)*1.5f);
         circle_out(csx, csy, cr+3, COL(120,100,40));

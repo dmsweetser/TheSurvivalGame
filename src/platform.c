@@ -477,6 +477,7 @@ __attribute__((export_name("dbg_warplace"))) int exp_dbg_warplace(void){ int id 
 __attribute__((export_name("dbg_warcur"))) int exp_dbg_warcur(void){ int id = G.my_id>=0? G.my_id : 0; BwSim *S = &BWS[id];
     if (!S->war_curon) return -1; return (int)(S->war_curx-WAR_OX)*10000 + (int)(S->war_cury-WAR_OY); }   // pad cursor: -1 off, else arena-local x*10000+y (dbg_warunitxy packing)
 __attribute__((export_name("dbg_warbarhl"))) int exp_dbg_warbarhl(void){ int id = G.my_id>=0? G.my_id : 0; return BWS[id].war_barhl; }
+__attribute__((export_name("dbg_warbarcap"))) int exp_dbg_warbarcap(void){ int id = G.my_id>=0? G.my_id : 0; if (!BWS[id].war_barcap) return 0; return BWS[id].war_barhl_row? 2 : 1; }   // v1.20: bar capture — 0 none, 1 captured on the options/list row, 2 captured on the category row
 __attribute__((export_name("dbg_warpause"))) int exp_dbg_warpause(void){ int id = G.my_id>=0? G.my_id : 0; return BWS[id].war_pause; }   // v1.17: the battle pause menu is up
 __attribute__((export_name("dbg_warregion"))) int exp_dbg_warregion(void){ int id = G.my_id>=0? G.my_id : 0; return BWS[id].war_region; }   // v1.17: the region the current battle is for
 __attribute__((export_name("dbg_warsnap"))) int exp_dbg_warsnap(void){ int id = G.my_id>=0? G.my_id : 0; return war_snap_on[id]; }   // v1.17: a battle snapshot is parked for this player

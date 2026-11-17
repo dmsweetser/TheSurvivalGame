@@ -596,8 +596,9 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
      'pad: right stick panned the camera, cursor SCREEN-locked',
      `screen ${scr0[0]},${scr0[1]} -> ${scr1[0]},${scr1[1]}, camx ${scr0[2]} -> ${scr1[2]}`);
 
-  // 4. the command bar by pad: select the Core with A, RB lights a
-  // button, A trains through it. Getting there takes two wakes: the
+  // 4. the command bar by pad: select the Core with A — v1.20: the
+  // selection captures the bar with the first button already lit —
+  // and A works the menu through to a trained unit. Getting there takes two wakes: the
   // first B press only summons the cursor (a waking press is spent
   // waking), the second B peels the unit selection away; then a tap
   // retires the cursor so A's wake respawns it at the camera centre,
@@ -619,12 +620,15 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   await padTap(0);   // A again: the tap itself — the Core is at the camera's centre
   ok((await poll('dbg_warselstruct', [], v => v === 0, 4000)) === 0, 'pad: A at the camera centre selected the Core');
   ok((await call('dbg_warsel')) === 0, 'pad: selecting the Core cleared the unit selection');
-  await padTap(5);   // RB: light the first bar button — v1.17: the TRAIN category
-  ok((await poll('dbg_warbarhl', [], v => v === 0, 4000)) === 0, 'pad: RB lit bar button 0', await call('dbg_warbarhl'));
+  // v1.20: the pad selection CAPTURED the bar on the spot — the
+  // highlight already sits on the first bar button (the TRAIN
+  // category); no RB is needed to light it. (Pre-v1.20 this section
+  // RB-lit the button from dark; capture supersedes that contract.)
+  ok((await poll('dbg_warbarcap', [], v => v === 1, 4000)) === 1, 'pad: selecting the Core captured the bar (v1.20)');
+  ok((await poll('dbg_warbarhl', [], v => v === 0, 4000)) === 0, 'pad: capture lit bar button 0 (TRAIN)', await call('dbg_warbarhl'));
   await padTap(0);   // A opens the category
   ok((await poll('dbg_warbcat', [], v => v === 0, 4000)) === 0, 'pad: A on TRAIN opened the category row');
-  await padTap(5);   // RB: light the first OPTION (HARVESTER)
-  ok((await poll('dbg_warbarhl', [], v => v === 0, 4000)) === 0, 'pad: RB lit option 0 (HARVESTER)');
+  ok((await poll('dbg_warbarhl', [], v => v === 0, 4000)) === 0, 'pad: the highlight returned to option 0 (HARVESTER)');
   const bitsBar = await call('dbg_warbits');
   await padTap(0);   // A presses the lit option
   ok((await poll('dbg_warbits', [], v => v === bitsBar - 80, 4000)) === bitsBar - 80,
@@ -632,19 +636,26 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   ok((await poll('dbg_warunits', [0, 0], v => v === 2, 14000)) === 2, 'pad: the bar-trained harvester rolled out');
 
   // 5. B cancels a pending placement — nothing built, nothing charged.
-  // v1.17 drive: B peels the open TRAIN category shut, RB walks the
-  // category row to DEFENSE, A opens it, RB walks its options to
-  // FIREWALL, A arms it — then B cancels as ever.
-  await padTap(1);   // B: peel the open category shut
+  // v1.20 drive (capture still held from the TRAIN activation): B
+  // peels the open TRAIN category shut but STAYS captured, with the
+  // highlight on the category just closed; RB walks the category
+  // row to DEFENSE, A opens it (highlight back on its options),
+  // RB walks its options to FIREWALL, A arms it — arming hands the
+  // field cursor back (capture ends) — then B cancels as ever.
+  await padTap(1);   // B: peel the open category shut, still captured
   ok((await poll('dbg_warbcat', [], v => v === -1, 4000)) === -1, 'pad: B peeled the open category shut');
-  await padTap(5); await padTap(5); await padTap(5);   // RB x3: TRAIN -> BUILD -> DEFENSE
+  ok((await call('dbg_warbarcap')) === 1 && (await call('dbg_warbarhl')) === 0,
+     'pad: ...still captured, highlight on the closed TRAIN category',
+     'cap=' + (await call('dbg_warbarcap')) + ' hl=' + (await call('dbg_warbarhl')));
+  await padTap(5); await padTap(5);   // RB x2: TRAIN -> BUILD -> DEFENSE
   ok((await poll('dbg_warbarhl', [], v => v === 2, 4000)) === 2, 'pad: RB walked the highlight to DEFENSE (slot 2)', await call('dbg_warbarhl'));
   await padTap(0);   // A opens DEFENSE
   ok((await poll('dbg_warbcat', [], v => v === 2, 4000)) === 2, 'pad: A opened the DEFENSE category');
-  await padTap(5); await padTap(5);   // RB x2: ZAPPER -> FIREWALL
+  await padTap(5);   // RB: ZAPPER -> FIREWALL (the highlight already sat on option 0)
   ok((await poll('dbg_warbarhl', [], v => v === 1, 4000)) === 1, 'pad: RB walked the options to FIREWALL (slot 1)', await call('dbg_warbarhl'));
   await padTap(0);
   ok((await poll('dbg_warplace', [], v => v === 3, 4000)) === 3, 'pad: A on FIREWALL armed its placement');
+  ok((await call('dbg_warbarcap')) === 0, 'pad: arming the placement ended the capture (the field cursor has it now)');
   const bitsPlace = await call('dbg_warbits'), wallsPlace = await call('dbg_warstructs', 3);
   await padTap(1);   // B: cancel
   ok((await poll('dbg_warplace', [], v => v === -1, 4000)) === -1
@@ -1662,6 +1673,78 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   ok((await poll('dbg_warselstruct', [], v => v === pb31, 4000)) === pb31, 'v1.19 check 31: tapping another building MOVED the selection (not a clear)');
   await tap(320, 157);
   ok((await poll('dbg_warselstruct', [], v => v === -1, 4000)) === -1, 'v1.19 check 31: and tapping it once more toggles it off');
+
+  // ================= v1.20 (Nov 17): the bar CAPTURES the pad =====
+  // Daniel's design — he explicitly rejected flying the cursor down
+  // to the bar. When a building becomes selected through the pad's
+  // own A-tap, the command bar captures pad control: the highlight
+  // lands on the first option of the current row, the field cursor
+  // freezes and hides, the stick/bumpers walk the menu (the stick
+  // no longer retires the highlight), A activates through
+  // war_bar_activate, a TRAIN activation keeps capture, and B
+  // cancels out of the selection entirely. dbg_warbarcap reads the
+  // contract back: 0 = no capture, 1 = captured on the options row,
+  // 2 = captured on the category row. Pad-only and deterministic:
+  // menu steps are stick EDGES and button edges, never positions.
+  ok((await call('dbg_warenter', 0)) === 1, 'v1.20 check 32: fresh battle for the bar-capture flow');
+  await sleep(500);
+  await call('dbg_waraddbits', 1000);
+  const pb32 = await call('dbg_warbuildat', 1);
+  ok(pb32 > 0, 'v1.20 check 32: Patch Bay built', 'idx=' + pb32);
+  const [pbx32, pby32] = unxy(await call('dbg_warstructxy', pb32));
+  await call('dbg_warhurt', 0, await call('dbg_warfind', 0), 99999);   // economy isolation (the check-30 idiom): a dead harvester delivers nothing, the purse is static
+  // select the Patch Bay with the pad alone (the v1.16 wake trick:
+  // A summons the cursor at the camera centre, A again presses it)
+  if ((await call('dbg_warcur')) >= 0) { await tap(630, 10); await poll('dbg_warcur', [], v => v === -1, 4000); }
+  await call('dbg_warcam', pbx32, pby32); await sleep(250);
+  await padTap(0);
+  ok((await poll('dbg_warcur', [], v => v >= 0, 4000)) >= 0, 'v1.20 check 32: A woke the cursor at the Patch Bay');
+  await padTap(0);
+  ok((await poll('dbg_warselstruct', [], v => v === pb32, 4000)) === pb32, 'v1.20 check 32: A at the camera centre selected the Patch Bay');
+  ok((await poll('dbg_warbarcap', [], v => v === 1, 4000)) === 1, 'v1.20 check 32: selecting it CAPTURED the bar — highlight on the options row');
+  ok((await poll('dbg_warbarhl', [], v => v === 0, 4000)) === 0, 'v1.20 check 32: the highlight landed on the first option');
+  ok((await poll('dbg_warbcat', [], v => v === 0, 4000)) === 0, 'v1.20 check 32: its lone TRAIN category auto-opened');
+  // while captured the field cursor is FROZEN and the stick walks
+  // the menu instead — and does NOT retire the highlight (the
+  // clearing rule Daniel rejected)
+  const frozen32 = await call('dbg_warcur');
+  await padAxes(1, 0, 0, 0); await sleep(250); await padAxes(0, 0, 0, 0); await sleep(200);
+  ok((await poll('dbg_warbarhl', [], v => v === 1, 4000)) === 1, 'v1.20 check 32: stick-right walked the highlight to BOLT (slot 1)');
+  ok((await call('dbg_warcur')) === frozen32, 'v1.20 check 32: the field cursor did not move while captured');
+  await padAxes(1, 0, 0, 0); await sleep(250); await padAxes(0, 0, 0, 0); await sleep(200);
+  ok((await poll('dbg_warbarhl', [], v => v === 2, 4000)) === 2, 'v1.20 check 32: stick-right again walked it to PATCHER (slot 2)');
+  await padTap(4);   // LB walks back
+  ok((await poll('dbg_warbarhl', [], v => v === 1, 4000)) === 1, 'v1.20 check 32: LB walked the highlight back to BOLT');
+  await padTap(5);   // RB walks forward again — the bumpers share the captured row
+  ok((await poll('dbg_warbarhl', [], v => v === 2, 4000)) === 2, 'v1.20 check 32: RB walked it forward to PATCHER again');
+  await cv.screenshot({ path: __dirname + '/war-padcap.png' });
+  // A on the PATCHER slot queues it through war_bar_activate, and
+  // a TRAIN activation KEEPS the capture
+  const bits32 = await call('dbg_warbits');
+  await padTap(0);
+  ok((await poll('dbg_warqueue', [pb32], v => v === 1, 4000)) === 1, 'v1.20 check 32: A on PATCHER queued a patcher at the Patch Bay');
+  ok((await call('dbg_warbits')) === bits32 - 45, 'v1.20 check 32: the queue charged 45 bits', bits32 + ' -> ' + (await call('dbg_warbits')));
+  ok((await call('dbg_warbarcap')) === 1, 'v1.20 check 32: the TRAIN activation KEPT capture');
+  // stick-down hops to the category row (landing on the open
+  // category); A there returns to its options row
+  await padAxes(0, 1, 0, 0); await sleep(250); await padAxes(0, 0, 0, 0); await sleep(200);
+  ok((await poll('dbg_warbarcap', [], v => v === 2, 4000)) === 2, 'v1.20 check 32: stick-down hopped the highlight to the category row');
+  ok((await call('dbg_warbarhl')) === 0, 'v1.20 check 32: ...landing on the open category (slot 0)');
+  await padTap(0);
+  ok((await poll('dbg_warbarcap', [], v => v === 1, 4000)) === 1, 'v1.20 check 32: A on the category returned to its options row');
+  ok((await call('dbg_warbcat')) === 0, 'v1.20 check 32: TRAIN is still the open category');
+  // B on a single-category building has no category peel to make:
+  // it exits capture AND clears the selection — Daniel's "cancel
+  // to get out of the selection"
+  await padTap(1);
+  ok((await poll('dbg_warbarcap', [], v => v === 0, 4000)) === 0, 'v1.20 check 32: B ended the capture');
+  ok((await poll('dbg_warselstruct', [], v => v === -1, 4000)) === -1, 'v1.20 check 32: ...and cleared the selection');
+  // control is back with the field cursor: the stick flies it again
+  const cur32a = await call('dbg_warcur');
+  await padAxes(1, 0, 0, 0); await sleep(400); await padAxes(0, 0, 0, 0); await sleep(200);
+  const cur32b = await call('dbg_warcur');
+  ok(cur32a >= 0 && cur32b > cur32a, 'v1.20 check 32: the stick flies the field cursor again after capture', cur32a + ' -> ' + cur32b);
+  await padAxes(0, 0, 0, 0);
 
   console.log(`\nwartest: ${pass} passed, ${fail} failed`);
   await browser.close();
