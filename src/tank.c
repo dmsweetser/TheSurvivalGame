@@ -395,10 +395,11 @@ static void tank_update(int pi, float dt, const BwIn *in){
             int lvl = S->tank_lvl;
             if (S->tank_pass>0){ b->xp += 6*S->tank_pass; S->tank_score += 150*S->tank_pass; }   // whoever's still aboard gets flown out
             b->xp += 10 + 4*lvl;
+            buddy_award_xp(pi, 40);   // v1.19: a completed mission pays the buddy (on top of the mission's own small XP above)
             if (lvl > b->tank_done){ b->tank_done = lvl; }
             do_save();
             tank_load_level(pi, lvl+1);
-            { char *q=S->note; q=sappend(q, "LEVEL "); q=sapp_int(q, lvl+1); q=sappend(q, " - THEY'RE READY FOR YOU"); *q=0; }
+            { char *q=S->note; q=sappend(q, "LEVEL "); q=sapp_int(q, lvl+1); q=sappend(q, " - THEY'RE READY FOR YOU"); if (b->active) q=sappend(q, " +40 BUDDY XP"); *q=0; }
             S->note_t=2.8f;
         }
         return;

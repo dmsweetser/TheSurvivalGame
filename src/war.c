@@ -34,6 +34,7 @@
 #define WAR_U_SPIT 4
 #define WAR_U_SCOUT 5
 #define WAR_U_SIEGE 6
+#define WAR_U_PATCH 7
 #define WAR_S_HQ 0
 #define WAR_S_PATCH 1
 #define WAR_S_ZAP 2
@@ -44,12 +45,12 @@
 // WAR_MAXT lives up by BwSim (it sizes the struct's terrain arrays)
 #define WAR_FOG_W 40
 #define WAR_FOG_H 30
-#define WAR_CARRY 25          // bits a harvester hauls per trip (v1.17: 20 -> 25)
+#define WAR_CARRY 30          // bits a harvester hauls per trip (v1.19: 25 -> 30 — richer fields)
 #define WAR_SUB_H 46          // the categorized bar's options strip, drawn above the bar (WAR_BAR_H itself is load-bearing — tap math is coupled to it)
 static const int WAR_SRAD[7] = { 34, 26, 14, 13, 30, 28, 13 };        // structure radii (gate last: a firewall-footprint segment)
 static const int WAR_SHP[7] = { 600, 300, 160, 120, 0, 450, 120 };     // structure hp (hive scales instead)
-static const int WAR_TRAIN_COST[7] = { 80, 50, 75, 0, 0, 90, 160 };   // by UNIT type: harvester / melee / ranged / - / - / scout / siege
-static const float WAR_TRAIN_TIME[7] = { 6.0f, 4.0f, 5.0f, 0, 0, 5.0f, 9.0f };
+static const int WAR_TRAIN_COST[8] = { 80, 50, 75, 0, 0, 90, 160, 45 };   // by UNIT type: harvester / melee / ranged / - / - / scout / siege / patcher (v1.19 addendum: the patcher is the cheapest body on the field — fragile and weaponless, priced just under the melee's 50)
+static const float WAR_TRAIN_TIME[8] = { 6.0f, 4.0f, 5.0f, 0, 0, 5.0f, 9.0f, 4.0f };
 static const int WAR_BUILD_COST[7] = { 0, 150, 100, 25, 0, 200, 35 }; // patch bay / zapper / firewall / - / assembly plant / gate
 // canopy tints for WAR terrain trees, one per region (Meadows green,
 // Spaghetti olive, Legacy dry, Badlands scorched, Cache frost-pale,
@@ -72,11 +73,13 @@ static int war_u_side(int type){ return (type==WAR_U_CRAWL || type==WAR_U_SPIT)?
 static int war_u_hp(int type, int region){
     switch (type){ case 0: return 45; case 1: return 90; case 2: return 55;
                    case 3: return 26 + 4*region; case 5: return 45; case 6: return 230;
+                   case 7: return 45;   // the patcher: fragile, exactly a harvester's hide
                    default: return 20 + 3*region; }
 }
 static float war_u_speed(int type, int region){
     switch (type){ case 0: return 95.0f; case 1: return 105.0f; case 2: return 100.0f;
                    case 3: return 60.0f + 3.0f*region; case 5: return 95.0f; case 6: return 38.0f;
+                   case 7: return 100.0f;   // the patcher: a medium pace — it has fires to get to
                    default: return 56.0f + 2.0f*region; }
 }
 static int war_u_dmg(int type, int region){
@@ -139,9 +142,9 @@ static int war_sel_count(BwSim *S){
 static void war_note(BwSim *S, const char *txt){ scpy(S->war_msg, txt, 72); S->war_msgt = 2.8f; }
 static void war_clamp_cam(BwSim *S){
     if (S->war_camx < WAR_OX+150) S->war_camx = WAR_OX+150;
-    if (S->war_camx > WAR_OX+WAR_AW-150) S->war_camx = WAR_OX+WAR_AW-150;
+    if (S->war_camx > WAR_OX+S->war_aw-150) S->war_camx = WAR_OX+S->war_aw-150;
     if (S->war_camy < WAR_OY+110) S->war_camy = WAR_OY+110;
-    if (S->war_camy > WAR_OY+WAR_AH-110) S->war_camy = WAR_OY+WAR_AH-110;
+    if (S->war_camy > WAR_OY+S->war_ah-110) S->war_camy = WAR_OY+S->war_ah-110;
 }
 static void war_clear_field(BwSim *S){
     for (int i=0;i<WAR_MAXU;i++){ S->war_uhp[i]=0; S->war_usel[i]=0; S->war_wpn[i]=0; S->war_wpi[i]=0; S->war_stallt[i]=0; S->war_repath[i]=0; }
@@ -151,20 +154,26 @@ static void war_clear_field(BwSim *S){
     S->war_tn=0; S->war_ltap_n=0; S->war_ltap_unit=-1;
     S->war_curon=0; S->war_barhl=-1; S->war_barhl_s=-1;   // a fresh field has no pad cursor and no bar highlight
     S->war_pause=0; S->war_bcat=-1;   // v1.17: no pause menu, bar at its top level
+    // v1.19: a cleared field is a CAMPAIGN field at full size —
+    // war_setup_battle overrides these for a skirmish right after
+    // clearing. (war_size/war_diff are NOT reset: they are the
+    // player's kept setup picks, not battle state.)
+    S->war_skirmish=0; S->war_aw=WAR_AW; S->war_ah=WAR_AH;
+    S->war_gw=WAR_FOG_W; S->war_gh=WAR_FOG_H; S->war_lines=0;
 }
 // --- fog of war ------------------------------------------------------
 // Cells are 40u over the 1600x1200 arena. Explored is sticky: a cell
 // that has ever been visible stays explored for the whole battle.
 static int war_fog_at(BwSim *S, float wx, float wy){
     int cx = (int)((wx - WAR_OX)/40.0f), cy = (int)((wy - WAR_OY)/40.0f);
-    if (cx<0 || cy<0 || cx>=WAR_FOG_W || cy>=WAR_FOG_H) return 2;   // off-arena: don't hide the frame
+    if (cx<0 || cy<0 || cx>=S->war_gw || cy>=S->war_gh) return 2;   // off-arena (or off a SMALL skirmish field): don't hide the frame
     return S->war_fog[cy*WAR_FOG_W + cx];
 }
 static void war_fog_mark(BwSim *S, float wx, float wy, float r){
     int cx0 = (int)((wx - r - WAR_OX)/40.0f), cx1 = (int)((wx + r - WAR_OX)/40.0f);
     int cy0 = (int)((wy - r - WAR_OY)/40.0f), cy1 = (int)((wy + r - WAR_OY)/40.0f);
     if (cx0<0) cx0=0; if (cy0<0) cy0=0;
-    if (cx1>=WAR_FOG_W) cx1=WAR_FOG_W-1; if (cy1>=WAR_FOG_H) cy1=WAR_FOG_H-1;
+    if (cx1>=S->war_gw) cx1=S->war_gw-1; if (cy1>=S->war_gh) cy1=S->war_gh-1;
     for (int cy=cy0; cy<=cy1; cy++) for (int cx=cx0; cx<=cx1; cx++){
         float px = WAR_OX + cx*40.0f + 20.0f, py = WAR_OY + cy*40.0f + 20.0f;
         float dx = px-wx, dy = py-wy;
@@ -194,10 +203,10 @@ static void war_gen_terrain(BwSim *S, u32 bseed){
     u32 seed = bseed ^ (0x7E44u + (u32)region * 977u);
     int want = 52 + (int)(hash2(region, 7, seed) % 17u);   // 52..68 features
     for (int t=0; t<600 && S->war_tn<want; t++){
-        float x = WAR_OX + 44.0f + hash_f(t, 1, seed) * (WAR_AW - 88.0f);
-        float y = WAR_OY + 44.0f + hash_f(t, 2, seed) * (WAR_AH - 88.0f);
+        float x = WAR_OX + 44.0f + hash_f(t, 1, seed) * (S->war_aw - 88.0f);
+        float y = WAR_OY + 44.0f + hash_f(t, 2, seed) * (S->war_ah - 88.0f);
         float dx, dy;
-        dx = x-(WAR_OX+280); dy = y-(WAR_OY+600); if (dx*dx+dy*dy < 104.0f*104.0f) continue;   // the Core's clearing
+        dx = x-(WAR_OX+280); dy = y-(WAR_OY+S->war_ah*0.5f); if (dx*dx+dy*dy < 104.0f*104.0f) continue;   // the Core's clearing (the Core sits at mid-height on any field)
         int bad = 0;
         for (int s=0;s<WAR_MAXS && !bad;s++){
             if (S->war_shp[s]<=0 || S->war_stype[s]!=WAR_S_HIVE) continue;
@@ -227,19 +236,23 @@ static void war_gen_terrain(BwSim *S, u32 bseed){
     // off thp>0, and war_hurt_terrain refuses kind 5 — they can
     // never be removed, only routed around.
     { int debris_n = S->war_tn;   // the 30u spacing test below runs against DEBRIS only — a line's own segments stand 24u apart by design
-      int lines = region>=2? 3 : 2;
+      int lines = S->war_lines>0? S->war_lines : (region>=2? 3 : 2);   // v1.19: a skirmish overrides the line count
       for (int k=0;k<lines;k++){
-          float xk = 560.0f + (float)k*230.0f + hash_f(k, 21, bseed)*120.0f;
-          float ylen = 420.0f + hash_f(k, 22, bseed)*320.0f;
-          float y0 = 60.0f + hash_f(k, 23, bseed)*((1200.0f-120.0f)-ylen);
-          float gy = y0 + 90.0f + hash_f(k, 24, bseed)*(ylen-180.0f);
+          // v1.19: geometry is proportional to the live field —
+          // at the campaign's 1600x1200 these are the same numbers
+          // as before (x 560 + k*230 + roll*120, ylen 420..740,
+          // y0 base 60, gap centre y0+90 + roll*(ylen-180)).
+          float xk = S->war_aw*0.35f + (float)k*(S->war_aw*0.14375f) + hash_f(k, 21, bseed)*(S->war_aw*0.075f);
+          float ylen = S->war_ah*0.35f + hash_f(k, 22, bseed)*(S->war_ah*0.2667f);
+          float y0 = S->war_ah*0.05f + hash_f(k, 23, bseed)*((S->war_ah-S->war_ah*0.1f)-ylen);
+          float gy = y0 + S->war_ah*0.075f + hash_f(k, 24, bseed)*(ylen-S->war_ah*0.15f);
           for (float y=y0; y<=y0+ylen; y+=24.0f){
               if (S->war_tn >= WAR_MAXT-2) break;
               float gdy = y-gy; if (gdy<0) gdy=-gdy;
               if (gdy < 55.0f) continue;   // the gap: a ~110u path through the line
               float wx = WAR_OX + xk, wy = WAR_OY + y;
               float dx, dy;
-              dx = wx-(WAR_OX+280); dy = wy-(WAR_OY+600); if (dx*dx+dy*dy < 130.0f*130.0f) continue;   // the Core's clearing, wider than debris' — a wall must never pen the base in
+              dx = wx-(WAR_OX+280); dy = wy-(WAR_OY+S->war_ah*0.5f); if (dx*dx+dy*dy < 130.0f*130.0f) continue;   // the Core's clearing, wider than debris' — a wall must never pen the base in
               int bad = 0;
               for (int s=0;s<WAR_MAXS && !bad;s++){
                   if (S->war_shp[s]<=0 || S->war_stype[s]!=WAR_S_HIVE) continue;
@@ -265,6 +278,7 @@ static int war_spawn_unit(BwSim *S, int type, float x, float y){
         S->war_umaxhp[i]=war_u_hp(type, S->war_region); S->war_uhp[i]=(float)S->war_umaxhp[i];
         S->war_ustate[i]=0; S->war_utarget[i]=0; S->war_ucarry[i]=0; S->war_usel[i]=0;
         S->war_uatk[i]=0; S->war_uharv[i]=0; S->war_utx[i]=x; S->war_uty[i]=y;
+        S->war_urepair[i]=0; S->war_urepacc[i]=0; S->war_urepscan[i]=0;
         S->war_wpn[i]=0; S->war_wpi[i]=0; S->war_stallt[i]=0; S->war_repath[i]=0;
         S->war_stallx[i]=x; S->war_stally[i]=y; S->war_ptgx[i]=x; S->war_ptgy[i]=y;
         return i;
@@ -295,16 +309,41 @@ static void war_spawn_bug(BwSim *S, int hive, int wave){
 static void war_win(int pi){
     BwSim *S = &BWS[pi]; Buddy *b = &G.bud[pi];
     S->war_state = 2; S->war_endt = 3.2f; S->war_pause = 0;
-    if (!war_snap_on[pi] || war_snap_reg[pi]==S->war_region) war_snap_clear(pi);   // the battle is decided: ITS snapshot does not survive it (cleared BEFORE the save below) — but a battle parked in ANOTHER region is not this fight's to discard (v1.18)
-    if (S->war_region == b->war_prog && b->war_prog < 8){ b->war_prog++; do_save(); }
-    war_note(S, "REGION CONQUERED!");
+    if (S->war_skirmish){
+        // v1.19: a skirmish is ad-hoc — no progress, and NEVER a
+        // snapshot clear: a campaign battle may be parked under
+        // this same region-equivalent number, and it is not this
+        // fight's to discard. The win pays buddy XP by difficulty
+        // and saves (the award has to persist like a campaign's).
+        static const int SKXP[4] = { 0, 30, 50, 80 };   // by war_diff: EASY / NORMAL / HARD
+        int amt = SKXP[S->war_diff>=1 && S->war_diff<=3? S->war_diff : 2];
+        buddy_award_xp(pi, amt);
+        do_save();
+        if (b->active){ char buf[72]; char *q=buf; q=sappend(q, "SKIRMISH WON! +"); q=sapp_int(q, amt); q=sappend(q, " BUDDY XP"); *q=0; war_note(S, buf); }
+        else war_note(S, "SKIRMISH WON!");
+    } else {
+        if (!war_snap_on[pi] || war_snap_reg[pi]==S->war_region) war_snap_clear(pi);   // the battle is decided: ITS snapshot does not survive it (cleared BEFORE the save below) — but a battle parked in ANOTHER region is not this fight's to discard (v1.18)
+        // v1.19: a campaign win pays the buddy — a first conquest
+        // pays 60 + 10 per region, a replay of a taken region 25.
+        int first = (S->war_region == b->war_prog);
+        int amt = first? 60 + 10*S->war_region : 25;
+        buddy_award_xp(pi, amt);
+        if (first && b->war_prog < 8) b->war_prog++;
+        do_save();   // the award (and any advance) persists with the battle's own save
+        if (b->active){ char buf[72]; char *q=buf; q=sappend(q, "REGION CONQUERED! +"); q=sapp_int(q, amt); q=sappend(q, " BUDDY XP"); *q=0; war_note(S, buf); }
+        else war_note(S, "REGION CONQUERED!");
+    }
     qnote(0, 0, 60, 80, 6); qnote(0.12f, 0, 64, 80, 6); qnote(0.24f, 0, 67, 80, 6); qnote(0.36f, 0, 72, 90, 10);
 }
 static void war_lose(int pi){
     BwSim *S = &BWS[pi];
     S->war_state = 3; S->war_endt = 3.2f; S->war_pause = 0;
-    if (!war_snap_on[pi] || war_snap_reg[pi]==S->war_region) war_snap_clear(pi);   // a fallen Core leaves nothing of THIS battle to resume — a park in another region still stands (v1.18)
-    war_note(S, "THE COMPILER CORE HAS FALLEN!");
+    if (S->war_skirmish){
+        war_note(S, "SKIRMISH LOST.");   // v1.19: ad-hoc — no snapshot clear, no progress, nothing to save
+    } else {
+        if (!war_snap_on[pi] || war_snap_reg[pi]==S->war_region) war_snap_clear(pi);   // a fallen Core leaves nothing of THIS battle to resume — a park in another region still stands (v1.18)
+        war_note(S, "THE COMPILER CORE HAS FALLEN!");
+    }
     qnote(0, 0, 48, 80, 8); qnote(0.2f, 0, 43, 80, 8); qnote(0.4f, 0, 36, 90, 12);
 }
 static void war_hurt_unit(int pi, int i, int dmg){
@@ -399,6 +438,7 @@ static float war_move_step(BwSim *S, int i, float tx, float ty, float stopd, flo
 // or chew through. All scratch is fixed static arrays; every loop is
 // bounded (expansion cap, ring cap, sample cap) — no wasm hangs.
 static unsigned char war_pf_block[WAR_FOG_W*WAR_FOG_H];
+static int war_pf_gw = WAR_FOG_W, war_pf_gh = WAR_FOG_H;   // v1.19: the live field's grid dims, set by war_pf_find — a SMALL skirmish field's grid is a subgrid of these same arrays (cells outside it are filled blocked)
 static int war_pf_g[WAR_FOG_W*WAR_FOG_H];
 static int war_pf_from[WAR_FOG_W*WAR_FOG_H];
 static unsigned char war_pf_closed[WAR_FOG_W*WAR_FOG_H];
@@ -445,7 +485,7 @@ static int war_pf_nearest_free(int cx, int cy, float wx, float wy){
         for (int dy=-r; dy<=r; dy++) for (int dx=-r; dx<=r; dx++){
             if (r>0 && dx>-r && dx<r && dy>-r && dy<r) continue;   // the ring only, never the filled square
             int nx=cx+dx, ny=cy+dy;
-            if (nx<0 || ny<0 || nx>=WAR_FOG_W || ny>=WAR_FOG_H) continue;
+            if (nx<0 || ny<0 || nx>=war_pf_gw || ny>=war_pf_gh) continue;
             if (war_pf_block[ny*WAR_FOG_W+nx]) continue;
             float ccx = WAR_OX + nx*40.0f + 20.0f, ccy = WAR_OY + ny*40.0f + 20.0f;
             float ddx = ccx-wx, ddy = ccy-wy, d2 = ddx*ddx + ddy*ddy;
@@ -457,8 +497,9 @@ static int war_pf_nearest_free(int cx, int cy, float wx, float wy){
 }
 static int war_pf_find(BwSim *S, int i, float tx, float ty){
     int side = war_u_side(S->war_utype[i]);
+    war_pf_gw = S->war_gw; war_pf_gh = S->war_gh;
     for (int cy=0; cy<WAR_FOG_H; cy++) for (int cx=0; cx<WAR_FOG_W; cx++)
-        war_pf_block[cy*WAR_FOG_W+cx] = (unsigned char)war_pf_blocked_at(S, side, WAR_OX + cx*40.0f + 20.0f, WAR_OY + cy*40.0f + 20.0f);
+        war_pf_block[cy*WAR_FOG_W+cx] = (cx>=war_pf_gw || cy>=war_pf_gh)? 1 : (unsigned char)war_pf_blocked_at(S, side, WAR_OX + cx*40.0f + 20.0f, WAR_OY + cy*40.0f + 20.0f);
     int start = war_pf_nearest_free((int)((S->war_ux[i]-WAR_OX)/40.0f), (int)((S->war_uy[i]-WAR_OY)/40.0f), S->war_ux[i], S->war_uy[i]);
     int goal = war_pf_nearest_free((int)((tx-WAR_OX)/40.0f), (int)((ty-WAR_OY)/40.0f), tx, ty);
     if (start<0 || goal<0) return 0;
@@ -483,7 +524,7 @@ static int war_pf_find(BwSim *S, int i, float tx, float ty){
         for (int dy=-1; dy<=1; dy++) for (int dx=-1; dx<=1; dx++){
             if (!dx && !dy) continue;
             int nx=bx+dx, ny=by+dy;
-            if (nx<0 || ny<0 || nx>=WAR_FOG_W || ny>=WAR_FOG_H) continue;
+            if (nx<0 || ny<0 || nx>=war_pf_gw || ny>=war_pf_gh) continue;
             int nc = ny*WAR_FOG_W+nx;
             if (war_pf_block[nc] || war_pf_closed[nc]) continue;
             if (dx && dy && (war_pf_block[by*WAR_FOG_W+nx] || war_pf_block[ny*WAR_FOG_W+bx])) continue;   // no corner cutting
@@ -610,11 +651,70 @@ static void war_harv_update(int pi, int i, float dt){
           S->war_ustate[i]=3; S->war_uharv[i]=2.0f; S->war_utarget[i]=bn+1;
       } }
 }
+// v1.19 addendum: the PATCHER — repair infantry. It has no
+// weapon and never will: its whole update is walk-to-work and
+// channel. A player order owns it while it runs (a move order
+// walks, a repair order fixes the named structure); with no
+// order in progress it AUTOSEEKS — about twice a second it looks
+// for the nearest damaged friendly structure anywhere on the
+// field and goes to fix it (Daniel: "I want it to autoseek").
+// Channel: +12 HP/s, billed at 1 bit per 4 HP — fractional bits
+// accumulate in war_urepacc and only whole bits leave the purse.
+// It stops when the structure is full, when the purse runs dry
+// mid-bill (the OUT OF BITS note fires once per emptying), when
+// another order lands, or when it dies.
+static void war_patch_update(int pi, int i, float dt){
+    BwSim *S = &BWS[pi];
+    (void)pi;   // the channel bills the shared purse and heals through S directly — no per-player call-outs
+    if (S->war_bits > 0) S->war_repnoted = 0;   // the purse recovered: the next emptying may call out again
+    if (S->war_ustate[i]==1){   // a plain move order owns the unit until it arrives; autoseek resumes after
+        if (war_move_to(S, i, S->war_utx[i], S->war_uty[i], 4.0f, dt) <= 6.0f) S->war_ustate[i]=0;
+        return;
+    }
+    int s = S->war_urepair[i]-1;
+    if (s>=0 && (!war_struct_alive(S, s) || S->war_sside[s]!=0 || S->war_shp[s] >= (float)S->war_smaxhp[s])){
+        S->war_urepair[i]=0; s=-1;   // the work is gone or done — fall back to autoseek
+    }
+    if (s<0){
+        S->war_urepscan[i] -= dt;
+        if (S->war_urepscan[i] <= 0){
+            S->war_urepscan[i] = 0.5f;
+            if (S->war_bits > 0){   // an empty purse means wait, not wander (the note already fired at the halt)
+                float bd = 1e18f; int bs = -1;
+                for (int t=0;t<WAR_MAXS;t++){
+                    if (S->war_shp[t]<=0 || S->war_sside[t]!=0) continue;
+                    if (S->war_shp[t] >= (float)S->war_smaxhp[t]) continue;
+                    float dx=S->war_sx[t]-S->war_ux[i], dy=S->war_sy[t]-S->war_uy[i], d2=dx*dx+dy*dy;
+                    if (d2<bd){ bd=d2; bs=t; }
+                }
+                if (bs>=0){ S->war_urepair[i]=bs+1; s=bs; }
+            }
+        }
+        if (s<0) return;
+    }
+    float rr = (float)WAR_SRAD[S->war_stype[s]] + 14.0f;
+    if (war_move_to(S, i, S->war_sx[s], S->war_sy[s], rr, dt) > rr + 2.0f) return;   // still walking to the work
+    float room = (float)S->war_smaxhp[s] - S->war_shp[s];
+    float heal = 12.0f*dt; if (heal > room) heal = room;
+    S->war_urepacc[i] += heal*0.25f;
+    int pay = (int)S->war_urepacc[i];
+    if (pay > S->war_bits) pay = S->war_bits;
+    if (pay>0){ S->war_bits -= pay; S->war_urepacc[i] -= (float)pay; }
+    if (S->war_bits<=0 && S->war_urepacc[i] >= 1.0f){
+        // a whole bit is owed and the purse is empty: halt here
+        S->war_urepair[i]=0; S->war_urepacc[i]=0;
+        if (!S->war_repnoted){ S->war_repnoted=1; war_note(S, "OUT OF BITS - REPAIRS HALTED."); }
+        return;
+    }
+    S->war_shp[s] += heal;
+    if (S->war_shp[s] >= (float)S->war_smaxhp[s]){ S->war_shp[s] = (float)S->war_smaxhp[s]; S->war_urepair[i]=0; }
+}
 static void war_unit_update(int pi, int i, float dt){
     BwSim *S = &BWS[pi];
     int type = S->war_utype[i], side = war_u_side(type);
     if (S->war_uatk[i] > 0) S->war_uatk[i] -= dt;
     if (type == WAR_U_HARV){ war_harv_update(pi, i, dt); return; }
+    if (type == WAR_U_PATCH){ war_patch_update(pi, i, dt); return; }
     float x = S->war_ux[i], y = S->war_uy[i];
     int state = S->war_ustate[i];
     if (state==2){   // an attack order whose target died is just an order again
@@ -753,9 +853,9 @@ static void war_separate(BwSim *S){
             }
         }
         if (S->war_ux[i] < WAR_OX+12) S->war_ux[i] = WAR_OX+12;
-        if (S->war_ux[i] > WAR_OX+WAR_AW-12) S->war_ux[i] = WAR_OX+WAR_AW-12;
+        if (S->war_ux[i] > WAR_OX+S->war_aw-12) S->war_ux[i] = WAR_OX+S->war_aw-12;
         if (S->war_uy[i] < WAR_OY+12) S->war_uy[i] = WAR_OY+12;
-        if (S->war_uy[i] > WAR_OY+WAR_AH-12) S->war_uy[i] = WAR_OY+WAR_AH-12;
+        if (S->war_uy[i] > WAR_OY+S->war_ah-12) S->war_uy[i] = WAR_OY+S->war_ah-12;
     }
 }
 static void war_proj_update(int pi, float dt){
@@ -777,10 +877,25 @@ static void war_proj_update(int pi, float dt){
     }
 }
 static float war_wave_dt(int region){ float v = 30.0f - 2.0f*region; return v<16.0f? 16.0f : v; }
-static void war_start_battle(int pi, int region){
+// v1.19: eleven nodes, 8,200 bits on a campaign field (was nine /
+// 4,800) — (560,600) and (1180,600) join the midfield: the centre
+// is contested ground now, not just a road between two halves.
+// The skirmish sizes draw from this same table (SMALL takes a
+// scaled subset; LARGE adds two corner nodes of its own).
+static const float WAR_ND[11][2] = { {430,430},{430,770},{800,300},{800,900},{800,600},{1180,350},{1180,850},{620,120},{1010,600},{560,600},{1180,600} };
+static const int WAR_NA[11] = { 550, 550, 700, 700, 850, 850, 850, 700, 950, 600, 900 };
+static void war_place_nodes(BwSim *S, const float (*nd)[2], const int *na, int nn, float sx, float sy){
+    S->war_nn = nn;
+    for (int n=0;n<nn;n++){ S->war_nx[n]=WAR_OX+nd[n][0]*sx; S->war_ny[n]=WAR_OY+nd[n][1]*sy; S->war_namt[n]=na[n]; }
+}
+// the shared battle build: seed, purse, Core, starting units,
+// hives (banded), terrain, fog, camera, banner. The caller has
+// already cleared the field, set the field geometry (war_aw /
+// war_ah / gw / gh / lines / skirmish) and placed the bit nodes —
+// terrain generation tests against the nodes and hives, so the
+// nodes must be down before this runs.
+static void war_build_battle(int pi, int region, int bits, int nh){
     BwSim *S = &BWS[pi];
-    if (region<0) region=0; if (region>7) region=7;
-    war_clear_field(S);
     // v1.18 (Daniel: "novel every time you play"): this battle's
     // seed mixes the region, the run clock and a per-process
     // battle counter — RESTARTs included — through the unsigned
@@ -792,30 +907,30 @@ static void war_start_battle(int pi, int region){
       war_battle_ctr += 1u;
       u32 tbits = (u32)(int)(G.time * 4.0f);
       S->war_bseed = hash2((i32)(tbits + (u32)region * 977u), (i32)(war_battle_ctr * 131u + (u32)region), 0x5EEDu ^ (war_battle_ctr * 2654435761u)); }
-    S->war_state=1; S->war_region=region; S->war_bits=250; S->war_t=0;   // v1.17: a richer purse to open with (was 150)
-    S->war_wavet = war_wave_dt(region)*0.7f;
+    S->war_state=1; S->war_region=region; S->war_bits=bits; S->war_t=0;
+    // v1.19 addendum (Daniel): the FIRST wave is paced — at least
+    // 45s of breathing room before the hive sends anything, so a
+    // fresh commander can get the economy standing. Only the
+    // first: the wave-spawn reset keeps the normal interval, and a
+    // restored parked battle keeps its saved war_wavet.
+    { float fw = war_wave_dt(region)*1.5f; S->war_wavet = fw<45.0f? 45.0f : fw; }
     S->war_grace=0.35f; S->war_ordt=0; S->war_msgt=0;
     S->war_ltap_t=-10.0f; S->war_ltap_unit=-1; S->war_drag_id=-1;
-    war_spawn_struct(S, WAR_S_HQ, 0, WAR_OX+280, WAR_OY+600);       // struct 0 is always the Core
-    war_spawn_unit(S, WAR_U_HARV, WAR_OX+336, WAR_OY+652);
-    war_spawn_unit(S, WAR_U_MELEE, WAR_OX+336, WAR_OY+548);
-    // v1.17: nine nodes, 4,800 bits on the field (was seven / 2,900) —
-    // (620,120) opens the north, (1010,600) is contested ground
-    // between the midfield and the hives
-    static const float ND[9][2] = { {430,430},{430,770},{800,300},{800,900},{800,600},{1180,350},{1180,850},{620,120},{1010,600} };
-    static const int NA[9] = { 400, 400, 500, 500, 600, 600, 600, 500, 700 };
-    S->war_nn=9;
-    for (int n=0;n<9;n++){ S->war_nx[n]=WAR_OX+ND[n][0]; S->war_ny[n]=WAR_OY+ND[n][1]; S->war_namt[n]=NA[n]; }
-    int nh = 1 + (region>=3? 1:0) + (region>=6? 1:0);
+    float corey = S->war_ah*0.5f;   // the Core anchors the west edge at mid-height on any field
+    war_spawn_struct(S, WAR_S_HQ, 0, WAR_OX+280, WAR_OY+corey);       // struct 0 is always the Core
+    war_spawn_unit(S, WAR_U_HARV, WAR_OX+336, WAR_OY+corey+52.0f);
+    war_spawn_unit(S, WAR_U_MELEE, WAR_OX+336, WAR_OY+corey-52.0f);
     // v1.18: the hives land along the FAR side, banded-random — the
-    // arena height is cut into nh equal bands and each hive rolls
+    // field height is cut into nh equal bands and each hive rolls
     // its spot inside its own band (x deep in the east, y anywhere
     // in the band), so the swarm is always spread out but never
     // where it stood last time. No more "just go to the far right".
-    { float band_h = 1200.0f / (float)nh;
+    // (At the campaign's 1600x1200: x 1240..1390, margin 130.)
+    { float band_h = S->war_ah / (float)nh;
+      float hmargin = S->war_ah*(130.0f/1200.0f);
       for (int h=0;h<nh;h++){
-          float hx = 1240.0f + hash_f(h, 11, S->war_bseed) * 150.0f;
-          float hy = (float)h * band_h + 130.0f + hash_f(h, 12, S->war_bseed) * (band_h - 260.0f);
+          float hx = (S->war_aw-360.0f) + hash_f(h, 11, S->war_bseed) * 150.0f;
+          float hy = (float)h * band_h + hmargin + hash_f(h, 12, S->war_bseed) * (band_h - 2.0f*hmargin);
           int hi = war_spawn_struct(S, WAR_S_HIVE, 1, WAR_OX+hx, WAR_OY+hy);
           war_spawn_bug(S, hi, 0); war_spawn_bug(S, hi, 0);
           if (region>=2) war_spawn_bug(S, hi, 0);
@@ -823,12 +938,70 @@ static void war_start_battle(int pi, int region){
     war_gen_terrain(S, S->war_bseed);
     for (int i=0;i<WAR_FOG_W*WAR_FOG_H;i++) S->war_fog[i]=0;   // a fresh battle starts in the dark
     war_fog_update(S);
-    S->war_camx = WAR_OX+280; S->war_camy = WAR_OY+600;
+    S->war_camx = WAR_OX+280; S->war_camy = WAR_OY+corey;
     war_clamp_cam(S);
-    { char buf[72]; char *q=buf; q=sappend(q, "CONQUER "); q=sappend(q, REGION_NAME[region]);
-      q=sappend(q, "! HARVEST BITS. KILL THE HIVE"); if (nh>1) q=sappend(q, "S"); q=sappend(q, "."); *q=0;
-      war_note(S, buf); }
+    if (S->war_skirmish){
+        static const char *SKN[4] = { "", "SMALL", "STANDARD", "LARGE" };
+        static const char *SKD[4] = { "", "EASY", "NORMAL", "HARD" };
+        char buf[72]; char *q=buf; q=sappend(q, "SKIRMISH - "); q=sappend(q, SKN[S->war_size]); q=sappend(q, " FIELD, "); q=sappend(q, SKD[S->war_diff]); q=sappend(q, " ENEMY. KILL THE HIVE"); if (nh>1) q=sappend(q, "S"); q=sappend(q, "."); *q=0;
+        war_note(S, buf);
+    } else {
+        char buf[72]; char *q=buf; q=sappend(q, "CONQUER "); q=sappend(q, REGION_NAME[region]);
+          q=sappend(q, "! HARVEST BITS. KILL THE HIVE"); if (nh>1) q=sappend(q, "S"); q=sappend(q, "."); *q=0;
+          war_note(S, buf);
+    }
     sfx(19);
+}
+static void war_start_battle(int pi, int region){
+    BwSim *S = &BWS[pi];
+    if (region<0) region=0; if (region>7) region=7;
+    war_clear_field(S);   // resets to campaign geometry, war_skirmish=0
+    war_place_nodes(S, WAR_ND, WAR_NA, 11, 1.0f, 1.0f);
+    int nh = 1 + (region>=3? 1:0) + (region>=6? 1:0);
+    war_build_battle(pi, region, 300, nh);   // v1.19: 300 starting bits (was 250)
+}
+// v1.19: a SKIRMISH — an ad-hoc battle on the player's picked
+// size and difficulty. It never touches war_prog, is never
+// parked, and never disturbs a parked campaign battle (nothing
+// here serializes or clears a snapshot). The difficulty doubles
+// as the battle's region equivalent: every region-keyed strength
+// (unit/hive HP, wave strength and pace, hive count banding)
+// reads it exactly as it would a campaign region.
+static void war_start_skirmish(int pi){
+    BwSim *S = &BWS[pi];
+    int size = (S->war_size>=1 && S->war_size<=3)? S->war_size : 2;
+    int diff = (S->war_diff>=1 && S->war_diff<=3)? S->war_diff : 2;
+    S->war_size = size; S->war_diff = diff;
+    war_clear_field(S);
+    S->war_skirmish = 1;
+    if (size==1){ S->war_aw=1200.0f; S->war_ah=900.0f; S->war_lines=2; }
+    else if (size==3){ S->war_lines=4; }
+    else { S->war_lines=3; }
+    S->war_gw = (int)(S->war_aw/40.0f); S->war_gh = (int)(S->war_ah/40.0f);
+    int region = diff==1? 1 : diff==3? 6 : 3;   // EASY / NORMAL / HARD as region equivalents
+    int bits = size==1? 250 : size==3? 400 : 300;
+    if (size==1){
+        // a subset of the standard table, scaled onto the small
+        // field: both west nodes, the centre, both east nodes and
+        // the east-midfield node — 4,250 bits
+        static const int IDX[6] = { 0, 1, 4, 5, 6, 10 };
+        float nd[6][2]; int na[6];
+        for (int k=0;k<6;k++){ nd[k][0]=WAR_ND[IDX[k]][0]; nd[k][1]=WAR_ND[IDX[k]][1]; na[k]=WAR_NA[IDX[k]]; }
+        war_place_nodes(S, (const float (*)[2])nd, na, 6, S->war_aw/1600.0f, S->war_ah/1200.0f);
+    } else if (size==3){
+        // the standard eleven plus two corner nodes — 9,500 bits,
+        // a dense field
+        float nd[13][2]; int na[13];
+        for (int k=0;k<11;k++){ nd[k][0]=WAR_ND[k][0]; nd[k][1]=WAR_ND[k][1]; na[k]=WAR_NA[k]; }
+        nd[11][0]=300.0f; nd[11][1]=150.0f; na[11]=500;
+        nd[12][0]=1450.0f; nd[12][1]=900.0f; na[12]=800;
+        war_place_nodes(S, (const float (*)[2])nd, na, 13, 1.0f, 1.0f);
+    } else {
+        war_place_nodes(S, WAR_ND, WAR_NA, 11, 1.0f, 1.0f);
+    }
+    int nh = diff;              // EASY 1 / NORMAL 2 / HARD 3 hives
+    if (size==1 && nh>2) nh=2;  // a SMALL field caps at 2
+    war_build_battle(pi, region, bits, nh);
 }
 static float war_axis(float a);   // defined with the pad code below; the pause menu's pad handler needs it early
 // --- battle snapshots (v1.17, Daniel: leaving must SAVE the battle
@@ -919,7 +1092,10 @@ static const char *war_snap_for_save(int pi){   // the save writer's door: refre
     // silently evict the saved battle from the file (Daniel's
     // playtest: SAVE & QUIT, tap a region, fresh fight, saved
     // fight gone). The parked text is returned as-is instead.
-    if (BWS[pi].war_state==1 && !(war_snap_on[pi] && war_snap_reg[pi]!=BWS[pi].war_region)) war_snap_serialize(pi);
+    // v1.19: a live SKIRMISH is never serialized at all — it is
+    // ad-hoc by definition; whatever campaign battle is parked
+    // (if any) is returned untouched.
+    if (BWS[pi].war_state==1 && !BWS[pi].war_skirmish && !(war_snap_on[pi] && war_snap_reg[pi]!=BWS[pi].war_region)) war_snap_serialize(pi);
     return war_snap_on[pi]? war_snap[pi] : 0;
 }
 static const char *war_snap_val(const char *snap, const char *key){
@@ -947,7 +1123,7 @@ static void war_snap_restore(int pi){
     BwSim *S = &BWS[pi];
     const char *snap = war_snap[pi];
     const char *v;
-    war_clear_field(S);
+    war_clear_field(S);   // v1.19: also restores campaign geometry (war_skirmish=0, war_aw/war_ah = WAR_AW/WAR_AH) — a snapshot is always a campaign battle
     if ((v = war_snap_val(snap, "wb"))){
         S->war_region = war_rd_int(&v);
         S->war_bits = war_rd_int(&v);
@@ -1003,7 +1179,7 @@ static void war_snap_restore(int pi){
     }
     if ((v = war_snap_val(snap, "wg"))){
         int n=0;
-        while (*v && *v!=' ' && n<10){
+        while (*v && *v!=' ' && n<16){   // v1.19: an 11-node field must restore whole (was capped at 10)
             S->war_nx[n]=WAR_OX+(float)war_rd_int(&v);
             S->war_ny[n]=WAR_OY+(float)war_rd_int(&v);
             S->war_namt[n]=war_rd_int(&v);
@@ -1053,6 +1229,17 @@ static int war_pause_btn_y(int py, int n){ return py + 56 + n*44; }   // three 3
 static void war_pause_pick(int pi, int n){
     BwSim *S = &BWS[pi];
     if (n==0){ S->war_pause=0; S->war_grace=0.3f; sfx(6); }   // RESUME (the grace keeps the closing press from leaking an order)
+    else if (S->war_skirmish && n==1){   // v1.19: RESTART a skirmish — re-roll the same size/difficulty; NO snapshot clear (a campaign park is never this fight's to discard)
+        S->war_pause=0;
+        war_start_skirmish(pi);
+    }
+    else if (S->war_skirmish && n==2){   // v1.19: QUIT BATTLE — the skirmish is ad-hoc: nothing serialized, nothing saved, back to the map
+        S->war_pause=0;
+        war_clear_field(S);
+        S->war_state=0; S->war_grace=0.3f;
+        war_note(S, "SKIRMISH ABANDONED.");
+        sfx(6);
+    }
     else if (n==1){   // RESTART BATTLE: this region, fresh, and no snapshot of the old fight survives — unless the park belongs to another region (v1.18 scoping, as in war_win/war_lose)
         if (!war_snap_on[pi] || war_snap_reg[pi]==S->war_region) war_snap_clear(pi);
         S->war_pause=0;
@@ -1096,9 +1283,9 @@ static void war_pad_pause(int pi, float dt){
     }
     if (lx || ly){ S->war_curx += lx * 540.0f * dt; S->war_cury += ly * 540.0f * dt; }
     if (S->war_curx < WAR_OX) S->war_curx = WAR_OX;
-    if (S->war_curx > WAR_OX+WAR_AW) S->war_curx = WAR_OX+WAR_AW;
+    if (S->war_curx > WAR_OX+S->war_aw) S->war_curx = WAR_OX+S->war_aw;
     if (S->war_cury < WAR_OY) S->war_cury = WAR_OY;
-    if (S->war_cury > WAR_OY+WAR_AH) S->war_cury = WAR_OY+WAR_AH;
+    if (S->war_cury > WAR_OY+S->war_ah) S->war_cury = WAR_OY+S->war_ah;
     { float csx = (float)vx + vw2/2 + (S->war_curx - S->war_camx);   // no edge-follow: the camera holds still, the cursor stays on screen
       float csy = (float)vy + vh2/2 + (S->war_cury - S->war_camy - WAR_BAR_H*0.5f);
       if (csx < vx) S->war_curx += (vx - csx);
@@ -1115,6 +1302,8 @@ static void war_pad_pause(int pi, float dt){
 }
 static void war_enter(int pi){
     BwSim *S = &BWS[pi]; Buddy *b = &G.bud[pi];
+    if (S->war_size<1 || S->war_size>3) S->war_size = 2;   // v1.19: the skirmish setup defaults — STANDARD / NORMAL, kept per player from then on
+    if (S->war_diff<1 || S->war_diff>3) S->war_diff = 2;
     if (war_snap_on[pi]){   // v1.17: a parked battle resumes instead of the bare map
         war_snap_restore(pi);
         war_snap_clear(pi);   // consumed — the live BwSim is authoritative now; later saves re-serialize from it
@@ -1134,7 +1323,8 @@ static void war_enter(int pi){
 // acts: 0 train harvester, 1-3 place patch/zapper/firewall,
 // 4 train melee, 5 train ranged, 6 cancel placement, 7 hold position,
 // 8 train scout, 9 train siege tank, 10 place assembly plant,
-// 11 place gate, 20/21/22 the TRAIN / BUILD / DEFENSE categories.
+// 11 place gate, 12 train patcher (v1.19 addendum),
+// 20/21/22 the TRAIN / BUILD / DEFENSE categories.
 // v1.17 (addendum 1): structure contexts are TWO-LEVEL — the bar
 // shows categories; opening one puts its options in a strip directly
 // above the bar. war_bar_list stays the single source: it returns
@@ -1146,7 +1336,8 @@ static int war_cat_items(int st, int cat, int acts[5], int costs[5], const char 
     if (cat==0){   // TRAIN
         if (st==WAR_S_HQ){ acts[n]=0; costs[n]=WAR_TRAIN_COST[0]; names[n]="HARVESTER"; n++; }
         else if (st==WAR_S_PATCH){ acts[n]=4; costs[n]=WAR_TRAIN_COST[1]; names[n]="WRENCH"; n++;
-                                   acts[n]=5; costs[n]=WAR_TRAIN_COST[2]; names[n]="BOLT"; n++; }
+                                   acts[n]=5; costs[n]=WAR_TRAIN_COST[2]; names[n]="BOLT"; n++;
+                                   acts[n]=12; costs[n]=WAR_TRAIN_COST[7]; names[n]="PATCHER"; n++; }
         else if (st==WAR_S_ASM){ acts[n]=8; costs[n]=WAR_TRAIN_COST[5]; names[n]="SCOUT BUGGY"; n++;
                                  acts[n]=9; costs[n]=WAR_TRAIN_COST[6]; names[n]="SIEGE TANK"; n++; }
     } else if (cat==1){   // BUILD
@@ -1201,16 +1392,16 @@ static void war_bar_activate(int pi, int slot){
     if (act==6){ S->war_place=-1; S->war_bcat=-1; sfx(6); return; }
     if (act==7){
         for (int i=0;i<WAR_MAXU;i++)
-            if (S->war_uhp[i]>0 && S->war_usel[i] && S->war_utype[i]!=WAR_U_HARV){ S->war_ustate[i]=0; S->war_utarget[i]=0; }
+            if (S->war_uhp[i]>0 && S->war_usel[i] && S->war_utype[i]!=WAR_U_HARV){ S->war_ustate[i]=0; S->war_utarget[i]=0; S->war_urepair[i]=0; }
         sfx(6); return;
     }
     if (act>=20 && act<=22){ S->war_bcat = act-20; sfx(6); return; }   // opening a category costs nothing, trains nothing, builds nothing
-    if (act==0 || act==4 || act==5 || act==8 || act==9){   // TRAIN: pay-to-queue (addendum 2)
+    if (act==0 || act==4 || act==5 || act==8 || act==9 || act==12){   // TRAIN: pay-to-queue (addendum 2)
         int s = S->war_selstruct;
         if (s<0 || !war_struct_alive(S, s)) return;
         if (S->war_qlen[s]>=9){ sfx(16); war_note(S, "QUEUE FULL (9)."); return; }
         if (S->war_bits < cost){ sfx(16); war_note(S, "NOT ENOUGH BITS TO QUEUE THAT."); return; }
-        int ut = act==0? WAR_U_HARV : act==4? WAR_U_MELEE : act==5? WAR_U_RANGED : act==8? WAR_U_SCOUT : WAR_U_SIEGE;
+        int ut = act==0? WAR_U_HARV : act==4? WAR_U_MELEE : act==5? WAR_U_RANGED : act==8? WAR_U_SCOUT : act==9? WAR_U_SIEGE : WAR_U_PATCH;
         S->war_bits -= cost;
         if (S->war_qlen[s]==0) S->war_qt[s]=WAR_TRAIN_TIME[ut];   // an idle building starts its front item NOW — exactly the old feel
         S->war_queue[s][S->war_qlen[s]++]=ut;
@@ -1249,7 +1440,7 @@ static int war_in_property(BwSim *S, int kind, float x, float y){
 // physical room only: inside the arena, not on top of anything, not
 // on a bit node. (The property rule is separate, above.)
 static int war_place_space(BwSim *S, int kind, float x, float y){
-    if (x < WAR_OX+36 || x > WAR_OX+WAR_AW-36 || y < WAR_OY+36 || y > WAR_OY+WAR_AH-36) return 0;
+    if (x < WAR_OX+36 || x > WAR_OX+S->war_aw-36 || y < WAR_OY+36 || y > WAR_OY+S->war_ah-36) return 0;
     float rad = (float)WAR_SRAD[kind];
     for (int s=0;s<WAR_MAXS;s++){
         if (S->war_shp[s]<=0) continue;
@@ -1329,6 +1520,7 @@ static void war_order_move(BwSim *S, float wx, float wy){
         ord++;
         S->war_ustate[i]=1; S->war_utarget[i]=0;
         S->war_utx[i]=wx+ox; S->war_uty[i]=wy+oy;
+        S->war_urepair[i]=0;   // a fresh order supersedes repair work (v1.19 addendum)
         S->war_wpn[i]=0;   // a fresh order drops any old path (v1.17)
     }
 }
@@ -1337,8 +1529,9 @@ static void war_order_attack(BwSim *S, int eref){
     if (!war_ref_alive(S, eref, &tx, &ty)) return;
     for (int i=0;i<WAR_MAXU;i++){
         if (S->war_uhp[i]<=0 || !S->war_usel[i]) continue;
-        if (S->war_utype[i]==WAR_U_HARV){ S->war_ustate[i]=1; S->war_utx[i]=tx; S->war_uty[i]=ty; }
+        if (S->war_utype[i]==WAR_U_HARV || S->war_utype[i]==WAR_U_PATCH){ S->war_ustate[i]=1; S->war_utarget[i]=0; S->war_utx[i]=tx; S->war_uty[i]=ty; }   // the weaponless just walk there — the barrier-tap precedent: an enemy/debris tap is a move order to a patcher, never an attack
         else { S->war_ustate[i]=2; S->war_utarget[i]=eref; }
+        S->war_urepair[i]=0;   // a fresh order supersedes repair work (v1.19 addendum)
         S->war_wpn[i]=0;   // a fresh order drops any old path (v1.17)
     }
 }
@@ -1368,6 +1561,27 @@ static void war_tap_world(int pi, float wx, float wy){
         if (S->war_shp[s]<=0 || S->war_sside[s]!=0) continue;
         float dx=wx-S->war_sx[s], dy=wy-S->war_sy[s], rr=(float)WAR_SRAD[S->war_stype[s]]+8.0f;
         if (dx*dx+dy*dy < rr*rr){
+            // v1.19 addendum: patchers in the selection + a DAMAGED
+            // friendly structure = a REPAIR order, not a selection
+            // change. Other selected units keep their orders,
+            // exactly as a friendly-structure tap always left them.
+            // A full-health structure falls through to the selection
+            // behaviour below — there is nothing to fix.
+            if (S->war_shp[s] < (float)S->war_smaxhp[s]){
+                int anyp = 0;
+                for (int i=0;i<WAR_MAXU;i++)
+                    if (S->war_uhp[i]>0 && S->war_usel[i] && S->war_utype[i]==WAR_U_PATCH){
+                        S->war_urepair[i]=s+1; S->war_ustate[i]=0; S->war_utarget[i]=0; S->war_wpn[i]=0; anyp = 1;
+                    }
+                if (anyp){ S->war_ordx=wx; S->war_ordy=wy; S->war_ordt=0.5f; sfx(6); return; }
+            }
+            if (s == S->war_selstruct){
+                // v1.19 addendum (Daniel): tapping the selected
+                // building itself toggles it OFF — the same cleanup
+                // as every other deselect path (the pad retires its
+                // bar highlight on the selection change by itself)
+                S->war_selstruct=-1; S->war_bcat=-1; sfx(6); return;
+            }
             for (int i=0;i<WAR_MAXU;i++) S->war_usel[i]=0;
             S->war_selstruct=s; S->war_bcat=-1; sfx(6); return;   // a selection change closes any open category (a lone category reopens itself in the bar)
         }
@@ -1514,11 +1728,23 @@ static void war_map_launch(int pi, int r){
     if (r <= b->war_prog){ war_start_battle(pi, r); }
     else { sfx(16); war_note(S, "THAT REGION IS STILL WILD. CONQUER THE ONES BEFORE IT!"); }
 }
+// v1.19: the SKIRMISH button on the world map's bottom strip —
+// one rect shared by the tap handler and the renderer.
+static void war_skirmish_btn(int vx, int vy, int vw2, int vh2, int *bx, int *by){
+    (void)vy;
+    *bx = vx+vw2-140; *by = vy+vh2-68;
+}
 static void war_map_update(int pi, float dt, const BwIn *in){
     BwSim *S = &BWS[pi];
     (void)dt;
     if (in->exit_){ bw_exit(pi, 0); return; }
     if (S->war_grace > 0) return;
+    if (pi==G.my_id){   // v1.19: S opens the skirmish setup panel
+        for (int t=0;t<IN.typed_n;t++) if (IN.typed[t]=='s' || IN.typed[t]=='S'){
+            S->war_state = 4; S->war_setup_sel = 0; S->war_setup_prevk = in->keys; sfx(6);
+            return;
+        }
+    }
     if ((in->keys&K_LEFT) || in->up) { S->war_map_sel = (S->war_map_sel+7)%8; sfx(6); }
     if ((in->keys&K_RIGHT) || in->down) { S->war_map_sel = (S->war_map_sel+1)%8; sfx(6); }
     if (in->sel || in->interact){
@@ -1528,6 +1754,11 @@ static void war_map_update(int pi, float dt, const BwIn *in){
     if (pi==G.my_id && IN.tapped){
         IN.tapped = 0;
         int vx, vy, vw2, vh2; p1_view_rect(&vx, &vy, &vw2, &vh2);
+        { int bx, by; war_skirmish_btn(vx, vy, vw2, vh2, &bx, &by);
+          if (IN.tap_x>=bx && IN.tap_x<bx+128 && IN.tap_y>=by && IN.tap_y<by+28){
+              S->war_state = 4; S->war_setup_sel = 0; S->war_setup_prevk = in->keys; sfx(6);
+              return;
+          } }
         for (int r=0;r<8;r++){
             int nx, ny; war_node_pos(vx, vy, vw2, vh2, r, &nx, &ny);
             int dx=IN.tap_x-nx, dy=IN.tap_y-ny;
@@ -1538,6 +1769,89 @@ static void war_map_update(int pi, float dt, const BwIn *in){
             }
         }
     }
+}
+// v1.19: the SKIRMISH SETUP panel (war_state 4) — the map shows
+// through, dimmed, and four rows do everything: MAP SIZE, ENEMY,
+// LAUNCH, BACK. Same idiom as the pause panel: one rect set
+// shared by the tap handler and the renderer, keyboard edges for
+// the arrows, the pad's bumpers walk a value.
+static void war_render_map(int pi, int vx, int vy, int vw2, int vh2);   // defined below; the setup panel draws it as its backdrop
+static void war_setup_rects(int vx, int vy, int vw2, int vh2, int *px, int *py, int *pw, int *ph){
+    *pw = vw2<420? vw2-24 : 396; *ph = 224;
+    *px = vx+(vw2-*pw)/2; *py = vy+(vh2-*ph)/2 - 10;
+}
+static void war_setup_pick(int pi, int n){
+    BwSim *S = &BWS[pi];
+    if (n==0){ S->war_size = S->war_size%3 + 1; sfx(6); }
+    else if (n==1){ S->war_diff = S->war_diff%3 + 1; sfx(6); }
+    else if (n==2){ war_start_skirmish(pi); }
+    else { S->war_state = 0; S->war_grace = 0.3f; sfx(6); }
+}
+static void war_setup_update(int pi, float dt, const BwIn *in){
+    BwSim *S = &BWS[pi];
+    (void)dt;
+    if (in->exit_){ S->war_state = 0; S->war_grace = 0.3f; sfx(6); return; }
+    if (S->war_grace > 0) return;
+    if (in->up) { S->war_setup_sel = (S->war_setup_sel+3)%4; sfx(6); }
+    if (in->down) { S->war_setup_sel = (S->war_setup_sel+1)%4; sfx(6); }
+    u32 kd = in->keys & ~(u32)S->war_setup_prevk;   // arrow EDGES: BwIn's keys are levels, so a held arrow must not spin the value
+    if (kd & K_LEFT){ if (S->war_setup_sel==0) S->war_size = (S->war_size+1)%3 + 1; else if (S->war_setup_sel==1) S->war_diff = (S->war_diff+1)%3 + 1; sfx(6); }
+    if (kd & K_RIGHT){ if (S->war_setup_sel==0) S->war_size = S->war_size%3 + 1; else if (S->war_setup_sel==1) S->war_diff = S->war_diff%3 + 1; sfx(6); }
+    S->war_setup_prevk = (int)in->keys;
+    if (in->sel || in->interact){ war_setup_pick(pi, S->war_setup_sel); return; }
+    if (pi==G.my_id){
+        if (IN.tapped){
+            IN.tapped = 0;
+            int vx, vy, vw2, vh2; p1_view_rect(&vx, &vy, &vw2, &vh2);
+            int px, py, pw, ph; war_setup_rects(vx, vy, vw2, vh2, &px, &py, &pw, &ph);
+            for (int n=0;n<4;n++){
+                int ry = py+58+n*38;
+                if (IN.tap_x>=px+16 && IN.tap_x<px+pw-16 && IN.tap_y>=ry && IN.tap_y<ry+32){
+                    S->war_setup_sel = n;
+                    if (n<2){   // a value row: the left third steps back, the rest steps forward
+                        int back = IN.tap_x < px+pw/3;
+                        if (n==0) S->war_size = back? (S->war_size+1)%3 + 1 : S->war_size%3 + 1;
+                        else S->war_diff = back? (S->war_diff+1)%3 + 1 : S->war_diff%3 + 1;
+                        sfx(6);
+                    } else war_setup_pick(pi, n);
+                    return;
+                }
+            }
+        }
+        u32 pe = IN.pad_edges;
+        if (pe & ((1u<<ACT_WPREV)|(1u<<ACT_WNEXT))){
+            int d = (pe & (1u<<ACT_WNEXT))? 1 : -1;
+            if (S->war_setup_sel==0) S->war_size = ((S->war_size-1 + d + 3)%3) + 1;
+            else if (S->war_setup_sel==1) S->war_diff = ((S->war_diff-1 + d + 3)%3) + 1;
+            sfx(6);
+        }
+        if (pe & (1u<<ACT_FIRE)){ war_setup_pick(pi, S->war_setup_sel); return; }
+        if (pe & (1u<<ACT_INTERACT)){ S->war_state = 0; S->war_grace = 0.3f; sfx(6); return; }
+    }
+}
+static void war_render_setup(int pi, int vx, int vy, int vw2, int vh2){
+    BwSim *S = &BWS[pi];
+    war_render_map(pi, vx, vy, vw2, vh2);
+    blend_rect(vx, vy, vw2, vh2, COL(8,8,14), 150);
+    int px, py, pw, ph; war_setup_rects(vx, vy, vw2, vh2, &px, &py, &pw, &ph);
+    rect_fill(px, py, pw, ph, COL(16,18,28)); rect_line(px, py, pw, ph, COL(255,170,90));
+    draw_text_center(px+pw/2, py+14, "SKIRMISH SETUP", 2, COL(255,210,150));
+    static const char *SZ[4] = { "", "SMALL", "STANDARD", "LARGE" };
+    static const char *DF[4] = { "", "EASY", "NORMAL", "HARD" };
+    for (int n=0;n<4;n++){
+        int ry = py+58+n*38;
+        int sel = (S->war_setup_sel==n);
+        rect_fill(px+16, ry, pw-32, 32, sel? COL(56,64,88) : COL(38,44,60));
+        rect_line(px+16, ry, pw-32, 32, sel? COL(255,220,120) : COL(198,164,84));
+        char buf[64]; char *q=buf;
+        if (n==0){ q=sappend(q, "MAP SIZE  < "); q=sappend(q, SZ[S->war_size]); q=sappend(q, " >"); }
+        else if (n==1){ q=sappend(q, "ENEMY  < "); q=sappend(q, DF[S->war_diff]); q=sappend(q, " >"); }
+        else if (n==2){ q=sappend(q, "LAUNCH"); }
+        else { q=sappend(q, "BACK"); }
+        *q=0;
+        draw_text_center(px+pw/2, ry+10, buf, 2, COL(240,244,250));
+    }
+    draw_text_center(px+pw/2, py+ph-16, mobile_ui()? "TAP A ROW" : "ARROWS + SPACE - ESC BACKS OUT", 1, COL(150,160,185));
 }
 // --- WAR! on a gamepad (v1.16, Daniel) --------------------------------
 // The pad never had a tap channel, so every WAR! verb — select,
@@ -1600,9 +1914,9 @@ static void war_pad_update(int pi, float dt){
     // pushes to within 28u of the view's edge; then the cursor is
     // clamped back onto the screen (a key/d-pad pan can strand it)
     if (S->war_curx < WAR_OX) S->war_curx = WAR_OX;
-    if (S->war_curx > WAR_OX+WAR_AW) S->war_curx = WAR_OX+WAR_AW;
+    if (S->war_curx > WAR_OX+S->war_aw) S->war_curx = WAR_OX+S->war_aw;
     if (S->war_cury < WAR_OY) S->war_cury = WAR_OY;
-    if (S->war_cury > WAR_OY+WAR_AH) S->war_cury = WAR_OY+WAR_AH;
+    if (S->war_cury > WAR_OY+S->war_ah) S->war_cury = WAR_OY+S->war_ah;
     { float csx = (float)vx + vw2/2 + (S->war_curx - S->war_camx);
       float csy = (float)vy + vh2/2 + (S->war_cury - S->war_camy - WAR_BAR_H*0.5f);
       if (csx < vx+28) S->war_camx -= (vx+28 - csx);
@@ -1655,6 +1969,7 @@ static void war_update(int pi, float dt, const BwIn *in){
     if (S->war_msgt > 0) S->war_msgt -= dt;
     if (S->war_grace > 0) S->war_grace -= dt;
     if (S->war_state==0){ war_map_update(pi, dt, in); return; }
+    if (S->war_state==4){ war_setup_update(pi, dt, in); return; }   // v1.19: the skirmish setup panel — the battle clock does not run here
     if (S->war_state==2 || S->war_state==3){
         S->war_endt -= dt;
         if (pi==G.my_id && IN.tapped){ IN.tapped=0; if (S->war_endt > 0.4f) S->war_endt = 0.4f; }
@@ -1766,13 +2081,17 @@ static void war_render_map(int pi, int vx, int vy, int vw2, int vh2){
     }
     { char buf[48]; char *q=buf; q=sappend(q, "REGIONS CONQUERED: "); q=sapp_int(q, b->war_prog); q=sappend(q, " / 8"); *q=0;
       draw_text_center(vx+vw2/2, vy+vh2-34, buf, 1, COL(255,220,120)); }
+    { int bx, by; war_skirmish_btn(vx, vy, vw2, vh2, &bx, &by);   // v1.19: the skirmish door, bottom-right of the map
+      rect_fill(bx, by, 128, 28, COL(38,44,60));
+      rect_line(bx, by, 128, 28, COL(255,170,90));
+      draw_text_center(bx+64, by+9, "SKIRMISH", 2, COL(255,210,150)); }
     if (b->war_prog>=8) draw_text_center(vx+vw2/2, vy+vh2-19, "ALL REGIONS CONQUERED! TAP ANY REGION TO FIGHT IT AGAIN.", 1, COL(200,230,200));
     else draw_text_center(vx+vw2/2, vy+vh2-19, mobile_ui()? "TAP A REGION TO INVADE IT" : "TAP A REGION - OR ARROWS + SPACE", 1, COL(150,160,185));
     if (S->war_msgt>0) draw_text_center(vx+vw2/2, vy+58, S->war_msg, 1, COL(255,170,150));
 }
 static void war_draw_bar_btn(BwSim *S, int bx, int by, int act, int cost, const char *name, int hl){
     int afford = S->war_bits >= cost;
-    if ((act==0 || act==4 || act==5 || act==8 || act==9) && S->war_selstruct>=0 && S->war_qlen[S->war_selstruct]>=9) afford = 0;   // a full queue greys its train buttons out (addendum 2)
+    if ((act==0 || act==4 || act==5 || act==8 || act==9 || act==12) && S->war_selstruct>=0 && S->war_qlen[S->war_selstruct]>=9) afford = 0;   // a full queue greys its train buttons out (addendum 2)
     u32 fill = afford? COL(38,44,60) : COL(26,26,34);
     u32 edge = afford? COL(198,164,84) : COL(70,66,84);
     if (act>=20 && act<=22 && act-20==S->war_bcat){ fill = COL(56,64,88); edge = COL(255,220,120); }   // the open category, lit
@@ -1786,7 +2105,7 @@ static void war_draw_bar_btn(BwSim *S, int bx, int by, int act, int cost, const 
     else draw_text_center(bx+42, by+24, act==6? "STOP" : "FREE", 1, COL(160,170,190));
     // a train button carries the building's QUEUE (addendum 2): the
     // front item's progress tick plus the depth in the corner
-    if ((act==0 || act==4 || act==5 || act==8 || act==9) && S->war_selstruct>=0 && S->war_qlen[S->war_selstruct]>0){
+    if ((act==0 || act==4 || act==5 || act==8 || act==9 || act==12) && S->war_selstruct>=0 && S->war_qlen[S->war_selstruct]>0){
         int ut = S->war_queue[S->war_selstruct][0];
         float f = 1.0f - S->war_qt[S->war_selstruct] / WAR_TRAIN_TIME[ut];
         if (f<0) f=0; if (f>1) f=1;
@@ -1946,7 +2265,7 @@ static void war_draw_unit(BwSim *S, Buddy *b, int i){
     ellipse_fill(sx, sy+6, veh? (type==WAR_U_SIEGE? 17:13) : 8, 3, COL(16,14,24));
     if (war_u_side(type)==0){
         u32 coat = bud_coat(b, WAR_SPCOL[b->species % BUDN]);
-        int bob = (S->war_ustate[i]!=0)? ((int)(G.anim_t*9.0f + (float)i*1.7f) & 1) : 0;
+        int bob = (S->war_ustate[i]!=0 || S->war_urepair[i]!=0)? ((int)(G.anim_t*9.0f + (float)i*1.7f) & 1) : 0;   // repair work bobs too — a patcher under autoseek has no move state set
         if (type==WAR_U_SCOUT){
             // the scout buggy: light frame, four wheels, the driver's
             // head up top and a little pop-gun out front
@@ -1975,6 +2294,10 @@ static void war_draw_unit(BwSim *S, Buddy *b, int i){
         } else if (type==WAR_U_MELEE){
             line_thick(sx+5, sy+4-bob, sx+11, sy-4-bob, 2, COL(220,226,235));   // the wrench
             disc_fill(sx+12, sy-5-bob, 2, COL(220,226,235));
+        } else if (type==WAR_U_PATCH){
+            rect_fill(sx-6, sy-10-bob, 12, 4, COL(240,244,250));   // the patcher's white cap...
+            rect_fill(sx-1, sy-11-bob, 2, 6, COL(255,90,80));      // ...and the red cross it wears
+            rect_fill(sx-3, sy-9-bob, 6, 2, COL(255,90,80));
         } else {
             disc_fill(sx, sy-9-bob, 3, COL(120,235,255));   // the bolt buddy's charged cap
             rect_fill(sx-1, sy-14-bob, 2, 4, COL(120,235,255));
@@ -2097,6 +2420,7 @@ static void war_render(int pi){
     BwSim *S = &BWS[pi]; Buddy *b = &G.bud[pi];
     int vx = G.view_x0, vy = G.view_y0, vw2 = G.view_w>0? G.view_w : VW, vh2 = G.view_h>0? G.view_h : VH;
     if (S->war_state==0){ war_render_map(pi, vx, vy, vw2, vh2); return; }
+    if (S->war_state==4){ war_render_setup(pi, vx, vy, vw2, vh2); return; }   // v1.19: the setup panel over the map
     G.zoom = 1.0f;
     G.camx = S->war_camx; G.camy = S->war_camy + WAR_BAR_H*0.5f;
     int rg = S->war_region;
@@ -2106,7 +2430,7 @@ static void war_render(int pi){
       int gx0 = (int)(wx0/80.0f), gy0 = (int)(wy0/80.0f), gx1 = (int)(wx1/80.0f), gy1 = (int)(wy1/80.0f);
       for (int gy=gy0; gy<=gy1; gy++) for (int gx=gx0; gx<=gx1; gx++){
           float cxp = gx*80.0f+40, cyp = gy*80.0f+40;
-          int inside = cxp>WAR_OX && cxp<WAR_OX+WAR_AW && cyp>WAR_OY && cyp<WAR_OY+WAR_AH;
+          int inside = cxp>WAR_OX && cxp<WAR_OX+S->war_aw && cyp>WAR_OY && cyp<WAR_OY+S->war_ah;
           u32 c = inside? (((gx+gy)&1)? REGION_GA[rg] : REGION_GB[rg]) : col_shade(REGION_GB[rg], 0.45f);
           c = col_shade(c, 0.95f + hash_f(gx, gy, 0xB17u)*0.09f);
           rect_fill(SX(gx*80.0f), SY(gy*80.0f), 81, 81, c);
@@ -2114,9 +2438,9 @@ static void war_render(int pi){
               disc_fill(SX(gx*80.0f + 20 + (int)(hash2(gx, gy, 3u) % 36)), SY(gy*80.0f + 22 + (int)(hash2(gx, gy, 9u) % 34)), 3, REGION_TUFT[rg]);
       }
       // the arena fence
-      int ax0 = SX(WAR_OX), ay0 = SY(WAR_OY), ax1 = SX(WAR_OX+WAR_AW), ay1 = SY(WAR_OY+WAR_AH);
-      rect_fill(ax0-5, ay0-5, (int)WAR_AW+10, 5, COL(70,44,44)); rect_fill(ax0-5, ay1, (int)WAR_AW+10, 5, COL(70,44,44));
-      rect_fill(ax0-5, ay0-5, 5, (int)WAR_AH+10, COL(70,44,44)); rect_fill(ax1, ay0-5, 5, (int)WAR_AH+10, COL(70,44,44));
+      int ax0 = SX(WAR_OX), ay0 = SY(WAR_OY), ax1 = SX(WAR_OX+S->war_aw), ay1 = SY(WAR_OY+S->war_ah);
+      rect_fill(ax0-5, ay0-5, (int)S->war_aw+10, 5, COL(70,44,44)); rect_fill(ax0-5, ay1, (int)S->war_aw+10, 5, COL(70,44,44));
+      rect_fill(ax0-5, ay0-5, 5, (int)S->war_ah+10, COL(70,44,44)); rect_fill(ax1, ay0-5, 5, (int)S->war_ah+10, COL(70,44,44));
     }
     war_render_zones(S);
     for (int t=0;t<S->war_tn;t++)   // terrain is scenery: remembered once explored
@@ -2158,7 +2482,7 @@ static void war_render(int pi){
       int cx0 = (int)((wx0 - WAR_OX)/40.0f), cx1 = (int)((wx1 - WAR_OX)/40.0f);
       int cy0 = (int)((wy0 - WAR_OY)/40.0f), cy1 = (int)((wy1 - WAR_OY)/40.0f);
       if (cx0<0) cx0=0; if (cy0<0) cy0=0;
-      if (cx1>=WAR_FOG_W) cx1=WAR_FOG_W-1; if (cy1>=WAR_FOG_H) cy1=WAR_FOG_H-1;
+      if (cx1>=S->war_gw) cx1=S->war_gw-1; if (cy1>=S->war_gh) cy1=S->war_gh-1;   // v1.19: fog is drawn only over the live field's grid
       for (int cy=cy0; cy<=cy1; cy++) for (int cx=cx0; cx<=cx1; cx++){
           int f = S->war_fog[cy*WAR_FOG_W + cx];
           if (f==2) continue;
@@ -2205,7 +2529,7 @@ static void war_render(int pi){
     disc_fill(vx+12, vy+10, 5, COL(255,205,40));
     { char buf[64]; char *q=buf; q=sappend(q, "BITS "); q=sapp_int(q, S->war_bits); *q=0;
       draw_text(vx+22, vy+6, buf, 1, COL(255,230,150)); }
-    draw_text_center(vx+vw2/2, vy+6, REGION_NAME[rg], 1, COL(240,244,250));
+    draw_text_center(vx+vw2/2, vy+6, S->war_skirmish? "SKIRMISH" : REGION_NAME[rg], 1, COL(240,244,250));
     { char buf[48]; char *q=buf; q=sappend(q, "HIVES "); q=sapp_int(q, war_hives_alive(S));
       q=sappend(q, "   ARMY "); q=sapp_int(q, war_count_units(S, 0)); q=sappend(q, "/24"); *q=0;
       draw_text(vx+vw2-text_w(buf, 1)-8, vy+6, buf, 1, COL(255,190,170)); }
@@ -2221,13 +2545,13 @@ static void war_render(int pi){
         int px = vx+(vw2-pw)/2, py = vy+(vh2-ph)/2 - 20;
         rect_fill(px, py, pw, ph, COL(16,18,28)); rect_line(px, py, pw, ph, S->war_state==2? COL(255,205,40) : COL(255,110,90));
         if (S->war_state==2){
-            draw_text_center(px+pw/2, py+16, "REGION CONQUERED!", 2, COL(255,220,120));
-            draw_text_center(px+pw/2, py+44, REGION_NAME[rg], 1, COL(240,244,250));
-            draw_text_center(px+pw/2, py+62, "THE SWARM RETREATS... FOR NOW.", 1, COL(200,220,200));
+            draw_text_center(px+pw/2, py+16, S->war_skirmish? "SKIRMISH WON!" : "REGION CONQUERED!", 2, COL(255,220,120));
+            draw_text_center(px+pw/2, py+44, S->war_skirmish? "SKIRMISH" : REGION_NAME[rg], 1, COL(240,244,250));
+            draw_text_center(px+pw/2, py+62, S->war_skirmish? "THE FIELD IS YOURS... THIS TIME." : "THE SWARM RETREATS... FOR NOW.", 1, COL(200,220,200));
         } else {
             draw_text_center(px+pw/2, py+16, "THE CORE HAS FALLEN", 2, COL(255,140,120));
-            draw_text_center(px+pw/2, py+44, REGION_NAME[rg], 1, COL(240,244,250));
-            draw_text_center(px+pw/2, py+62, "THE REGION STAYS WILD. REBUILD AND TRY AGAIN!", 1, COL(220,200,200));
+            draw_text_center(px+pw/2, py+44, S->war_skirmish? "SKIRMISH" : REGION_NAME[rg], 1, COL(240,244,250));
+            draw_text_center(px+pw/2, py+62, S->war_skirmish? "THE FIELD KEEPS ITS SECRETS. TRY AGAIN!" : "THE REGION STAYS WILD. REBUILD AND TRY AGAIN!", 1, COL(220,200,200));
         }
         draw_text_center(px+pw/2, py+ph-16, "TAP TO RETURN TO THE MAP", 1, COL(150,160,185));
     }
@@ -2236,9 +2560,9 @@ static void war_render(int pi){
         int px, py, pw, ph; war_pause_rects(vx, vy, vw2, vh2, &px, &py, &pw, &ph);
         rect_fill(px, py, pw, ph, COL(16,18,28)); rect_line(px, py, pw, ph, COL(255,205,40));
         draw_text_center(px+pw/2, py+14, "PAUSED", 2, COL(255,220,120));
-        { char buf[48]; char *q=buf; q=sappend(q, REGION_NAME[rg]); q=sappend(q, " - THE BATTLE WAITS"); *q=0;
+        { char buf[48]; char *q=buf; q=sappend(q, S->war_skirmish? "SKIRMISH" : REGION_NAME[rg]); q=sappend(q, " - THE BATTLE WAITS"); *q=0;
           draw_text_center(px+pw/2, py+36, buf, 1, COL(200,210,230)); }
-        static const char *PLBL[3] = { "RESUME", "RESTART BATTLE", "SAVE & QUIT" };
+        const char *PLBL[3] = { "RESUME", "RESTART BATTLE", S->war_skirmish? "QUIT BATTLE" : "SAVE & QUIT" };   // v1.19: a skirmish is never parked — its third choice quits outright
         for (int n=0;n<3;n++){
             int by = war_pause_btn_y(py, n);
             rect_fill(px+40, by, pw-80, 36, COL(38,44,60));

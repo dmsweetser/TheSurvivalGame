@@ -413,6 +413,7 @@ __attribute__((export_name("dbg_bwentm"))) void exp_dbg_bwentm(int m){ int id = 
 // x*10000+y; dbg_warunitpos packs the unit's on-screen (fb) coords
 // the same way; struct 0 is always the Compiler Core, hives follow.
 __attribute__((export_name("dbg_warstate"))) int exp_dbg_warstate(void){ int id = G.my_id>=0? G.my_id : 0; return G.bud[id].bw_mode==8? BWS[id].war_state : -1; }
+__attribute__((export_name("dbg_warskirmish"))) int exp_dbg_warskirmish(void){ int id = G.my_id>=0? G.my_id : 0; return BWS[id].war_skirmish; }   // v1.19: 1 while the live WAR! battle is an ad-hoc skirmish
 __attribute__((export_name("dbg_warbits"))) int exp_dbg_warbits(void){ int id = G.my_id>=0? G.my_id : 0; return BWS[id].war_bits; }
 __attribute__((export_name("dbg_warconq"))) int exp_dbg_warconq(void){ int id = G.my_id>=0? G.my_id : 0; return G.bud[id].war_prog; }
 __attribute__((export_name("dbg_warhives"))) int exp_dbg_warhives(void){ int id = G.my_id>=0? G.my_id : 0; return war_hives_alive(&BWS[id]); }
@@ -431,6 +432,8 @@ __attribute__((export_name("dbg_warunitxy"))) int exp_dbg_warunitxy(int i){ int 
     if (i<0 || i>=WAR_MAXU || S->war_uhp[i]<=0) return -1; return (int)(S->war_ux[i]-WAR_OX)*10000 + (int)(S->war_uy[i]-WAR_OY); }
 __attribute__((export_name("dbg_warstructxy"))) int exp_dbg_warstructxy(int i){ int id = G.my_id>=0? G.my_id : 0; BwSim *S = &BWS[id];
     if (i<0 || i>=WAR_MAXS || S->war_shp[i]<=0) return -1; return (int)(S->war_sx[i]-WAR_OX)*10000 + (int)(S->war_sy[i]-WAR_OY); }
+__attribute__((export_name("dbg_warstructhp"))) int exp_dbg_warstructhp(int i){ int id = G.my_id>=0? G.my_id : 0; BwSim *S = &BWS[id];
+    if (i<0 || i>=WAR_MAXS || S->war_shp[i]<=0) return -1; return (int)S->war_shp[i]; }   // v1.19 addendum: a structure's current HP (the patcher checks read repairs through this)
 __attribute__((export_name("dbg_warunitpos"))) int exp_dbg_warunitpos(int i){ int id = G.my_id>=0? G.my_id : 0; BwSim *S = &BWS[id];
     if (i<0 || i>=WAR_MAXU || S->war_uhp[i]<=0) return -1;
     int vx, vy, vw2, vh2; p1_view_rect(&vx, &vy, &vw2, &vh2);

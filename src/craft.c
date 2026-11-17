@@ -268,6 +268,18 @@ static void craft_spend(Buddy *b, const CRec *R){
     b->craft_wood-=R->w; b->craft_stone-=R->s; b->craft_fiber-=R->f; b->craft_car-=R->c;
 }
 static void craft_note(BwSim *S, const char *t){ scpy(S->note, t, 72); S->note_t=2.0f; }
+// v1.19: a completed craft pays the buddy +8 XP, surfaced on the
+// note the craft just posted — call AFTER the note is set (whether
+// it came through craft_note or a direct write), before the
+// sfx/save tail of the success branch.
+static void craft_xp_note(int pi){
+    BwSim *S=&BWS[pi];
+    buddy_award_xp(pi, 8);
+    if (G.bud[pi].active){
+        int l = slen(S->note);
+        if (l > 0 && l < 58){ char *q = S->note + l; q = sappend(q, " +8 BUDDY XP"); *q = 0; }
+    }
+}
 static void craft_do(int pi, int id){
     BwSim *S=&BWS[pi]; Buddy *b=&G.bud[pi];
     if (id==100){   // eat a heart pie
@@ -297,7 +309,7 @@ static void craft_do(int pi, int id){
     if (R->build==-5){   // cooked fish: eats a caught fish, right now, by the fire
         if (b->craft_fish<1){ craft_note(S, "NO FISH TO COOK. THE WATER PROVIDES."); S->note_t=1.8f; sfx(16); return; }
         b->craft_fish--; b->hp += b->maxhp*0.6f; if (b->hp>b->maxhp) b->hp=b->maxhp;
-        craft_note(S, "COOKED FISH. CRISP EDGES, WARM MIDDLE. +60% HP"); sfx(11); do_save(); return;
+        craft_note(S, "COOKED FISH. CRISP EDGES, WARM MIDDLE. +60% HP"); craft_xp_note(pi); sfx(11); do_save(); return;
     }
     if (R->build==-2 || R->build==-3){   // food, into the pack
         if (R->build==-2 && b->craft_pies>=99){ craft_note(S, "YOUR PACK IS FULL OF PIES."); sfx(16); return; }
@@ -305,14 +317,14 @@ static void craft_do(int pi, int id){
         craft_spend(b, R);
         if (R->build==-2){ b->craft_pies++; craft_note(S, "A HEART PIE, BAKED AND BAGGED."); }
         else { b->craft_stews++; craft_note(S, "A CARAPACE STEW, SEALED AND STEAMING."); }
-        sfx(11); do_save(); return;
+        craft_xp_note(pi); sfx(11); do_save(); return;
     }
     if (R->build<0){   // gear: one of each, forever
         if (b->craft_gear & R->bit){ craft_note(S, "YOU ALREADY CRAFTED THAT."); S->note_t=1.6f; sfx(16); return; }
         craft_spend(b, R);
         b->craft_gear |= R->bit;
         { char *q=S->note; q=sappend(q, "CRAFTED: "); q=sappend(q, R->name); q=sappend(q, "!"); *q=0; }
-        S->note_t=2.0f; sfx(11); do_save(); return;
+        S->note_t=2.0f; craft_xp_note(pi); sfx(11); do_save(); return;
     }
     // a build: fires plant at your feet, everything else on the tile ahead
     int kind = R->build;
@@ -358,7 +370,7 @@ static void craft_do(int pi, int id){
     else if (kind==10) craft_note(S, "A REINFORCED WALL. COME AND CHEW. WE DARE YOU.");
     else if (kind==11) craft_note(S, "A LANTERN POST. THE DARK BACKS UP.");
     else craft_note(S, "A TORCH POST. A LITTLE SUN, ON A STICK.");
-    sfx(19); do_save();
+    craft_xp_note(pi); sfx(19); do_save();
 }
 static void craft_hit_node(int pi, int tx, int ty){
     BwSim *S=&BWS[pi]; Buddy *b=&G.bud[pi];

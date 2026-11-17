@@ -503,9 +503,35 @@ typedef struct {
     // categorized command bar. war_bcat: -1 top level (categories),
     // 0 TRAIN, 1 BUILD, 2 DEFENSE. war_pause freezes the battle.
     int war_pause, war_bcat;
+    // v1.19: SKIRMISH — ad-hoc WAR! battles off the world map.
+    // war_skirmish marks the live battle as ad-hoc (never parked,
+    // never touches war_prog); war_aw/war_ah are the LIVE field
+    // size (campaign = WAR_AW/WAR_AH; the #defines stay the array
+    // maxima); war_gw/war_gh are the fog/A* grid dims in 40u cells
+    // (a SMALL field's grids are subgrids of the same arrays).
+    // war_size/war_diff are the player's setup-panel picks, kept
+    // per player, never saved: size 1 SMALL / 2 STANDARD / 3
+    // LARGE, diff 1 EASY / 2 NORMAL / 3 HARD (0 = unset, the map
+    // entry defaults it to STANDARD/NORMAL). war_lines overrides
+    // the barrier-line count when >0 (campaign leaves it 0 and
+    // keeps its region rule).
+    int war_skirmish, war_size, war_diff, war_setup_sel, war_setup_prevk;
+    float war_aw, war_ah;
+    int war_gw, war_gh, war_lines;
     char war_msg[72]; float war_msgt;
     float war_ux[80], war_uy[80], war_uhp[80], war_uatk[80];
     float war_utx[80], war_uty[80], war_uharv[80];
+    // v1.19 addendum: the PATCHER's repair state — TRANSIENT, like
+    // an attack target: it is never written into the battle
+    // snapshot, so a restored patcher simply idles (and its
+    // autoseek re-engages from there). war_urepair is a structure
+    // index + 1 (0 = no repair work), war_urepacc the fractional
+    // bit accumulator (repairs bill 1 bit per 4 HP; only whole
+    // bits leave the purse), war_urepscan the autoseek re-scan
+    // timer. war_repnoted latches the OUT OF BITS note to once per
+    // emptying of the purse.
+    int war_urepair[80]; float war_urepacc[80], war_urepscan[80];
+    int war_repnoted;
     int war_utype[80], war_umaxhp[80], war_ustate[80], war_utarget[80], war_ucarry[80], war_usel[80];
     float war_sx[28], war_sy[28], war_shp[28], war_scd[28], war_qt[28];
     int war_stype[28], war_sside[28], war_smaxhp[28];
@@ -517,7 +543,7 @@ typedef struct {
     // walk to the moment they roll out. 0 = unset (arena coords are
     // ~40000+, so 0 is never a real point).
     float war_rallyx[28], war_rallyy[28];
-    float war_nx[10], war_ny[10]; int war_namt[10], war_nn;
+    float war_nx[16], war_ny[16]; int war_namt[16], war_nn;   // v1.19: 11 campaign nodes now, 13 on a LARGE skirmish field (was [10])
     float war_px[64], war_py[64]; int war_ptar[64], war_pdmg[64], war_pside[64]; float war_pt[64];
     // WAR! round 2 (Nov 16 2026, Daniel's playtest): static terrain and
     // the fog of war. Terrain kinds: 0 tree, 1 rock, 2 broken terminal,
@@ -1664,7 +1690,8 @@ static void ent_enter_room(int pi, int k){
     if (k > b->ent_best) b->ent_best = k;
     if (k==51 && !S->ent_finished){
         S->ent_finished = 1; b->ent_done++;
-        scpy(S->note, "YOU MADE IT OUT! EVERY ENTRANCE, CLEARED!", 72); S->note_t = 4.5f;
+        buddy_award_xp(pi, 20);   // v1.19: a completed Entrances run pays the buddy, on top of the quest XP
+        scpy(S->note, b->active? "YOU MADE IT OUT! EVERY ENTRANCE, CLEARED! +20 BUDDY XP" : "YOU MADE IT OUT! EVERY ENTRANCE, CLEARED!", 72); S->note_t = 4.5f;
         do_save(); sfx(11);
     }
     else if (k==25){ scpy(S->note, "ENTRANCE 25: THE LIBRARY. SNEAK. FIND 5 FUSES.", 72); S->note_t = 3.6f; }

@@ -481,16 +481,18 @@ static void crt_update(int pi, float dt, const BwIn *in){
             if (guest >= 0){
                 BwSim *GS2 = &BWS[guest];
                 GS2->crt_guest = 0; S->crt_duo = -1;
+                if (grank == 1) buddy_award_xp(guest, 40);   // v1.19: a Grand Prix win pays the buddy an extra 40
                 bw_exit(guest, 0);
                 Player *gp = &G.p[guest];
                 char buf[64]; char *q = buf;
-                q = sappend(q, "GRAND PRIX: YOU RANKED P"); q = sapp_int(q, grank); q = sappend(q, " OF 6!"); *q = 0;
+                q = sappend(q, "GRAND PRIX: YOU RANKED P"); q = sapp_int(q, grank); q = sappend(q, " OF 6!"); if (grank == 1 && G.bud[guest].active) q = sappend(q, " +40 BUDDY XP"); *q = 0;
                 spawn_floater(gp->x, gp->y - 26, buf, COL(255, 220, 120));
             }
+            if (hrank == 1) buddy_award_xp(pi, 40);   // v1.19: a Grand Prix win pays the buddy an extra 40
             bw_exit(pi, 0);
             { Player *p = &G.p[pi];
               char buf[64]; char *q = buf;
-              q = sappend(q, "GRAND PRIX: YOU RANKED P"); q = sapp_int(q, hrank); q = sappend(q, " OF 6!"); *q = 0;
+              q = sappend(q, "GRAND PRIX: YOU RANKED P"); q = sapp_int(q, hrank); q = sappend(q, " OF 6!"); if (hrank == 1 && b->active) q = sappend(q, " +40 BUDDY XP"); *q = 0;
               spawn_floater(p->x, p->y - 26, buf, COL(255, 220, 120)); }
         }
         return;
@@ -622,6 +624,11 @@ static void crt_update(int pi, float dt, const BwIn *in){
           if (!S->crt_hfin[0]) S->crt_hfin[0] = S->crt_place[0];
           if (S->crt_duo >= 0 && !S->crt_hfin[1]) S->crt_hfin[1] = S->crt_place[1];
           S->crt_player_place = S->crt_hfin[0];
+          { static const int CRTXP[3] = { 40, 30, 20 };   // v1.19: a finish pays the buddy by placement — 1st/2nd/3rd per the table, any other finish 10
+            int amt0 = (S->crt_hfin[0]>=1 && S->crt_hfin[0]<=3)? CRTXP[S->crt_hfin[0]-1] : 10;
+            buddy_award_xp(pi, amt0);
+            if (S->crt_duo >= 0){ int amt1 = (S->crt_hfin[1]>=1 && S->crt_hfin[1]<=3)? CRTXP[S->crt_hfin[1]-1] : 10; buddy_award_xp(S->crt_duo, amt1); }
+            if (b->active){ char *q=S->note; q=sappend(q, "FINISH BONUS: +"); q=sapp_int(q, amt0); q=sappend(q, " BUDDY XP"); *q=0; S->note_t=3.4f; } }
           S->crt_state = 2; S->crt_fint = 3.4f;
           qnote(0, 0, 60, 90, 6); qnote(0.12f, 0, 64, 90, 6);
           qnote(0.24f, 0, 67, 90, 6); qnote(0.36f, 0, 72, 110, 10);

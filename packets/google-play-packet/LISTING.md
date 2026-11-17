@@ -46,10 +46,14 @@ again for v1.18 ("SHIFTING GROUND" — every WAR! battle rolls
 a fresh field: hives nest somewhere new on the far side,
 debris scatters fresh, indestructible barrier lines stand in
 new places with a gap in every one; the WAR! passage below
-was rewritten to say so, trimmed to fit). Character counts
+was rewritten to say so, trimmed to fit), and again for
+v1.19 ("BOOT CAMP" — every cabinet win pays the buddy XP,
+WAR! gains skirmish mode and roaming patcher buddies, and
+the fields run richer; the WAR! passage below grew again,
+trimmed elsewhere to fit). Character counts
 verified against Play limits (title ≤ 30, short
 description ≤ 80, full description ≤ 4,000).
-Copy describes the current build (v1.18, 2026-11-16) and only what the Android
+Copy describes the current build (v1.19, 2026-11-17) and only what the Android
 build actually contains — no Whales Only purchase links (buying
 is web-only; the Android build has none), no host co-op claims
 (hosting is a native-build feature).
@@ -102,11 +106,8 @@ THREE WAYS TO PLAY
   and camping; and TANK RESCUE, where your buddy drives a tank
   through scrolling battlefields, cracks open prison huts to free
   captives, and takes on a fortress-core boss at the end of
-  every level — now with switchable grenades that clear cover
-  in an area blast; and CASTLE, a DOS-castle treasure hunt in the
-  spirit of the 1984 original — fetch the sword, brave the
-  Dungeon for the gate key, gather the 13 treasures, and escape
-  through the courtyard gate; and SUPER BUDDY CART, a three-lap
+  every level — with switchable area-blast grenades; and CASTLE, a DOS-castle treasure hunt in the
+  spirit of the 1984 original — fetch the sword, brave the Dungeon for the key, gather 13 treasures, and escape; and SUPER BUDDY CART, a three-lap
   kart racer in SNES Mode 7 style, viewed from right behind
   your kart — and the driver in it is your own Banzai Buddy,
   racing five rival buddies on a dressed circuit with boost
@@ -115,26 +116,10 @@ THREE WAYS TO PLAY
 nodes, raise a Compiler Core base, train melee and ranged
 buddies, hold the line with zapper towers and firewalls,
 raze the bug hives, and conquer all eight regions of the
-world map — building on land your structures claim, behind
-firewalls that join into real barriers, with an Assembly
-Plant rolling out scout buggies and siege tanks, under a fog
-of war that lifts as you explore and never falls again. And
-no two battles are alike: the hives nest somewhere new on
-the far side every fight, the debris scatters fresh, and
-indestructible barrier lines stand in new places with a gap
-in every one — your army pathfinds through, and so do the
-bugs. Trees, rocks and wrecked terminals in your way can
-still be smashed flat. Battles pause and save mid-fight;
-queues stack nine deep; rally points aim troops; gates pass
-your army, not the bugs.
-  WAR! also takes orders from a gamepad now — a stick-driven
-  cursor, musters on double and triple presses, and the
-  command bar on the bumpers. And every cabinet has its own
-  orchestra: the Flight of the Bumblebee for the Run, the
-  Ride of the Valkyries for WAR!, Greensleeves in the Castle,
-  the Mountain King creeping through Entrances, the can-can
-  for Tank Rescue, the William Tell gallop for the Cart, and
-  Sheep May Safely Graze over Buddy Craft.
+world map — building on claimed land behind joined firewalls, with an Assembly Plant for scout buggies and siege tanks, under a fog
+of war that lifts as you explore and never falls again. And no two battles are alike: hives nest somewhere new every fight, debris scatters fresh, and indestructible barrier lines stand in new places with a gap in every one — your army pathfinds through, and so do the
+bugs. Trees, rocks and wrecked terminals can still be smashed flat. Battles pause and save mid-fight; queues stack nine deep; rally points aim troops; gates pass your army, not the bugs; roaming patcher buddies repair your buildings on their own; and skirmish mode deals a one-off battle on your choice of field and enemy, no campaign strings. Every cabinet win pays your buddy XP toward training and taught moves.
+  WAR! also takes gamepad orders — a stick-driven cursor, musters on double and triple presses, the command bar on the bumpers. And every cabinet has its own orchestra — Bumblebee for the Run, Valkyries for WAR!, Greensleeves in the Castle, the Mountain King in Entrances, the can-can for Tank Rescue, William Tell for the Cart, Sheep May Safely Graze for Buddy Craft.
 
 TOUCH-FIRST ON ANDROID
 Full touch controls (drag or floating stick), plus keyboard and

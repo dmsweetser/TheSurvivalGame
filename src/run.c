@@ -217,9 +217,10 @@ static void plat_update(int pi, float dt, const BwIn *in){
         if (hop>0) b->y = S->plat_cleary - hop;
         if (S->plat_cleart>1.9f){
             if (S->plat_lvl > b->plat_done){ b->plat_done = S->plat_lvl; }
+            buddy_award_xp(pi, 25);   // v1.19: a finish pays the buddy
             do_save();
             plat_load_level(pi, S->plat_lvl+1);
-            { char *q=S->note; q=sappend(q, "DEPLOYED! LEVEL "); q=sapp_int(q, S->plat_lvl); q=sappend(q, " - "); q=sappend(q, REGION_NAME[S->plat_region]); q=sappend(q, "."); *q=0; }
+            { char *q=S->note; q=sappend(q, "DEPLOYED! LEVEL "); q=sapp_int(q, S->plat_lvl); q=sappend(q, " - "); q=sappend(q, REGION_NAME[S->plat_region]); q=sappend(q, "."); if (b->active) q=sappend(q, " +25 BUDDY XP"); *q=0; }
             S->note_t=2.6f;
         }
         return;

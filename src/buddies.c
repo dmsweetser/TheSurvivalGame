@@ -734,6 +734,16 @@ static void buddy_refresh(int pi){
     if (b->hp > b->maxhp) b->hp = b->maxhp;
 }
 static float buddy_dmg(Buddy *b){ return BUD_DMG0[b->species%BUDN] * (1.0f + 0.2f*b->up_atk); }
+// v1.19 (Daniel): the buddy earns XP from SUCCESSES inside the
+// Arcade cabinets too — a Run finish, a Cart placement, a Castle
+// escape, a Tank mission, a finished Craft, an Entrances run, a
+// WAR! victory. One shared door so every cabinet pays through the
+// same rule: no buddy adopted, no award (silently). Callers hook
+// their mode's one-shot completion event and surface the amount
+// in the mode's own note/banner idiom.
+static void buddy_award_xp(int pi, int amt){
+    if (amt > 0 && G.bud[pi].active) G.bud[pi].xp += amt;
+}
 static void buddy_adopt(int pi, int species){
     Buddy *b=&G.bud[pi];
     smemset(b, 0, sizeof(*b));

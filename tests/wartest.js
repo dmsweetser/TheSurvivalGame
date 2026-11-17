@@ -117,8 +117,8 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   // centre (320,188), region 0 at angle -90 -> (320, 73))
   await tap(320, 73);
   ok((await poll('dbg_warstate', [], v => v === 1, 5000)) === 1, 'tapping region 1 launched its battle');
-  ok((await call('dbg_warbits')) === 250, 'v1.17 check 1: starting purse is 250 bits', await call('dbg_warbits'));
-  ok((await call('dbg_warnodes')) === 904800, 'v1.17 check 1: nine bit nodes totalling 4,800 bits on the field', await call('dbg_warnodes'));
+  ok((await call('dbg_warbits')) === 300, 'v1.19 check 1: starting purse is 300 bits (was 250)', await call('dbg_warbits'));
+  ok((await call('dbg_warnodes')) === 1108200, 'v1.19 check 1: eleven bit nodes totalling 8,200 bits on the field (was nine / 4,800)', await call('dbg_warnodes'));
   ok((await call('dbg_warunits', 0, 0)) === 1, 'one harvester at the start');
   ok((await call('dbg_warunits', 0, 1)) === 1, 'one melee buddy at the start');
   ok((await call('dbg_warunits', 0, 2)) === 0, 'no ranged buddies yet');
@@ -138,8 +138,9 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   const bitsBeforeTrain = await call('dbg_warbits');
   await tap(48, 291);   // strip slot 0: HARVESTER, 80 bits
   // read the purse at once: the charge is instant, and the window is
-  // too short for more than one +25 delivery to land inside it
-  ok((await call('dbg_warbits')) <= bitsBeforeTrain - 55, 'training charged the purse (80, less at most one delivery)', await call('dbg_warbits'));
+  // too short for more than one +30 delivery to land inside it
+  // (v1.19: a delivery is a full 30-bit load now, so the bound is -50)
+  ok((await call('dbg_warbits')) <= bitsBeforeTrain - 50, 'training charged the purse (80, less at most one delivery)', await call('dbg_warbits'));
   ok((await poll('dbg_warunits', [0, 0], v => v === 2, 14000)) === 2, 'the bar trained a second harvester');
   // check 10, second half: DEFENSE opens the strip too, and the GATE
   // sits in it at 35 bits
@@ -244,10 +245,12 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   await cv.screenshot({ path: __dirname + '/war-fight.png' });
 
   // victory: raze the hive (struct 1) and the region falls
+  const xp29 = await call('dbg_buddyxp');   // v1.19 check 29: the buddy's XP, captured at the brink of the FIRST conquest
   await call('dbg_warhurt', 1, 1, 99999);
   ok((await poll('dbg_warstate', [], v => v === 2, 5000)) === 2, 'hive down: victory state');
   ok((await poll('dbg_warstate', [], v => v === 0, 8000)) === 0, 'victory returns to the world map');
   ok((await call('dbg_warconq')) === 1, 'region 1 is conquered (war_prog = 1)');
+  ok((await call('dbg_buddyxp')) === xp29 + 60, 'v1.19 check 29: the first conquest of region 1 paid the buddy +60 XP (60 + 10 x region 0)', 'xp ' + xp29 + ' -> ' + (await call('dbg_buddyxp')));
 
   // ================= round 2 (Nov 16, Daniel's playtest) ==========
   // a fresh region-1 battle for the new systems: fog, terrain, the
@@ -660,9 +663,10 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   ok((await call('dbg_warenter', 0)) === 1, 'v1.17: fresh battle for the supply-lines checks');
   await sleep(600);
 
-  // check 2: a harvester load can reach the new 25-bit carry
-  ok((await poll('dbg_warcarry', [], v => v >= 25, 60000, 400)) >= 25,
-     'v1.17 check 2: a harvester scooped a full 25-bit load (WAR_CARRY)', 'carry=' + (await call('dbg_warcarry')));
+  // check 2: a harvester load can reach the carry cap (25 in
+  // v1.17, raised to 30 by v1.19's richer fields)
+  ok((await poll('dbg_warcarry', [], v => v >= 30, 60000, 400)) >= 30,
+     'v1.19 check 2: a harvester scooped a full 30-bit load (WAR_CARRY)', 'carry=' + (await call('dbg_warcarry')));
 
   // check 3: debris pays its salvage bounty for PLAYER damage. The
   // economy is isolated first (the harvester dies rich, so no
@@ -677,7 +681,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   await call('dbg_waraddbits', 500);
   const harvK = await call('dbg_warfind', 0);
   await call('dbg_warhurt', 0, harvK, 99999);
-  ok((await call('dbg_warunits', 0, 0)) === 0, 'v1.17 check 3: harvester down (economy isolated, no grant at 750 bits)');
+  ok((await call('dbg_warunits', 0, 0)) === 0, 'v1.17 check 3: harvester down (economy isolated, no grant at 800 bits)');
   const tn17 = await call('dbg_warterrain');
   let treeT = -1, treeXY = null, treeKind = -1;
   for (let t = 0; t < tn17; t++) {
@@ -973,8 +977,9 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   ok((await call('dbg_warenter', 0)) === 1, 'v1.17 check 15: fresh battle');
   await sleep(400);
   const harvQ15 = await call('dbg_warfind', 0);
-  await call('dbg_warhurt', 0, harvQ15, 99999);   // isolate the purse (250 bits: no grant)
-  const pbQ15 = await call('dbg_warbuildat', 1);   // 250 - 150 = 100 bits left
+  await call('dbg_warhurt', 0, harvQ15, 99999);   // isolate the purse (300 bits: no grant)
+  const pbQ15 = await call('dbg_warbuildat', 1);   // 300 - 150 = 150 bits left...
+  await call('dbg_waraddbits', -50);   // v1.19: the richer purse (300, was 250) is trimmed back to this check's exact 100-bit premise below
   ok(pbQ15 > 0, 'v1.17 check 15: Patch Bay built', 'idx=' + pbQ15);
   const [qx15, qy15] = unxy(await call('dbg_warstructxy', pbQ15));
   await call('dbg_warcam', qx15, qy15); await sleep(250);
@@ -1249,8 +1254,8 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   ok((await poll('dbg_warpause', [], v => v === 1, 4000)) === 1, 'pause menu up for RESTART');
   await tap(320, 190);   // RESTART BATTLE (panel button 2)
   ok((await poll('dbg_warpause', [], v => v === 0, 4000)) === 0 && (await call('dbg_warstate')) === 1, 'v1.17 check 8: RESTART relaunched the battle');
-  ok((await call('dbg_warbits')) === 250 && (await call('dbg_warunits', 0, -1)) === 2 && (await call('dbg_warnodes')) === 904800,
-     'v1.17 check 8: fresh start — 250 bits, the two starting units, full nodes',
+  ok((await call('dbg_warbits')) === 300 && (await call('dbg_warunits', 0, -1)) === 2 && (await call('dbg_warnodes')) === 1108200,
+     'v1.19 check 8: fresh start — 300 bits, the two starting units, full nodes',
      'bits=' + (await call('dbg_warbits')) + ' units=' + (await call('dbg_warunits', 0, -1)) + ' nodes=' + (await call('dbg_warnodes')));
   ok((await call('dbg_warregion')) === 1, 'v1.17 check 8: still region 2');
   // "no snapshot of the OLD fight survives" can't be read off
@@ -1266,7 +1271,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   await key('Escape', 300);
   ok((await poll('dbg_bwmode', [], v => v === -1, 4000)) === -1, 'check 8: left WAR!');
   await call('dbg_bwentm', 8); await sleep(500);
-  ok((await poll('dbg_warstate', [], v => v === 1, 4000)) === 1 && (await call('dbg_warnodes')) === 904800,
+  ok((await poll('dbg_warstate', [], v => v === 1, 4000)) === 1 && (await call('dbg_warnodes')) === 1108200,
      'v1.17 check 8: re-entering restores the FRESH battle — the old parked fight is gone',
      'nodes=' + (await call('dbg_warnodes')));
 
@@ -1465,6 +1470,198 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   ok((await call('dbg_warbarriers')) === barBefore && (await call('dbg_warterrain')) === tnBefore,
      'v1.18 check 24: the barrier count survived the snapshot round trip',
      (await call('dbg_warbarriers')) + '/' + (await call('dbg_warterrain')) + ' vs ' + barBefore + '/' + tnBefore);
+
+  // ================= v1.19 "BOOT CAMP" (Nov 17) ==================
+  // checks 25-28: SKIRMISH. (The richer campaign field rode check 1
+  // — 300 bits, 11 nodes / 8,200 — check 2's 30-bit carry, and
+  // check 29's conquest XP above.) Setup-panel geometry in the
+  // 640x360 view: panel px=122, py=58, rows at y 116/154/192/230
+  // (h 32) — centres 132 (MAP SIZE), 170 (ENEMY), 208 (LAUNCH),
+  // 246 (BACK); a value row's left third (x < 254) steps back. The
+  // map's SKIRMISH button is (500..628, 292..320), centre (564,306).
+
+  // check 25: a fresh campaign battle carries the v1.19 field and
+  // is NOT a skirmish; winning it returns to the map
+  ok((await call('dbg_warenter', 0)) === 1, 'v1.19 check 25: fresh campaign battle');
+  await sleep(500);
+  ok((await call('dbg_warnodes')) === 1108200, 'v1.19 check 25: eleven nodes totalling 8,200 bits', await call('dbg_warnodes'));
+  ok((await call('dbg_warskirmish')) === 0, 'v1.19 check 25: a campaign battle is not a skirmish');
+  await call('dbg_warhurt', 1, 1, 99999);
+  ok((await poll('dbg_warstate', [], v => v === 0, 9000)) === 0, 'v1.19 check 25: won and back on the map');
+
+  // check 26: the setup panel — SKIRMISH button, SMALL + EASY, LAUNCH
+  await sleep(500);   // let the post-victory map grace lapse
+  await tap(568, 307);   // the SKIRMISH button, bottom-right of the map
+  ok((await poll('dbg_warstate', [], v => v === 4, 4000)) === 4, 'v1.19 check 26: the SKIRMISH button opened the setup panel');
+  await cv.screenshot({ path: __dirname + '/war-skirmish-setup.png' });
+  await tap(170, 132);   // MAP SIZE row, left third: STANDARD -> SMALL
+  await tap(170, 170);   // ENEMY row, left third: NORMAL -> EASY
+  await tap(320, 208);   // LAUNCH
+  ok((await poll('dbg_warstate', [], v => v === 1, 5000)) === 1, 'v1.19 check 26: LAUNCH started the battle');
+  ok((await call('dbg_warskirmish')) === 1, 'v1.19 check 26: the battle is a skirmish');
+  ok((await call('dbg_warnodes')) === 604550, 'v1.19 check 26: SMALL field — six nodes, 4,550 bits (standard-table indices {0,1,4,5,6,10}, amounts as-is)', await call('dbg_warnodes'));
+  ok((await call('dbg_warhives')) === 1, 'v1.19 check 26: EASY fields exactly one hive');
+  ok((await call('dbg_warbits')) === 250, 'v1.19 check 26: SMALL starts with 250 bits', await call('dbg_warbits'));
+  await cv.screenshot({ path: __dirname + '/war-skirmish-small.png' });
+
+  // check 27: a skirmish win pays EASY XP and moves NO campaign state
+  const xp27 = await call('dbg_buddyxp'), prog27 = await call('dbg_warconq');
+  await call('dbg_warhurt', 1, 1, 99999);
+  ok((await poll('dbg_warstate', [], v => v === 2, 5000)) === 2, 'v1.19 check 27: skirmish won');
+  ok((await call('dbg_buddyxp')) === xp27 + 30, 'v1.19 check 27: the win paid +30 buddy XP (EASY)', 'xp ' + xp27 + ' -> ' + (await call('dbg_buddyxp')));
+  ok((await poll('dbg_warstate', [], v => v === 0, 8000)) === 0, 'v1.19 check 27: back on the map');
+  ok((await call('dbg_warconq')) === prog27, 'v1.19 check 27: campaign progress did not move', prog27 + ' -> ' + (await call('dbg_warconq')));
+
+  // check 28a: QUIT BATTLE — the skirmish pause menu's third row
+  // leaves without parking anything (the only battles since the
+  // last snapshot clear were skirmishes, which never serialize)
+  await sleep(500);
+  await tap(568, 307);
+  ok((await poll('dbg_warstate', [], v => v === 4, 4000)) === 4, 'v1.19 check 28: setup panel again (picks kept: SMALL / EASY)');
+  await tap(320, 208);   // LAUNCH
+  ok((await poll('dbg_warstate', [], v => v === 1, 5000)) === 1 && (await call('dbg_warskirmish')) === 1, 'v1.19 check 28: skirmish relaunched');
+  await key('Escape', 300);
+  ok((await poll('dbg_warpause', [], v => v === 1, 4000)) === 1, 'v1.19 check 28: pause menu up in the skirmish');
+  await tap(320, 234);   // QUIT BATTLE (the skirmish's third row)
+  ok((await poll('dbg_warstate', [], v => v === 0, 4000)) === 0, 'v1.19 check 28: QUIT BATTLE returned to the map');
+  ok((await call('dbg_warsnap')) === 0, 'v1.19 check 28: nothing was parked by quitting');
+
+  // check 28b: a skirmish never evicts a campaign park — park a
+  // region-2 battle, run a skirmish beside it, quit the skirmish,
+  // and the park must still restore exactly
+  ok((await call('dbg_warenter', 1)) === 1, 'v1.19 check 28: region-2 campaign battle for the park');
+  await sleep(500);
+  const r28 = await frozenReadings();
+  await saveQuitToMap();
+  ok((await call('dbg_warsnap')) === 1, 'v1.19 check 28: campaign battle parked');
+  await tap(568, 307);
+  ok((await poll('dbg_warstate', [], v => v === 4, 4000)) === 4, 'v1.19 check 28: setup panel over the map (park in place)');
+  await tap(320, 208);   // LAUNCH
+  ok((await poll('dbg_warstate', [], v => v === 1, 5000)) === 1 && (await call('dbg_warskirmish')) === 1, 'v1.19 check 28: skirmish launched beside the park');
+  await key('Escape', 300);
+  ok((await poll('dbg_warpause', [], v => v === 1, 4000)) === 1, 'v1.19 check 28: pause menu up');
+  await tap(320, 234);   // QUIT BATTLE
+  ok((await poll('dbg_warstate', [], v => v === 0, 4000)) === 0, 'v1.19 check 28: skirmish quit to the map');
+  ok((await call('dbg_warsnap')) === 1, 'v1.19 check 28: the campaign park SURVIVED the skirmish');
+  await sleep(600);   // QUIT BATTLE arms the same 0.3s map grace as SAVE & QUIT — let it lapse before tapping a node (the saveQuitToMap lesson)
+  const [n28x, n28y] = nodeXY(1);
+  await tap(n28x, n28y);   // region 2's node: resumes the park
+  const inst28 = await pollInstant();
+  ok(inst28[0] === 1 && inst28[1] === 1 && inst28[2] === 0, 'v1.19 check 28: the parked battle restored (consumed)', 'state/region/snap=' + inst28.join('/'));
+  const r28b = await frozenReadings();
+  ok(sameReadings(r28b, r28), 'v1.19 check 28: bits, army and nodes match the park exactly', readingsStr(r28b) + ' vs parked ' + readingsStr(r28));
+  await tap(320, 146);   // RESUME
+
+  // check 30: the PATCHER (v1.19 addendum) — repair infantry from
+  // the Patch Bay: trained through the real bar, repairs on a tap
+  // order, AUTOSEEKS when idle (Daniel's amendment), yields to a
+  // manual move order, and never harms a bug.
+  ok((await call('dbg_warenter', 0)) === 1, 'v1.19 check 30: fresh battle for the patcher');
+  await sleep(500);
+  await call('dbg_waraddbits', 1000);
+  const pb30 = await call('dbg_warbuildat', 1);
+  ok(pb30 > 0, 'v1.19 check 30: Patch Bay built', 'idx=' + pb30);
+  const [pbx30, pby30] = unxy(await call('dbg_warstructxy', pb30));
+  await call('dbg_warcam', pbx30, pby30); await sleep(250);
+  await tap(320, 157);   // select the Patch Bay — its lone TRAIN category opens itself
+  ok((await poll('dbg_warselstruct', [], v => v === pb30, 4000)) === pb30, 'v1.19 check 30: Patch Bay selected');
+  ok((await poll('dbg_warbcat', [], v => v === 0, 4000)) === 0, 'v1.19 check 30: TRAIN strip open');
+  const bits30 = await call('dbg_warbits');
+  await tap(228, 291);   // strip slot 2: PATCHER
+  ok((await poll('dbg_warqueue', [pb30], v => v === 1, 4000)) === 1, 'v1.19 check 30: patcher queued at the Patch Bay');
+  ok((await call('dbg_warbits')) === bits30 - 45, 'v1.19 check 30: the queue charged 45 bits up front', bits30 + ' -> ' + (await call('dbg_warbits')));
+  ok((await poll('dbg_warunits', [0, 7], v => v === 1, 15000)) === 1, 'v1.19 check 30: a patcher rolled out');
+  const patcher30 = await call('dbg_warfind', 7);
+  ok(patcher30 >= 0, 'v1.19 check 30: patcher found on the field');
+  await cv.screenshot({ path: __dirname + '/war-patcher.png' });
+  // isolate the purse for the repair bookkeeping below (the
+  // check-3/15 idiom): a dead harvester delivers nothing, and the
+  // purse stays far above the emergency-grant line throughout
+  await call('dbg_warhurt', 0, await call('dbg_warfind', 0), 99999);
+  ok((await call('dbg_warunits', 0, 0)) === 0, 'v1.19 check 30: harvester down (economy isolated)');
+  // never fights: stage the patcher in a quiet corner, spawn a
+  // crawler 160u off, order the patcher ONTO it — the tap must
+  // land as a plain move (the barrier precedent), and the crawler
+  // must still be whole after standing next to the patcher
+  await call('dbg_warmove', patcher30, 750, 200);
+  ok((await poll('dbg_warunitxy', [patcher30], v => { if (v < 0) return false; const [ux, uy] = unxy(v); return Math.hypot(ux - 750, uy - 200) < 40; }, 20000, 250)) >= 0,
+     'v1.19 check 30: patcher walked to the staging corner');
+  await call('dbg_warspawnbug', 910, 200);
+  const bugs30 = await call('dbg_warunits', 1, -1);
+  ok((await call('dbg_wartapunit', patcher30)) === 1, 'v1.19 check 30: patcher selected');
+  await call('dbg_warcam', 910, 200); await sleep(250);
+  await tap(320, 157);   // tap the crawler itself
+  ok((await poll('dbg_warunitxy', [patcher30], v => { if (v < 0) return false; const [ux, uy] = unxy(v); return Math.hypot(ux - 910, uy - 200) < 60; }, 20000, 250)) >= 0,
+     'v1.19 check 30: the patcher WALKED to the tapped crawler (a move order, not an attack)');
+  await sleep(2500);   // standing next to it, chewing range — a fighter would have bitten by now
+  ok((await call('dbg_warunits', 1, -1)) === bugs30 && (await call('dbg_warunits', 0, 7)) === 1,
+     'v1.19 check 30: the crawler is unharmed and the patcher still stands — it has no weapon',
+     'bugs=' + (await call('dbg_warunits', 1, -1)) + ' vs ' + bugs30);
+  // ordered repair: hurt the Patch Bay, select the patcher, tap
+  // the building — HP must rise while the purse falls, and both
+  // must stop at full
+  const pbFull30 = await call('dbg_warstructhp', pb30);
+  await call('dbg_warhurt', 1, pb30, 120);
+  const pbHurt30 = await call('dbg_warstructhp', pb30);
+  ok(pbHurt30 === pbFull30 - 120, 'v1.19 check 30: Patch Bay damaged for the repair', pbFull30 + ' -> ' + pbHurt30);
+  ok((await call('dbg_wartapunit', patcher30)) === 1, 'v1.19 check 30: patcher selected for the order');
+  await call('dbg_warcam', pbx30, pby30); await sleep(250);
+  const bitsOrd30 = await call('dbg_warbits');
+  await tap(320, 157);   // tap the damaged Patch Bay: a repair order
+  ok((await poll('dbg_warstructhp', [pb30], v => v >= pbHurt30 + 36, 30000, 250)) >= pbHurt30 + 36,
+     'v1.19 check 30: the ordered repair is flowing (HP rising)', 'hp=' + (await call('dbg_warstructhp', pb30)));
+  ok((await call('dbg_warbits')) < bitsOrd30, 'v1.19 check 30: ...and the purse is paying for it', bitsOrd30 + ' -> ' + (await call('dbg_warbits')));
+  ok((await poll('dbg_warstructhp', [pb30], v => v >= pbFull30, 30000, 250)) >= pbFull30,
+     'v1.19 check 30: repaired back to full', 'hp=' + (await call('dbg_warstructhp', pb30)));
+  const bitsFull30 = await call('dbg_warbits'); await sleep(1500);
+  ok((await call('dbg_warbits')) === bitsFull30, 'v1.19 check 30: at full HP the billing stops', bitsFull30 + ' -> ' + (await call('dbg_warbits')));
+  // autoseek: hurt the Core and give NO order at all — the idle
+  // patcher must find the work itself
+  const coreFull30 = await call('dbg_warstructhp', 0);
+  await call('dbg_warhurt', 1, 0, 60);
+  ok((await poll('dbg_warstructhp', [0], v => v >= coreFull30 - 36, 30000, 250)) >= coreFull30 - 36,
+     'v1.19 check 30: AUTOSEEK — the idle patcher repaired the Core unbidden', 'hp=' + (await call('dbg_warstructhp', 0)));
+  // ...and a manual move order interrupts it: hurt the Core again,
+  // let the patcher start, then order it away — the target is the
+  // (430,430) node's clearing: terrain and barriers keep their
+  // distance from nodes by construction, so the point is always
+  // reachable (an arbitrary far point can sit inside a debris
+  // disc, where separation would hold the unit off its arrival
+  // threshold forever and autoseek would never resume)
+  await call('dbg_warhurt', 1, 0, 60);
+  await sleep(1500);   // autoseek has it walking / starting the channel
+  ok((await call('dbg_wartapunit', patcher30)) === 1, 'v1.19 check 30: patcher selected for the interrupt');
+  await call('dbg_warcam', 430, 430); await sleep(250);
+  await tap(320, 157);   // the node's clearing, ~225u from the Core: a move order
+  ok((await poll('dbg_warunitxy', [patcher30], v => { if (v < 0) return false; const [ux, uy] = unxy(v); return Math.hypot(ux - 280, uy - 600) > 200; }, 20000, 250)) >= 0,
+     'v1.19 check 30: the move order pulled the patcher off the repair');
+  ok((await call('dbg_warstructhp', 0)) < coreFull30 - 10, 'v1.19 check 30: the Core is still hurt — the repair really stopped',
+     'hp=' + (await call('dbg_warstructhp', 0)));
+  ok((await poll('dbg_warstructhp', [0], v => v >= coreFull30, 60000, 500)) >= coreFull30,
+     'v1.19 check 30: ...and once the move completed, autoseek brought it back to finish the job', 'hp=' + (await call('dbg_warstructhp', 0)));
+
+  // check 31: tap-toggle (v1.19 addendum C) — tapping the selected
+  // building deselects it; tapping a different one moves the
+  // selection instead
+  ok((await call('dbg_warenter', 0)) === 1, 'v1.19 check 31: fresh battle for the toggle');
+  await sleep(500);
+  await call('dbg_waraddbits', 500);
+  const pb31 = await call('dbg_warbuildat', 1);
+  ok(pb31 > 0, 'v1.19 check 31: Patch Bay built', 'idx=' + pb31);
+  const [pbx31, pby31] = unxy(await call('dbg_warstructxy', pb31));
+  await call('dbg_warcam', pbx31, pby31); await sleep(250);
+  await tap(320, 157);
+  ok((await poll('dbg_warselstruct', [], v => v === pb31, 4000)) === pb31, 'v1.19 check 31: Patch Bay selected');
+  await tap(320, 157);   // the same building again
+  ok((await poll('dbg_warselstruct', [], v => v === -1, 4000)) === -1, 'v1.19 check 31: tapping the selected building toggled it OFF');
+  await call('dbg_warcam', 280, 600); await sleep(250);
+  await tap(320, 157);   // the Core — a different building
+  ok((await poll('dbg_warselstruct', [], v => v === 0, 4000)) === 0, 'v1.19 check 31: tapping the Core selected it');
+  await call('dbg_warcam', pbx31, pby31); await sleep(250);
+  await tap(320, 157);   // back to the Patch Bay
+  ok((await poll('dbg_warselstruct', [], v => v === pb31, 4000)) === pb31, 'v1.19 check 31: tapping another building MOVED the selection (not a clear)');
+  await tap(320, 157);
+  ok((await poll('dbg_warselstruct', [], v => v === -1, 4000)) === -1, 'v1.19 check 31: and tapping it once more toggles it off');
 
   console.log(`\nwartest: ${pass} passed, ${fail} failed`);
   await browser.close();

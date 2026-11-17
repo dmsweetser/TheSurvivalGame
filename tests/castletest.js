@@ -108,6 +108,7 @@ function T(name, cond, extra) { if (cond) { pass++; } else { fail++; console.log
   await sleep(500);
   T('the gate stays locked without the key', ((await call('dbg_casitems')) & 4) === 0 && (await call('dbg_bwmode')) === 6,
     'items=' + (await call('dbg_casitems')) + ' mode=' + (await call('dbg_bwmode')));
+  const xpCas = await call('dbg_buddyxp');   // v1.19: the buddy's XP at the brink of the escape
   await call('dbg_casgive', 2);
   await sleep(700);
   T('the key opens the gate (escape!)', ((await call('dbg_casitems')) & 4) === 4,
@@ -117,6 +118,7 @@ function T(name, cond, extra) { if (cond) { pass++; } else { fail++; console.log
     'arc=' + (await call('dbg_inarcade')) + ' px=' + (await call('dbg_px')));
   const best = await call('dbg_casbest');
   T('the escape score is the saved best', best >= 210, 'best=' + best);
+  T('v1.19: the escape paid the buddy +50 XP', (await call('dbg_buddyxp')) === xpCas + 50, 'xp ' + xpCas + ' -> ' + (await call('dbg_buddyxp')));
 
   // relaunch: Escape is NOT a way out (Nov 14, Daniel — trapped
   // means trapped). Only the key opens any door, Escape included.

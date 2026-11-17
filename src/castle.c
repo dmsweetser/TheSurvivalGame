@@ -101,11 +101,12 @@ static void cas_update(int pi, float dt, const BwIn *in){
         if (S->cas_wont <= 0){
             int sc = S->cas_score;
             if (sc > b->cas_best) b->cas_best = sc;
+            buddy_award_xp(pi, 50);   // v1.19: an escape pays the buddy
             bw_exit(pi, 0);
             Player *p = &G.p[pi];
             char buf[64]; char *q = buf;
             q = sappend(q, "YOU ESCAPED THE CASTLE! SCORE ");
-            q = sapp_int(q, sc); *q = 0;
+            q = sapp_int(q, sc); if (b->active) q = sappend(q, " +50 BUDDY XP"); *q = 0;
             spawn_floater(p->x, p->y - 26, buf, COL(255, 220, 120));
         }
         return;
