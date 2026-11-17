@@ -486,6 +486,7 @@ typedef struct {
     int war_state;               // 0 world map, 1 battle, 2 won, 3 lost
     int war_region, war_bits, war_map_sel;
     u32 war_bseed;               // v1.18: this battle's novelty seed (hives + terrain rolled from it; never saved — structs and terrain ride the snapshot themselves)
+    int war_seedforce;           // test-only (dbg_warseed): when nonzero, war_build_battle uses it as war_bseed, so wartest's layout-sensitive checks run on one fixed field; shipped play never sets it
     float war_camx, war_camy, war_t, war_wavet, war_endt, war_grace;
     int war_selstruct, war_place;
     float war_ltap_t; int war_ltap_x, war_ltap_y, war_ltap_unit, war_ltap_n;

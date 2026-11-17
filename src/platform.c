@@ -424,6 +424,7 @@ __attribute__((export_name("dbg_warstructs"))) int exp_dbg_warstructs(int type){
 __attribute__((export_name("dbg_warsel"))) int exp_dbg_warsel(void){ int id = G.my_id>=0? G.my_id : 0; return war_sel_count(&BWS[id]); }
 __attribute__((export_name("dbg_warselstruct"))) int exp_dbg_warselstruct(void){ int id = G.my_id>=0? G.my_id : 0; return BWS[id].war_selstruct; }
 __attribute__((export_name("dbg_warenter"))) int exp_dbg_warenter(int r){ int id = G.my_id>=0? G.my_id : 0; if (G.bud[id].bw_mode!=8) return -1; war_start_battle(id, r); return BWS[id].war_state; }
+__attribute__((export_name("dbg_warseed"))) int exp_dbg_warseed(int v){ int id = G.my_id>=0? G.my_id : 0; BWS[id].war_seedforce = v; return BWS[id].war_seedforce; }   // test-only: pin the v1.18 per-battle novelty seed (0 = off, the shipped game never calls this)
 __attribute__((export_name("dbg_waraddbits"))) int exp_dbg_waraddbits(int n){ int id = G.my_id>=0? G.my_id : 0; BWS[id].war_bits += n; return BWS[id].war_bits; }
 __attribute__((export_name("dbg_warcam"))) int exp_dbg_warcam(int x, int y){ int id = G.my_id>=0? G.my_id : 0; BwSim *S = &BWS[id]; S->war_camx = WAR_OX + x; S->war_camy = WAR_OY + y; war_clamp_cam(S); return 1; }
 __attribute__((export_name("dbg_warfind"))) int exp_dbg_warfind(int type){ int id = G.my_id>=0? G.my_id : 0; BwSim *S = &BWS[id];

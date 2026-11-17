@@ -34,6 +34,12 @@
 // position a check needs is read live or scanned for, never
 // assumed. Checks 20-24 (the tail) cover the SAVE & QUIT map
 // resume and the randomization itself.
+// SEED PIN (Nov 17, Daniel: keep the coverage, kill the dice):
+// dbg_warseed(v) pins the per-battle seed, so every battle below
+// lays out the SAME field and the layout-sensitive family (the
+// v1.17 wall/gate/rally/snapshot checks) stops racing the roll.
+// Check 22 (novelty) releases the pin for its two battles and the
+// pin is re-applied right after it.
 const { chromium } = require('playwright-core');
 const EXE = process.env.HOME + '/.cache/ms-playwright/chromium-1248/chrome-linux64/chrome';
 const URL = 'http://localhost:8903/the-survival-game.html';
@@ -112,6 +118,12 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   await sleep(700);   // entry grace
   const cv = await page.$('canvas');
   await cv.screenshot({ path: __dirname + '/war-map.png' });
+
+  // pin the battle seed for the whole WAR! run (see the header):
+  // every battle from here lays out the pinned field, check 22
+  // excepted (it releases and re-pins around itself below)
+  const WAR_PIN_SEED = 11;
+  ok((await call('dbg_warseed', WAR_PIN_SEED)) === WAR_PIN_SEED, 'battle seed pinned for the WAR! checks', await call('dbg_warseed', WAR_PIN_SEED));
 
   // launch region 1 by tapping its node (top node of the ring:
   // centre (320,188), region 0 at angle -90 -> (320, 73))
@@ -1389,7 +1401,9 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
 
   // check 22: novelty — two consecutive battles of the SAME region
   // (RESTART between) roll different fields: the hive moves along
-  // the far side, the terrain re-rolls
+  // the far side, the terrain re-rolls. The seed pin comes OFF for
+  // this check only: its two battles must roll free.
+  ok((await call('dbg_warseed', 0)) === 0, 'check 22: seed pin released (novelty rolls free)');
   ok((await call('dbg_warenter', 0)) === 1, 'v1.18 check 22: battle A');
   await sleep(500);
   const hiveA = await call('dbg_warhivexy'), tnA22 = await call('dbg_warterrain'), barA22 = await call('dbg_warbarriers');
@@ -1408,6 +1422,9 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
      'v1.18 check 22: both hives sit along the far (east) side', hiveA + ' / ' + hiveB);
   ok(tnA22 !== tnB22 || barA22 !== barB22 || fA0 !== fB0 || fA10 !== fB10,
      'v1.18 check 22: the terrain re-rolled too', 'tn ' + tnA22 + '->' + tnB22 + ', barriers ' + barA22 + '->' + barB22);
+
+  // novelty proven — the pin goes back on for the rest of the run
+  ok((await call('dbg_warseed', WAR_PIN_SEED)) === WAR_PIN_SEED, 'check 22 done: battle seed re-pinned');
 
   // check 23: barriers — they exist, a unit paths THROUGH the gap
   // (or around an end), and tapping one is a move order, never an

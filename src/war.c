@@ -907,6 +907,7 @@ static void war_build_battle(int pi, int region, int bits, int nh){
       war_battle_ctr += 1u;
       u32 tbits = (u32)(int)(G.time * 4.0f);
       S->war_bseed = hash2((i32)(tbits + (u32)region * 977u), (i32)(war_battle_ctr * 131u + (u32)region), 0x5EEDu ^ (war_battle_ctr * 2654435761u)); }
+    if (S->war_seedforce) S->war_bseed = (u32)S->war_seedforce;   // test hook (dbg_warseed): a pinned seed lays out the same field every battle — wartest only; zero in shipped play, so the roll above is untouched there
     S->war_state=1; S->war_region=region; S->war_bits=bits; S->war_t=0;
     // v1.19 addendum (Daniel): the FIRST wave is paced — at least
     // 45s of breathing room before the hive sends anything, so a
