@@ -96,8 +96,10 @@ def main():
     # source bundle for handing over
     bundle = OUT / "survival-game-source"
     bundle.mkdir(parents=True, exist_ok=True)
-    for f in ["survival.c", "shell.html", "mac_main.c"]:
+    for f in ["shell.html"]:
         shutil.copy(SRC / f, bundle / f)
+    for p in sorted(SRC.glob("*.c")):   # unity build: survival.c + every piece file + mac_main.c
+        shutil.copy(p, bundle / p.name)
     for f in ["build.py", "build.bat", "server.js", "README.md"]:
         if (HERE / f).exists(): shutil.copy(HERE / f, bundle / f)
     print("source bundle ->", bundle)

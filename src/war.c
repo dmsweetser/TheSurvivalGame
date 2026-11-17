@@ -1,0 +1,2594 @@
+// [UNITY-PIECE-BANNER]
+// ===========================================================================
+//  PIECE: war.c — WAR! (bw_mode 8), the tap-first RTS.
+//  UNITY-INCLUDED by survival.c — not a standalone translation unit; do not compile directly.
+// ===========================================================================
+// [/UNITY-PIECE-BANNER]
+// ---------------------------------------------------------------------------
+// WAR! (bw_mode 8, Nov 15 2026, Daniel): a tap-first RTS in the Arcade.
+// Buddies vs the bug swarm, one region at a time: a world map of the
+// eight regions radiating from the epicenter; win a region's battle
+// (harvest BITS, raise an army, raze every HIVE) and the next region
+// unlocks. Progress lives on the Buddy (war_prog, saved as wr); a
+// battle itself is per-trip scratch state in the BwSim.
+//
+// Controls are Daniel's spec, tap-first: tap a unit to select it,
+// double-tap to select every unit of its type on screen, tap ground
+// to move, tap an enemy to attack it, tap a structure for its build
+// bar along the bottom (a reserved strip — the camera view sits
+// above it, the way RUN's deck keeps the joystick off the field).
+// Drags pan the camera (DRAG scheme / mouse), arrow keys pan too.
+// ---------------------------------------------------------------------------
+#define WAR_OX 40000.0f
+#define WAR_OY 40000.0f
+#define WAR_AW 1600.0f
+#define WAR_AH 1200.0f
+#define WAR_MAXU 80
+#define WAR_MAXS 28
+#define WAR_MAXP 64
+#define WAR_BAR_H 46
+#define WAR_U_HARV 0
+#define WAR_U_MELEE 1
+#define WAR_U_RANGED 2
+#define WAR_U_CRAWL 3
+#define WAR_U_SPIT 4
+#define WAR_U_SCOUT 5
+#define WAR_U_SIEGE 6
+#define WAR_S_HQ 0
+#define WAR_S_PATCH 1
+#define WAR_S_ZAP 2
+#define WAR_S_WALL 3
+#define WAR_S_HIVE 4
+#define WAR_S_ASM 5
+#define WAR_S_GATE 6
+// WAR_MAXT lives up by BwSim (it sizes the struct's terrain arrays)
+#define WAR_FOG_W 40
+#define WAR_FOG_H 30
+#define WAR_CARRY 25          // bits a harvester hauls per trip (v1.17: 20 -> 25)
+#define WAR_SUB_H 46          // the categorized bar's options strip, drawn above the bar (WAR_BAR_H itself is load-bearing — tap math is coupled to it)
+static const int WAR_SRAD[7] = { 34, 26, 14, 13, 30, 28, 13 };        // structure radii (gate last: a firewall-footprint segment)
+static const int WAR_SHP[7] = { 600, 300, 160, 120, 0, 450, 120 };     // structure hp (hive scales instead)
+static const int WAR_TRAIN_COST[7] = { 80, 50, 75, 0, 0, 90, 160 };   // by UNIT type: harvester / melee / ranged / - / - / scout / siege
+static const float WAR_TRAIN_TIME[7] = { 6.0f, 4.0f, 5.0f, 0, 0, 5.0f, 9.0f };
+static const int WAR_BUILD_COST[7] = { 0, 150, 100, 25, 0, 200, 35 }; // patch bay / zapper / firewall / - / assembly plant / gate
+// canopy tints for WAR terrain trees, one per region (Meadows green,
+// Spaghetti olive, Legacy dry, Badlands scorched, Cache frost-pale,
+// RAM Flats neon, Cable Jungle deep green, the Depths ashen violet)
+static const u32 WAR_TREE_COL[8] = { COL(46,120,52), COL(96,124,44), COL(110,96,58), COL(120,74,44),
+                                     COL(190,220,230), COL(64,240,190), COL(34,110,60), COL(96,80,140) };
+// debris hit points by terrain kind: 0 tree / 1 rock / 2 terminal /
+// 3 spool / 4 rubble — rubble crumbles fast, rock takes a beating.
+// Kind 5 (v1.18) is a BARRIER segment: 99999 is a sentinel, not a
+// real pool — war_hurt_terrain refuses kind 5 outright, so its hp
+// never moves and the collision/A* tests that key off thp>0 hold
+// forever.
+static const int WAR_THP[6] = { 35, 90, 55, 45, 25, 99999 };
+// debris bounties (v1.17): felling terrain with PLAYER-side damage pays
+// bits by kind — tree / rock / terminal / spool / rubble. Bugs pay none.
+// Barriers pay nothing (and can never be felled anyway).
+static const int WAR_TBITS[6] = { 10, 25, 40, 30, 15, 0 };
+static const u32 WAR_SPCOL[7] = { COL(240,180,90), COL(250,150,70), COL(150,105,70), COL(90,180,170), COL(150,150,160), COL(190,200,210), COL(255,205,80) };   // last: the gate's warm gold — "yours, walk through"
+static int war_u_side(int type){ return (type==WAR_U_CRAWL || type==WAR_U_SPIT)? 1 : 0; }
+static int war_u_hp(int type, int region){
+    switch (type){ case 0: return 45; case 1: return 90; case 2: return 55;
+                   case 3: return 26 + 4*region; case 5: return 45; case 6: return 230;
+                   default: return 20 + 3*region; }
+}
+static float war_u_speed(int type, int region){
+    switch (type){ case 0: return 95.0f; case 1: return 105.0f; case 2: return 100.0f;
+                   case 3: return 60.0f + 3.0f*region; case 5: return 95.0f; case 6: return 38.0f;
+                   default: return 56.0f + 2.0f*region; }
+}
+static int war_u_dmg(int type, int region){
+    switch (type){ case 1: return 12; case 2: return 9; case 5: return 5; case 6: return 26;
+                   case 3: return 6 + region/2; case 4: return 7 + region/2; default: return 0; }
+}
+static float war_u_range(int type){
+    switch (type){ case 1: return 18.0f; case 2: return 105.0f; case 5: return 85.0f; case 6: return 125.0f;
+                   case 3: return 16.0f; case 4: return 95.0f; default: return 0.0f; }
+}
+static float war_u_rate(int type){
+    switch (type){ case 1: return 0.7f; case 2: return 0.9f; case 5: return 1.0f; case 6: return 2.2f;
+                   case 3: return 0.8f; case 4: return 1.4f; default: return 1.0f; }
+}
+static float war_u_sight(int type){   // fog of war: how far a friendly unit sees
+    switch (type){ case WAR_U_SCOUT: return 230.0f; default: return 150.0f; }
+}
+static int war_u_combat(int type){ return type==WAR_U_MELEE || type==WAR_U_RANGED || type==WAR_U_SCOUT || type==WAR_U_SIEGE; }
+static int war_unit_alive(BwSim *S, int i){ return i>=0 && i<WAR_MAXU && S->war_uhp[i]>0; }
+static int war_struct_alive(BwSim *S, int i){ return i>=0 && i<WAR_MAXS && S->war_shp[i]>0; }
+// Target refs: >0 is a unit (index+1), <0 a structure (-(index+1)),
+// and <= -100 a terrain feature — debris — encoded -(100 + t + 1),
+// clear of every structure ref (-1..-28).
+#define WAR_TREF(t) (-(100 + (t) + 1))
+static int war_ref_feat(int ref){ return ref <= -100? -ref - 101 : -1; }
+static int war_ref_alive(BwSim *S, int ref, float *x, float *y){
+    int ft = war_ref_feat(ref);
+    if (ft>=0){ if (ft>=S->war_tn || S->war_thp[ft]<=0) return 0; *x=S->war_tx[ft]; *y=S->war_ty[ft]; return 1; }
+    if (ref>0){ int i=ref-1; if (!war_unit_alive(S,i)) return 0; *x=S->war_ux[i]; *y=S->war_uy[i]; return 1; }
+    if (ref<0){ int i=-ref-1; if (!war_struct_alive(S,i)) return 0; *x=S->war_sx[i]; *y=S->war_sy[i]; return 1; }
+    return 0;
+}
+static float war_ref_radius(BwSim *S, int ref){
+    int ft = war_ref_feat(ref);
+    if (ft>=0) return ft<S->war_tn? (float)S->war_trad[ft] : 0.0f;
+    if (ref>0){ int t = S->war_utype[ref-1]; return t==WAR_U_SIEGE? 14.0f : t==WAR_U_SCOUT? 11.0f : 9.0f; }
+    if (ref<0) return (float)WAR_SRAD[S->war_stype[-ref-1]];
+    return 0.0f;
+}
+static int war_count_units(BwSim *S, int side){
+    int n=0; for (int i=0;i<WAR_MAXU;i++) if (S->war_uhp[i]>0 && war_u_side(S->war_utype[i])==side) n++;
+    return n;
+}
+static int war_count_type(BwSim *S, int type){
+    int n=0; for (int i=0;i<WAR_MAXU;i++) if (S->war_uhp[i]>0 && S->war_utype[i]==type) n++;
+    return n;
+}
+static int war_hives_alive(BwSim *S){
+    int n=0; for (int i=0;i<WAR_MAXS;i++) if (S->war_shp[i]>0 && S->war_stype[i]==WAR_S_HIVE) n++;
+    return n;
+}
+static int war_find_hq(BwSim *S){
+    for (int i=0;i<WAR_MAXS;i++) if (S->war_stype[i]==WAR_S_HQ && S->war_smaxhp[i]>0) return i;
+    return -1;
+}
+static int war_sel_count(BwSim *S){
+    int n=0; for (int i=0;i<WAR_MAXU;i++) if (S->war_uhp[i]>0 && S->war_usel[i]) n++;
+    return n;
+}
+static void war_note(BwSim *S, const char *txt){ scpy(S->war_msg, txt, 72); S->war_msgt = 2.8f; }
+static void war_clamp_cam(BwSim *S){
+    if (S->war_camx < WAR_OX+150) S->war_camx = WAR_OX+150;
+    if (S->war_camx > WAR_OX+WAR_AW-150) S->war_camx = WAR_OX+WAR_AW-150;
+    if (S->war_camy < WAR_OY+110) S->war_camy = WAR_OY+110;
+    if (S->war_camy > WAR_OY+WAR_AH-110) S->war_camy = WAR_OY+WAR_AH-110;
+}
+static void war_clear_field(BwSim *S){
+    for (int i=0;i<WAR_MAXU;i++){ S->war_uhp[i]=0; S->war_usel[i]=0; S->war_wpn[i]=0; S->war_wpi[i]=0; S->war_stallt[i]=0; S->war_repath[i]=0; }
+    for (int i=0;i<WAR_MAXS;i++){ S->war_shp[i]=0; S->war_smaxhp[i]=0; S->war_qlen[i]=0; S->war_rallyx[i]=0; S->war_rallyy[i]=0; }
+    for (int i=0;i<WAR_MAXP;i++) S->war_pt[i]=0;
+    S->war_selstruct=-1; S->war_place=-1;
+    S->war_tn=0; S->war_ltap_n=0; S->war_ltap_unit=-1;
+    S->war_curon=0; S->war_barhl=-1; S->war_barhl_s=-1;   // a fresh field has no pad cursor and no bar highlight
+    S->war_pause=0; S->war_bcat=-1;   // v1.17: no pause menu, bar at its top level
+}
+// --- fog of war ------------------------------------------------------
+// Cells are 40u over the 1600x1200 arena. Explored is sticky: a cell
+// that has ever been visible stays explored for the whole battle.
+static int war_fog_at(BwSim *S, float wx, float wy){
+    int cx = (int)((wx - WAR_OX)/40.0f), cy = (int)((wy - WAR_OY)/40.0f);
+    if (cx<0 || cy<0 || cx>=WAR_FOG_W || cy>=WAR_FOG_H) return 2;   // off-arena: don't hide the frame
+    return S->war_fog[cy*WAR_FOG_W + cx];
+}
+static void war_fog_mark(BwSim *S, float wx, float wy, float r){
+    int cx0 = (int)((wx - r - WAR_OX)/40.0f), cx1 = (int)((wx + r - WAR_OX)/40.0f);
+    int cy0 = (int)((wy - r - WAR_OY)/40.0f), cy1 = (int)((wy + r - WAR_OY)/40.0f);
+    if (cx0<0) cx0=0; if (cy0<0) cy0=0;
+    if (cx1>=WAR_FOG_W) cx1=WAR_FOG_W-1; if (cy1>=WAR_FOG_H) cy1=WAR_FOG_H-1;
+    for (int cy=cy0; cy<=cy1; cy++) for (int cx=cx0; cx<=cx1; cx++){
+        float px = WAR_OX + cx*40.0f + 20.0f, py = WAR_OY + cy*40.0f + 20.0f;
+        float dx = px-wx, dy = py-wy;
+        if (dx*dx + dy*dy <= r*r) S->war_fog[cy*WAR_FOG_W + cx] = 2;
+    }
+}
+static void war_fog_update(BwSim *S){
+    for (int i=0;i<WAR_FOG_W*WAR_FOG_H;i++) if (S->war_fog[i]==2) S->war_fog[i]=1;   // visible lapses into explored, never back to black
+    for (int i=0;i<WAR_MAXU;i++){
+        if (S->war_uhp[i]<=0 || war_u_side(S->war_utype[i])!=0) continue;
+        war_fog_mark(S, S->war_ux[i], S->war_uy[i], war_u_sight(S->war_utype[i]));
+    }
+    for (int s=0;s<WAR_MAXS;s++){
+        if (S->war_shp[s]<=0 || S->war_sside[s]!=0) continue;
+        war_fog_mark(S, S->war_sx[s], S->war_sy[s], S->war_stype[s]==WAR_S_HQ? 200.0f : 170.0f);
+    }
+}
+// --- terrain ---------------------------------------------------------
+// v1.18 (Daniel: "novel every time you play"): the scatter is rolled
+// from the battle's own seed (bseed), with the region mixed in for
+// flavour — the same region never grows the same woods twice. Hive
+// clearances below read the ACTUAL hive structs, which
+// war_start_battle has already placed from the same seed.
+static void war_gen_terrain(BwSim *S, u32 bseed){
+    int region = S->war_region;
+    S->war_tn = 0;
+    u32 seed = bseed ^ (0x7E44u + (u32)region * 977u);
+    int want = 52 + (int)(hash2(region, 7, seed) % 17u);   // 52..68 features
+    for (int t=0; t<600 && S->war_tn<want; t++){
+        float x = WAR_OX + 44.0f + hash_f(t, 1, seed) * (WAR_AW - 88.0f);
+        float y = WAR_OY + 44.0f + hash_f(t, 2, seed) * (WAR_AH - 88.0f);
+        float dx, dy;
+        dx = x-(WAR_OX+280); dy = y-(WAR_OY+600); if (dx*dx+dy*dy < 104.0f*104.0f) continue;   // the Core's clearing
+        int bad = 0;
+        for (int s=0;s<WAR_MAXS && !bad;s++){
+            if (S->war_shp[s]<=0 || S->war_stype[s]!=WAR_S_HIVE) continue;
+            dx = x-S->war_sx[s]; dy = y-S->war_sy[s]; if (dx*dx+dy*dy < 84.0f*84.0f) bad = 1;
+        }
+        for (int n=0;n<S->war_nn && !bad;n++){
+            dx = x-S->war_nx[n]; dy = y-S->war_ny[n]; if (dx*dx+dy*dy < 54.0f*54.0f) bad = 1;
+        }
+        for (int j=0;j<S->war_tn && !bad;j++){
+            dx = x-S->war_tx[j]; dy = y-S->war_ty[j]; if (dx*dx+dy*dy < 30.0f*30.0f) bad = 1;
+        }
+        if (bad) continue;
+        float r = hash_f(t, 3, seed);
+        int kind = r < 0.50f? 0 : r < 0.75f? 1 : 2 + (int)(hash2(t, 4, seed) % 3u);
+        int i = S->war_tn++;
+        S->war_tx[i]=x; S->war_ty[i]=y; S->war_ttype[i]=kind;
+        S->war_trad[i] = 10 + (int)(hash2(t, 5, seed) % 5u);   // 10..14
+        S->war_tmaxhp[i] = WAR_THP[kind]; S->war_thp[i] = (float)WAR_THP[kind]; S->war_tdeadt[i] = 0;
+    }
+    // v1.18: BARRIER LINES (terrain kind 5) — vertical runs of
+    // indestructible slabs with a gap rolled into every line, so
+    // each battle has walls to think around AND a path through
+    // every one of them. Lines never span the full arena height,
+    // so a Core->hive route always exists even ignoring the gaps.
+    // Segments ride the same arrays as debris: collision
+    // (war_separate), the A* blocked grid and the snapshot all key
+    // off thp>0, and war_hurt_terrain refuses kind 5 — they can
+    // never be removed, only routed around.
+    { int debris_n = S->war_tn;   // the 30u spacing test below runs against DEBRIS only — a line's own segments stand 24u apart by design
+      int lines = region>=2? 3 : 2;
+      for (int k=0;k<lines;k++){
+          float xk = 560.0f + (float)k*230.0f + hash_f(k, 21, bseed)*120.0f;
+          float ylen = 420.0f + hash_f(k, 22, bseed)*320.0f;
+          float y0 = 60.0f + hash_f(k, 23, bseed)*((1200.0f-120.0f)-ylen);
+          float gy = y0 + 90.0f + hash_f(k, 24, bseed)*(ylen-180.0f);
+          for (float y=y0; y<=y0+ylen; y+=24.0f){
+              if (S->war_tn >= WAR_MAXT-2) break;
+              float gdy = y-gy; if (gdy<0) gdy=-gdy;
+              if (gdy < 55.0f) continue;   // the gap: a ~110u path through the line
+              float wx = WAR_OX + xk, wy = WAR_OY + y;
+              float dx, dy;
+              dx = wx-(WAR_OX+280); dy = wy-(WAR_OY+600); if (dx*dx+dy*dy < 130.0f*130.0f) continue;   // the Core's clearing, wider than debris' — a wall must never pen the base in
+              int bad = 0;
+              for (int s=0;s<WAR_MAXS && !bad;s++){
+                  if (S->war_shp[s]<=0 || S->war_stype[s]!=WAR_S_HIVE) continue;
+                  dx = wx-S->war_sx[s]; dy = wy-S->war_sy[s]; if (dx*dx+dy*dy < 115.0f*115.0f) bad = 1;
+              }
+              for (int n=0;n<S->war_nn && !bad;n++){
+                  dx = wx-S->war_nx[n]; dy = wy-S->war_ny[n]; if (dx*dx+dy*dy < 75.0f*75.0f) bad = 1;
+              }
+              for (int j=0;j<debris_n && !bad;j++){
+                  dx = wx-S->war_tx[j]; dy = wy-S->war_ty[j]; if (dx*dx+dy*dy < 30.0f*30.0f) bad = 1;
+              }
+              if (bad) continue;
+              int i = S->war_tn++;
+              S->war_tx[i]=wx; S->war_ty[i]=wy; S->war_ttype[i]=5;
+              S->war_trad[i]=15;
+              S->war_tmaxhp[i]=WAR_THP[5]; S->war_thp[i]=(float)WAR_THP[5]; S->war_tdeadt[i]=0;
+          }
+      } }
+}
+static int war_spawn_unit(BwSim *S, int type, float x, float y){
+    for (int i=0;i<WAR_MAXU;i++) if (S->war_uhp[i]<=0){
+        S->war_utype[i]=type; S->war_ux[i]=x; S->war_uy[i]=y;
+        S->war_umaxhp[i]=war_u_hp(type, S->war_region); S->war_uhp[i]=(float)S->war_umaxhp[i];
+        S->war_ustate[i]=0; S->war_utarget[i]=0; S->war_ucarry[i]=0; S->war_usel[i]=0;
+        S->war_uatk[i]=0; S->war_uharv[i]=0; S->war_utx[i]=x; S->war_uty[i]=y;
+        S->war_wpn[i]=0; S->war_wpi[i]=0; S->war_stallt[i]=0; S->war_repath[i]=0;
+        S->war_stallx[i]=x; S->war_stally[i]=y; S->war_ptgx[i]=x; S->war_ptgy[i]=y;
+        return i;
+    }
+    return -1;
+}
+static int war_spawn_struct(BwSim *S, int type, int side, float x, float y){
+    for (int i=0;i<WAR_MAXS;i++) if (S->war_shp[i]<=0){
+        int hp = type==WAR_S_HIVE? 220 + 60*S->war_region : WAR_SHP[type];
+        S->war_stype[i]=type; S->war_sside[i]=side; S->war_sx[i]=x; S->war_sy[i]=y;
+        S->war_smaxhp[i]=hp; S->war_shp[i]=(float)hp; S->war_scd[i]=0; S->war_qt[i]=0; S->war_qlen[i]=0; S->war_rallyx[i]=0; S->war_rallyy[i]=0;
+        return i;
+    }
+    return -1;
+}
+static void war_spawn_bug(BwSim *S, int hive, int wave){
+    if (war_count_units(S, 1) >= 40) return;
+    int type = WAR_U_CRAWL;
+    if (S->war_region>=2 && (war_count_units(S, 1) % 3)==2) type = WAR_U_SPIT;
+    float a = (float)(war_count_units(S, 1) % 8) * 0.8f + (wave? 2.0f : 0.0f);
+    int i = war_spawn_unit(S, type, S->war_sx[hive] + fcos(a)*(WAR_SRAD[WAR_S_HIVE]+16),
+                                   S->war_sy[hive] + fsin(a)*(WAR_SRAD[WAR_S_HIVE]+16));
+    if (i>=0){
+        S->war_ustate[i] = wave? 1 : 0;
+        S->war_utx[i] = S->war_sx[hive]; S->war_uty[i] = S->war_sy[hive];   // a guard's home
+    }
+}
+static void war_win(int pi){
+    BwSim *S = &BWS[pi]; Buddy *b = &G.bud[pi];
+    S->war_state = 2; S->war_endt = 3.2f; S->war_pause = 0;
+    if (!war_snap_on[pi] || war_snap_reg[pi]==S->war_region) war_snap_clear(pi);   // the battle is decided: ITS snapshot does not survive it (cleared BEFORE the save below) — but a battle parked in ANOTHER region is not this fight's to discard (v1.18)
+    if (S->war_region == b->war_prog && b->war_prog < 8){ b->war_prog++; do_save(); }
+    war_note(S, "REGION CONQUERED!");
+    qnote(0, 0, 60, 80, 6); qnote(0.12f, 0, 64, 80, 6); qnote(0.24f, 0, 67, 80, 6); qnote(0.36f, 0, 72, 90, 10);
+}
+static void war_lose(int pi){
+    BwSim *S = &BWS[pi];
+    S->war_state = 3; S->war_endt = 3.2f; S->war_pause = 0;
+    if (!war_snap_on[pi] || war_snap_reg[pi]==S->war_region) war_snap_clear(pi);   // a fallen Core leaves nothing of THIS battle to resume — a park in another region still stands (v1.18)
+    war_note(S, "THE COMPILER CORE HAS FALLEN!");
+    qnote(0, 0, 48, 80, 8); qnote(0.2f, 0, 43, 80, 8); qnote(0.4f, 0, 36, 90, 12);
+}
+static void war_hurt_unit(int pi, int i, int dmg){
+    BwSim *S = &BWS[pi];
+    if (!war_unit_alive(S, i)) return;
+    S->war_uhp[i] -= dmg;
+    if (S->war_uhp[i] <= 0){
+        S->war_uhp[i] = 0; S->war_usel[i] = 0; S->war_utarget[i] = 0; S->war_wpn[i] = 0;   // the dead drop their paths
+        if (S->war_utype[i]==WAR_U_HARV && war_count_type(S, WAR_U_HARV)==0
+            && S->war_bits < WAR_TRAIN_COST[0] && S->war_state==1){
+            // never soft-lock the economy: the Core prints one
+            // harvester's worth of bits, once, in an emergency
+            S->war_bits = WAR_TRAIN_COST[0];
+            war_note(S, "EMERGENCY BIT GRANT: TRAIN A NEW HARVESTER!");
+        }
+    }
+}
+static void war_hurt_struct(int pi, int i, int dmg){
+    BwSim *S = &BWS[pi];
+    if (!war_struct_alive(S, i)) return;
+    S->war_shp[i] -= dmg;
+    if (S->war_shp[i] <= 0){
+        S->war_shp[i] = 0; S->war_qlen[i] = 0;
+        if (S->war_selstruct == i) S->war_selstruct = -1;
+        if (S->war_state == 1 && S->war_stype[i]==WAR_S_HQ) war_lose(pi);
+        else if (S->war_state == 1 && S->war_stype[i]==WAR_S_HIVE && war_hives_alive(S)==0) war_win(pi);
+    }
+}
+// debris damage (Daniel, Nov 16): terrain features take plain damage
+// from your combat units — never the siege gun's structure bonus —
+// and at 0 hp they are gone for the rest of the battle: movement
+// frees up at once and all that remains is a scorch mark that fades.
+// v1.17: felling debris with PLAYER-side damage (side 0) also pays a
+// salvage bounty by kind (WAR_TBITS) — silent income, no note spam.
+// Bug damage (side 1) pays nothing.
+static void war_hurt_terrain(int pi, int t, int dmg, int side){
+    BwSim *S = &BWS[pi];
+    if (t<0 || t>=S->war_tn || S->war_thp[t]<=0) return;
+    if (S->war_ttype[t]==5) return;   // v1.18: barrier slabs are truly indestructible — collision and the A* grid key off thp>0, so this hp must never reach 0
+    S->war_thp[t] -= (float)dmg;
+    if (S->war_thp[t] <= 0){
+        S->war_thp[t] = 0;
+        S->war_tdeadt[t] = 6.0f;
+        if (side==0) S->war_bits += WAR_TBITS[S->war_ttype[t]];
+        if (pi==G.my_id) sfx(17);   // the wall-crunch: debris gives way
+    }
+}
+static void war_fire(BwSim *S, int side, float x, float y, int target_ref, int dmg){
+    for (int i=0;i<WAR_MAXP;i++) if (S->war_pt[i]<=0){
+        S->war_px[i]=x; S->war_py[i]=y; S->war_ptar[i]=target_ref;
+        S->war_pdmg[i]=dmg; S->war_pside[i]=side; S->war_pt[i]=2.0f;
+        return;
+    }
+}
+static int war_nearest_enemy(BwSim *S, int side, float x, float y, float maxd, int want_units, int want_structs){
+    int best = 0; float bd = maxd*maxd;
+    if (want_units)
+        for (int i=0;i<WAR_MAXU;i++){
+            if (S->war_uhp[i]<=0 || war_u_side(S->war_utype[i])==side) continue;
+            float dx=S->war_ux[i]-x, dy=S->war_uy[i]-y, d2=dx*dx+dy*dy;
+            if (d2<bd){ bd=d2; best=i+1; }
+        }
+    if (want_structs)
+        for (int i=0;i<WAR_MAXS;i++){
+            if (S->war_shp[i]<=0 || S->war_sside[i]==side) continue;
+            float dx=S->war_sx[i]-x, dy=S->war_sy[i]-y, d2=dx*dx+dy*dy;
+            if (d2<bd){ bd=d2; best=-(i+1); }
+        }
+    return best;
+}
+static float war_move_step(BwSim *S, int i, float tx, float ty, float stopd, float dt){
+    float dx=tx-S->war_ux[i], dy=ty-S->war_uy[i];
+    float d=fsqrt(dx*dx+dy*dy);
+    if (d>stopd && d>0.01f){
+        float step = war_u_speed(S->war_utype[i], S->war_region) * dt;
+        if (step > d-stopd) step = d-stopd;
+        S->war_ux[i] += dx/d*step; S->war_uy[i] += dy/d*step;
+    }
+    return d;
+}
+// --- pathfinding (v1.17, Daniel: units must conceive of going
+// AROUND a wall) ------------------------------------------------------
+// war_move_to used to steer in a straight line and let war_separate
+// push the unit out of obstacle circles; with the target behind a
+// firewall line or a building the two forces reach a stable
+// equilibrium and the unit pins forever. Now: grid A* over the fog
+// grid's geometry (40x30 cells of 40u), requested ONLY when a unit
+// stalls (0.6s of trying to step with <3u of net movement), so idle
+// behaviour and cost are unchanged. The grid and the LOS shortcut are
+// SIDE-AWARE (addendum 1): a gate is an obstacle only to side 1 —
+// your harvesters route through your gates; bugs route around them
+// or chew through. All scratch is fixed static arrays; every loop is
+// bounded (expansion cap, ring cap, sample cap) — no wasm hangs.
+static unsigned char war_pf_block[WAR_FOG_W*WAR_FOG_H];
+static int war_pf_g[WAR_FOG_W*WAR_FOG_H];
+static int war_pf_from[WAR_FOG_W*WAR_FOG_H];
+static unsigned char war_pf_closed[WAR_FOG_W*WAR_FOG_H];
+static int war_pf_path[WAR_FOG_W*WAR_FOG_H];
+static float war_pf_tpx[128], war_pf_tpy[128];
+static int war_pf_blocked_at(BwSim *S, int side, float wx, float wy){
+    for (int s=0;s<WAR_MAXS;s++){
+        if (S->war_shp[s]<=0) continue;
+        if (side==0 && S->war_stype[s]==WAR_S_GATE) continue;   // your gates are doors — to you
+        float rr = (float)WAR_SRAD[S->war_stype[s]] + 13.0f;
+        float dx=wx-S->war_sx[s], dy=wy-S->war_sy[s];
+        if (dx*dx+dy*dy < rr*rr) return 1;
+    }
+    for (int t=0;t<S->war_tn;t++){
+        if (S->war_thp[t]<=0) continue;
+        float rr = (float)S->war_trad[t] + 13.0f;
+        float dx=wx-S->war_tx[t], dy=wy-S->war_ty[t];
+        if (dx*dx+dy*dy < rr*rr) return 1;
+    }
+    return 0;
+}
+static int war_pf_seg_blocked(BwSim *S, int side, float x0, float y0, float x1, float y1){
+    float dx=x1-x0, dy=y1-y0, d=fsqrt(dx*dx+dy*dy);
+    int steps = (int)(d/10.0f) + 1; if (steps>200) steps=200;
+    for (int k=0;k<=steps;k++){
+        float t = (float)k/(float)steps;
+        if (war_pf_blocked_at(S, side, x0+dx*t, y0+dy*t)) return 1;
+    }
+    return 0;
+}
+static int war_pf_nearest_free(int cx, int cy, float wx, float wy){
+    // the free cell whose CENTRE is closest to (wx,wy), searching
+    // rings outward from (cx,cy); the first ring with any free cell
+    // wins. Distance matters, not just ring order: a unit pressing a
+    // wall stands in a blocked cell, and the first free cell in ring
+    // order can be the one BEHIND the wall — its centre then becomes
+    // the path's first waypoint, unreachable, and the unit jams
+    // against the wall forever (found by wartest check 5: a crawler
+    // frozen at the wall face for 45s). The nearest free centre is
+    // on the unit's own side of the obstacle, where it can be
+    // steered to, and the grid path leads on from there.
+    for (int r=0;r<=4;r++){
+        int best=-1; float bd=1e18f;
+        for (int dy=-r; dy<=r; dy++) for (int dx=-r; dx<=r; dx++){
+            if (r>0 && dx>-r && dx<r && dy>-r && dy<r) continue;   // the ring only, never the filled square
+            int nx=cx+dx, ny=cy+dy;
+            if (nx<0 || ny<0 || nx>=WAR_FOG_W || ny>=WAR_FOG_H) continue;
+            if (war_pf_block[ny*WAR_FOG_W+nx]) continue;
+            float ccx = WAR_OX + nx*40.0f + 20.0f, ccy = WAR_OY + ny*40.0f + 20.0f;
+            float ddx = ccx-wx, ddy = ccy-wy, d2 = ddx*ddx + ddy*ddy;
+            if (d2<bd){ bd=d2; best = ny*WAR_FOG_W+nx; }
+        }
+        if (best>=0) return best;
+    }
+    return -1;
+}
+static int war_pf_find(BwSim *S, int i, float tx, float ty){
+    int side = war_u_side(S->war_utype[i]);
+    for (int cy=0; cy<WAR_FOG_H; cy++) for (int cx=0; cx<WAR_FOG_W; cx++)
+        war_pf_block[cy*WAR_FOG_W+cx] = (unsigned char)war_pf_blocked_at(S, side, WAR_OX + cx*40.0f + 20.0f, WAR_OY + cy*40.0f + 20.0f);
+    int start = war_pf_nearest_free((int)((S->war_ux[i]-WAR_OX)/40.0f), (int)((S->war_uy[i]-WAR_OY)/40.0f), S->war_ux[i], S->war_uy[i]);
+    int goal = war_pf_nearest_free((int)((tx-WAR_OX)/40.0f), (int)((ty-WAR_OY)/40.0f), tx, ty);
+    if (start<0 || goal<0) return 0;
+    int gx = goal%WAR_FOG_W, gy = goal/WAR_FOG_W;
+    for (int c=0;c<WAR_FOG_W*WAR_FOG_H;c++){ war_pf_g[c]=-1; war_pf_from[c]=-1; war_pf_closed[c]=0; }
+    war_pf_g[start]=0;
+    int found = (start==goal), expansions = 0;
+    while (!found){
+        int best=-1, bf=0;
+        for (int c=0;c<WAR_FOG_W*WAR_FOG_H;c++){
+            if (war_pf_g[c]<0 || war_pf_closed[c]) continue;
+            int cx=c%WAR_FOG_W, cy=c/WAR_FOG_W;
+            int adx = cx>gx? cx-gx : gx-cx, ady = cy>gy? cy-gy : gy-cy;
+            int f = war_pf_g[c] + 10*(adx>ady? adx:ady) + 4*(adx<ady? adx:ady);   // octile heuristic
+            if (best<0 || f<bf){ best=c; bf=f; }
+        }
+        if (best<0) break;                    // the frontier ran dry: unreachable
+        if (++expansions > 4000) break;       // bounded, always
+        war_pf_closed[best]=1;
+        if (best==goal){ found=1; break; }
+        int bx=best%WAR_FOG_W, by=best/WAR_FOG_W;
+        for (int dy=-1; dy<=1; dy++) for (int dx=-1; dx<=1; dx++){
+            if (!dx && !dy) continue;
+            int nx=bx+dx, ny=by+dy;
+            if (nx<0 || ny<0 || nx>=WAR_FOG_W || ny>=WAR_FOG_H) continue;
+            int nc = ny*WAR_FOG_W+nx;
+            if (war_pf_block[nc] || war_pf_closed[nc]) continue;
+            if (dx && dy && (war_pf_block[by*WAR_FOG_W+nx] || war_pf_block[ny*WAR_FOG_W+bx])) continue;   // no corner cutting
+            int ng = war_pf_g[best] + ((dx && dy)? 14 : 10);
+            if (war_pf_g[nc]<0 || ng<war_pf_g[nc]){ war_pf_g[nc]=ng; war_pf_from[nc]=best; }
+        }
+    }
+    if (!found) return 0;
+    // the came-from chain, goal-first; every step strictly descends
+    // the g-score, so the walk is bounded by the chain itself
+    int pn=0, c=goal;
+    while (c>=0 && pn<WAR_FOG_W*WAR_FOG_H){ war_pf_path[pn++]=c; if (c==start) break; c=war_pf_from[c]; }
+    if (pn<1 || war_pf_path[pn-1]!=start) return 0;
+    // turning points only: walk in travel order, keep a cell when the
+    // direction of travel changes (plus the first and last cells)
+    int tn=0, pdx=0, pdy=0;
+    for (int k=pn-1; k>=0; k--){
+        int cx=war_pf_path[k]%WAR_FOG_W, cy=war_pf_path[k]/WAR_FOG_W;
+        int dx=0, dy=0;
+        if (k>0){ dx = war_pf_path[k-1]%WAR_FOG_W - cx; dy = war_pf_path[k-1]/WAR_FOG_W - cy; }
+        if ((k==pn-1 || k==0 || dx!=pdx || dy!=pdy) && tn<128){
+            war_pf_tpx[tn]=WAR_OX+cx*40.0f+20.0f; war_pf_tpy[tn]=WAR_OY+cy*40.0f+20.0f; tn++;
+        }
+        pdx=dx; pdy=dy;
+    }
+    // LOS shortcut: from wherever we stand, jump to the farthest
+    // turning point with a clear segment (attempts capped)
+    int wn=0, idx=0; float ax=S->war_ux[i], ay=S->war_uy[i];
+    while (idx<tn && wn<31){
+        int jump=idx, tries=0;
+        for (int k=tn-1; k>idx && tries<24; k--, tries++)
+            if (!war_pf_seg_blocked(S, side, ax, ay, war_pf_tpx[k], war_pf_tpy[k])){ jump=k; break; }
+        S->war_wpx[i][wn]=war_pf_tpx[jump]; S->war_wpy[i][wn]=war_pf_tpy[jump]; wn++;
+        ax=war_pf_tpx[jump]; ay=war_pf_tpy[jump]; idx=jump+1;
+    }
+    if (wn<1) return 0;
+    S->war_wpn[i]=(unsigned char)wn; S->war_wpi[i]=0;
+    S->war_ptgx[i]=tx; S->war_ptgy[i]=ty;
+    return 1;
+}
+// one stall window: 1 when a full 0.6s passed with <3u of net
+// movement — the unit is pressing against the world, not travelling
+static int war_pf_stall_tick(BwSim *S, int i, float dt){
+    S->war_stallt[i] += dt;
+    if (S->war_stallt[i] < 0.6f) return 0;
+    float mdx=S->war_ux[i]-S->war_stallx[i], mdy=S->war_uy[i]-S->war_stally[i];
+    int stuck = (mdx*mdx + mdy*mdy < 9.0f);
+    S->war_stallt[i]=0; S->war_stallx[i]=S->war_ux[i]; S->war_stally[i]=S->war_uy[i];
+    return stuck;
+}
+static float war_move_to(BwSim *S, int i, float tx, float ty, float stopd, float dt){
+    float dx=tx-S->war_ux[i], dy=ty-S->war_uy[i];
+    float d=fsqrt(dx*dx+dy*dy);
+    if (S->war_repath[i] > 0) S->war_repath[i] -= dt;
+    if (S->war_wpn[i]>0){
+        float pdx=tx-S->war_ptgx[i], pdy=ty-S->war_ptgy[i];
+        if (pdx*pdx+pdy*pdy > 24.0f*24.0f) S->war_wpn[i]=0;   // the target JUMPED since last frame (a new order, a dead target replaced): the path is stale intent
+        else { S->war_ptgx[i]=tx; S->war_ptgy[i]=ty; }        // a MOVING target (a unit under pursuit) re-anchors every frame: its step-by-step motion is the same intent, not staleness — a cumulative-drift rule here killed every pursuit path within a second (wartest check 5: the bait's ordinary charge-and-return oscillation, ±30u, dropped the bug's path mid-lunge three times in a row)
+    }
+    if (S->war_wpn[i]>0){
+        if (war_pf_stall_tick(S, i, dt)) S->war_wpn[i]=0;   // the path itself jammed (a new wall, a crowd): drop it and re-think below
+        else {
+            while (S->war_wpi[i] < S->war_wpn[i]){
+                float wx=S->war_wpx[i][S->war_wpi[i]], wy=S->war_wpy[i][S->war_wpi[i]];
+                float wdx=wx-S->war_ux[i], wdy=wy-S->war_uy[i];
+                if (wdx*wdx+wdy*wdy <= 100.0f){ S->war_wpi[i]++; continue; }
+                war_move_step(S, i, wx, wy, 6.0f, dt);
+                return d;
+            }
+            S->war_wpn[i]=0;   // waypoints exhausted: the last leg is a straight line at the real target, caller's stopd intact
+        }
+    }
+    if (d > stopd + 1.0f){
+        if (war_pf_stall_tick(S, i, dt) && S->war_repath[i] <= 0.0f)
+            S->war_repath[i] = war_pf_find(S, i, tx, ty)? 1.5f : 2.0f;   // no route (a walled-in Core): keep pressing, ask again later
+    } else { S->war_stallt[i]=0; S->war_stallx[i]=S->war_ux[i]; S->war_stally[i]=S->war_uy[i]; }   // standing to fire never accumulates stall
+    return war_move_step(S, i, tx, ty, stopd, dt);
+}
+static void war_harv_update(int pi, int i, float dt){
+    BwSim *S = &BWS[pi];
+    int st = S->war_ustate[i];
+    float x = S->war_ux[i], y = S->war_uy[i];
+    if (st==1){   // a manual move order: go there, then think again
+        if (war_move_to(S, i, S->war_utx[i], S->war_uty[i], 4.0f, dt) <= 6.0f) S->war_ustate[i]=0;
+        return;
+    }
+    if (st==3){   // parked on a node, scooping bits
+        S->war_uharv[i] -= dt;
+        if (S->war_uharv[i] <= 0){
+            int n = S->war_utarget[i]-1;   // harvesters store the node index+1 in utarget
+            if (n>=0 && n<S->war_nn && S->war_namt[n]>0){
+                int take = WAR_CARRY - S->war_ucarry[i];
+                if (take > S->war_namt[n]) take = S->war_namt[n];
+                S->war_namt[n] -= take; S->war_ucarry[i] += take;
+            }
+            S->war_ustate[i] = 0;
+        }
+        return;
+    }
+    if (S->war_ucarry[i] >= WAR_CARRY || st==4){   // full (or already homeward): dump it at the Core
+        int hq = war_find_hq(S);
+        if (hq<0 || !war_struct_alive(S, hq)){ S->war_ustate[i]=0; return; }
+        float d = war_move_to(S, i, S->war_sx[hq], S->war_sy[hq], WAR_SRAD[WAR_S_HQ]+8.0f, dt);
+        if (d <= WAR_SRAD[WAR_S_HQ]+16.0f){
+            if (S->war_ucarry[i]>0){ S->war_bits += S->war_ucarry[i]; S->war_ucarry[i]=0; sfx(6); }
+            S->war_ustate[i]=0;
+        } else S->war_ustate[i]=4;
+        return;
+    }
+    // find the nearest node with bits left and go scoop
+    { int bn=-1; float bd=1e18f;
+      for (int n=0;n<S->war_nn;n++){
+          if (S->war_namt[n]<=0) continue;
+          float dx=S->war_nx[n]-x, dy=S->war_ny[n]-y, d2=dx*dx+dy*dy;
+          if (d2<bd){ bd=d2; bn=n; }
+      }
+      if (bn<0){   // the field is dry: hand over what's carried, then wait by the Core
+          if (S->war_ucarry[i]>0){ S->war_ustate[i]=4; return; }
+          int hq = war_find_hq(S);
+          if (hq>=0) war_move_to(S, i, S->war_sx[hq]+48, S->war_sy[hq]+34, 6.0f, dt);
+          return;
+      }
+      if (war_move_to(S, i, S->war_nx[bn], S->war_ny[bn], 14.0f, dt) <= 20.0f){
+          S->war_ustate[i]=3; S->war_uharv[i]=2.0f; S->war_utarget[i]=bn+1;
+      } }
+}
+static void war_unit_update(int pi, int i, float dt){
+    BwSim *S = &BWS[pi];
+    int type = S->war_utype[i], side = war_u_side(type);
+    if (S->war_uatk[i] > 0) S->war_uatk[i] -= dt;
+    if (type == WAR_U_HARV){ war_harv_update(pi, i, dt); return; }
+    float x = S->war_ux[i], y = S->war_uy[i];
+    int state = S->war_ustate[i];
+    if (state==2){   // an attack order whose target died is just an order again
+        float tx, ty;
+        if (!war_ref_alive(S, S->war_utarget[i], &tx, &ty)){ S->war_ustate[i]=0; S->war_utarget[i]=0; state=0; }
+    }
+    int tref = 0;
+    if (state==2) tref = S->war_utarget[i];
+    else if (side==0){   // a buddy on guard: bugs first, a hive only if it is right there
+        float aggro = state==1? 80.0f : 150.0f;
+        tref = war_nearest_enemy(S, 0, x, y, aggro, 1, 0);
+        if (!tref && state==0) tref = war_nearest_enemy(S, 0, x, y, 70.0f, 0, 1);
+    } else if (state==1){   // a wave bug: whatever it meets, then the base
+        tref = war_nearest_enemy(S, 1, x, y, 170.0f, 1, 0);
+        if (!tref) tref = war_nearest_enemy(S, 1, x, y, 210.0f, 0, 1);
+    } else {   // a hive guard: anything of yours that wanders close
+        tref = war_nearest_enemy(S, 1, x, y, 180.0f, 1, 1);
+    }
+    if (tref){
+        float tx, ty;
+        war_ref_alive(S, tref, &tx, &ty);
+        float dx=tx-x, dy=ty-y, dist=fsqrt(dx*dx+dy*dy);
+        if (side==0 && state==0 && dist > 260.0f) tref = 0;   // guards don't chase across the map
+        else {
+            float rng = war_u_range(type) + war_ref_radius(S, tref);
+            float d = war_move_to(S, i, tx, ty, rng*0.92f, dt);
+            if (d <= rng + 2.0f && S->war_uatk[i] <= 0){
+                S->war_uatk[i] = war_u_rate(type);
+                int dmg = war_u_dmg(type, S->war_region);
+                int ft = war_ref_feat(tref);
+                // the siege gun is built to crack STRUCTURES — hives
+                // above all. Debris is not a structure: trees, rocks
+                // and rubble take the plain rate, never the x2.
+                if (type==WAR_U_SIEGE && tref<0 && ft<0) dmg *= 2;
+                if (type==WAR_U_MELEE || type==WAR_U_CRAWL){
+                    if (tref>0) war_hurt_unit(pi, tref-1, dmg);
+                    else if (ft>=0) war_hurt_terrain(pi, ft, dmg, side);
+                    else war_hurt_struct(pi, -tref-1, dmg);
+                } else war_fire(S, side, x, y, tref, dmg);
+            }
+            return;
+        }
+    }
+    if (state==1 && side==0){   // a plain move order
+        if (war_move_to(S, i, S->war_utx[i], S->war_uty[i], 4.0f, dt) <= 6.0f) S->war_ustate[i]=0;
+        return;
+    }
+    if (side==1 && state==1){   // wave bug, nothing in the way: march on the Core
+        int hq = war_find_hq(S);
+        if (hq>=0 && war_struct_alive(S, hq)) war_move_to(S, i, S->war_sx[hq], S->war_sy[hq], WAR_SRAD[WAR_S_HQ]+10.0f, dt);
+        return;
+    }
+    if (side==1 && state==0){   // guard bug: drift back home if it strayed
+        float dx=S->war_utx[i]-x, dy=S->war_uty[i]-y;
+        if (dx*dx+dy*dy > 60.0f*60.0f) war_move_to(S, i, S->war_utx[i], S->war_uty[i], 42.0f, dt);
+        return;
+    }
+}
+static void war_struct_update(int pi, int s, float dt){
+    BwSim *S = &BWS[pi];
+    if (S->war_scd[s] > 0) S->war_scd[s] -= dt;
+    int type = S->war_stype[s];
+    if (type==WAR_S_ZAP){
+        if (S->war_scd[s] <= 0){
+            int tref = war_nearest_enemy(S, 0, S->war_sx[s], S->war_sy[s], 118.0f, 1, 0);
+            if (tref){ war_fire(S, 0, S->war_sx[s], S->war_sy[s]-10, tref, 8); S->war_scd[s]=0.55f; }
+        }
+    } else if (type==WAR_S_HIVE){
+        if (S->war_scd[s] <= 0){
+            S->war_scd[s] = 2.5f;
+            if (war_nearest_enemy(S, 1, S->war_sx[s], S->war_sy[s], 250.0f, 1, 0)){
+                int defs = 0;
+                for (int i=0;i<WAR_MAXU;i++){
+                    if (S->war_uhp[i]<=0 || war_u_side(S->war_utype[i])!=1) continue;
+                    float dx=S->war_ux[i]-S->war_sx[s], dy=S->war_uy[i]-S->war_sy[s];
+                    if (dx*dx+dy*dy < 130.0f*130.0f) defs++;
+                }
+                if (defs < 3) war_spawn_bug(S, s, 0);
+            }
+        }
+    }
+    if (S->war_qlen[s] > 0){   // the training QUEUE (addendum 2): the front item cooks on war_qt, the rest wait their turn
+        S->war_qt[s] -= dt;
+        if (S->war_qt[s] <= 0){
+            if (war_count_units(S, 0) < 24){
+                int ut = S->war_queue[s][0];
+                float a = (float)((s*47) % 6) * 1.1f;
+                int ni = war_spawn_unit(S, ut, S->war_sx[s] + fcos(a)*(WAR_SRAD[type]+16),
+                                              S->war_sy[s] + fsin(a)*(WAR_SRAD[type]+16));
+                if (ni>=0 && S->war_rallyx[s]!=0){   // rally (addendum 3): fresh units walk to the flag — harvesters too; on arrival they think for themselves
+                    S->war_ustate[ni]=1; S->war_utarget[ni]=0;
+                    S->war_utx[ni]=S->war_rallyx[s]; S->war_uty[ni]=S->war_rallyy[s];
+                    S->war_wpn[ni]=0;
+                }
+                for (int k=1;k<S->war_qlen[s];k++) S->war_queue[s][k-1]=S->war_queue[s][k];
+                S->war_qlen[s]--;
+                if (S->war_qlen[s]>0) S->war_qt[s]=WAR_TRAIN_TIME[S->war_queue[s][0]];
+                if (pi==G.my_id) sfx(19);
+            } else S->war_qt[s] = 0.5f;   // army full: the front item waits at the door, and the queue behind it waits too
+        }
+    }
+}
+static void war_separate(BwSim *S){
+    for (int i=0;i<WAR_MAXU;i++){
+        if (S->war_uhp[i]<=0) continue;
+        for (int j=i+1;j<WAR_MAXU;j++){
+            if (S->war_uhp[j]<=0) continue;
+            float dx=S->war_ux[j]-S->war_ux[i], dy=S->war_uy[j]-S->war_uy[i];
+            float d2=dx*dx+dy*dy;
+            if (d2 < 15.0f*15.0f && d2 > 0.01f){
+                float d=fsqrt(d2), push=(15.0f-d)*0.5f, px=dx/d*push, py=dy/d*push;
+                S->war_ux[i]-=px; S->war_uy[i]-=py; S->war_ux[j]+=px; S->war_uy[j]+=py;
+            } else if (d2 <= 0.01f) S->war_ux[j] += 1.5f;
+        }
+        for (int s=0;s<WAR_MAXS;s++){
+            if (S->war_shp[s]<=0) continue;
+            if (S->war_stype[s]==WAR_S_GATE && war_u_side(S->war_utype[i])==0) continue;   // gates (addendum 1): YOUR units walk straight through; bugs still hit a wall
+            float rad = (float)WAR_SRAD[S->war_stype[s]] + 9.0f;
+            float dx=S->war_ux[i]-S->war_sx[s], dy=S->war_uy[i]-S->war_sy[s];
+            float d2=dx*dx+dy*dy;
+            if (d2 < rad*rad){
+                float d=fsqrt(d2);
+                if (d<0.5f) S->war_ux[i] = S->war_sx[s]+rad;
+                else { S->war_ux[i] = S->war_sx[s]+dx/d*rad; S->war_uy[i] = S->war_sy[s]+dy/d*rad; }
+            }
+        }
+        for (int t=0;t<S->war_tn;t++){   // terrain blocks feet and wheels, never shots — and felled debris blocks nothing
+            if (S->war_thp[t]<=0) continue;
+            float rad = (float)S->war_trad[t] + 9.0f;
+            float dx=S->war_ux[i]-S->war_tx[t], dy=S->war_uy[i]-S->war_ty[t];
+            float d2=dx*dx+dy*dy;
+            if (d2 < rad*rad){
+                float d=fsqrt(d2);
+                if (d<0.5f) S->war_ux[i] = S->war_tx[t]+rad;
+                else { S->war_ux[i] = S->war_tx[t]+dx/d*rad; S->war_uy[i] = S->war_ty[t]+dy/d*rad; }
+            }
+        }
+        if (S->war_ux[i] < WAR_OX+12) S->war_ux[i] = WAR_OX+12;
+        if (S->war_ux[i] > WAR_OX+WAR_AW-12) S->war_ux[i] = WAR_OX+WAR_AW-12;
+        if (S->war_uy[i] < WAR_OY+12) S->war_uy[i] = WAR_OY+12;
+        if (S->war_uy[i] > WAR_OY+WAR_AH-12) S->war_uy[i] = WAR_OY+WAR_AH-12;
+    }
+}
+static void war_proj_update(int pi, float dt){
+    BwSim *S = &BWS[pi];
+    for (int i=0;i<WAR_MAXP;i++){
+        if (S->war_pt[i]<=0) continue;
+        S->war_pt[i] -= dt;
+        float tx, ty;
+        if (!war_ref_alive(S, S->war_ptar[i], &tx, &ty)){ S->war_pt[i]=0; continue; }
+        float dx=tx-S->war_px[i], dy=ty-S->war_py[i], d=fsqrt(dx*dx+dy*dy);
+        float sp = S->war_pside[i]==0? 320.0f : 250.0f;
+        if (d <= sp*dt + 7.0f){
+            int ft = war_ref_feat(S->war_ptar[i]);
+            if (S->war_ptar[i]>0) war_hurt_unit(pi, S->war_ptar[i]-1, S->war_pdmg[i]);
+            else if (ft>=0) war_hurt_terrain(pi, ft, S->war_pdmg[i], S->war_pside[i]);
+            else war_hurt_struct(pi, -S->war_ptar[i]-1, S->war_pdmg[i]);
+            S->war_pt[i]=0;
+        } else { S->war_px[i] += dx/d*sp*dt; S->war_py[i] += dy/d*sp*dt; }
+    }
+}
+static float war_wave_dt(int region){ float v = 30.0f - 2.0f*region; return v<16.0f? 16.0f : v; }
+static void war_start_battle(int pi, int region){
+    BwSim *S = &BWS[pi];
+    if (region<0) region=0; if (region>7) region=7;
+    war_clear_field(S);
+    // v1.18 (Daniel: "novel every time you play"): this battle's
+    // seed mixes the region, the run clock and a per-process
+    // battle counter — RESTARTs included — through the unsigned
+    // hash, so no two starts ever lay out the same field. The seed
+    // itself is never saved: hives are structs and the terrain
+    // rides the battle snapshot, so a parked battle restores its
+    // own rolled field exactly.
+    { static u32 war_battle_ctr = 0;
+      war_battle_ctr += 1u;
+      u32 tbits = (u32)(int)(G.time * 4.0f);
+      S->war_bseed = hash2((i32)(tbits + (u32)region * 977u), (i32)(war_battle_ctr * 131u + (u32)region), 0x5EEDu ^ (war_battle_ctr * 2654435761u)); }
+    S->war_state=1; S->war_region=region; S->war_bits=250; S->war_t=0;   // v1.17: a richer purse to open with (was 150)
+    S->war_wavet = war_wave_dt(region)*0.7f;
+    S->war_grace=0.35f; S->war_ordt=0; S->war_msgt=0;
+    S->war_ltap_t=-10.0f; S->war_ltap_unit=-1; S->war_drag_id=-1;
+    war_spawn_struct(S, WAR_S_HQ, 0, WAR_OX+280, WAR_OY+600);       // struct 0 is always the Core
+    war_spawn_unit(S, WAR_U_HARV, WAR_OX+336, WAR_OY+652);
+    war_spawn_unit(S, WAR_U_MELEE, WAR_OX+336, WAR_OY+548);
+    // v1.17: nine nodes, 4,800 bits on the field (was seven / 2,900) —
+    // (620,120) opens the north, (1010,600) is contested ground
+    // between the midfield and the hives
+    static const float ND[9][2] = { {430,430},{430,770},{800,300},{800,900},{800,600},{1180,350},{1180,850},{620,120},{1010,600} };
+    static const int NA[9] = { 400, 400, 500, 500, 600, 600, 600, 500, 700 };
+    S->war_nn=9;
+    for (int n=0;n<9;n++){ S->war_nx[n]=WAR_OX+ND[n][0]; S->war_ny[n]=WAR_OY+ND[n][1]; S->war_namt[n]=NA[n]; }
+    int nh = 1 + (region>=3? 1:0) + (region>=6? 1:0);
+    // v1.18: the hives land along the FAR side, banded-random — the
+    // arena height is cut into nh equal bands and each hive rolls
+    // its spot inside its own band (x deep in the east, y anywhere
+    // in the band), so the swarm is always spread out but never
+    // where it stood last time. No more "just go to the far right".
+    { float band_h = 1200.0f / (float)nh;
+      for (int h=0;h<nh;h++){
+          float hx = 1240.0f + hash_f(h, 11, S->war_bseed) * 150.0f;
+          float hy = (float)h * band_h + 130.0f + hash_f(h, 12, S->war_bseed) * (band_h - 260.0f);
+          int hi = war_spawn_struct(S, WAR_S_HIVE, 1, WAR_OX+hx, WAR_OY+hy);
+          war_spawn_bug(S, hi, 0); war_spawn_bug(S, hi, 0);
+          if (region>=2) war_spawn_bug(S, hi, 0);
+      } }
+    war_gen_terrain(S, S->war_bseed);
+    for (int i=0;i<WAR_FOG_W*WAR_FOG_H;i++) S->war_fog[i]=0;   // a fresh battle starts in the dark
+    war_fog_update(S);
+    S->war_camx = WAR_OX+280; S->war_camy = WAR_OY+600;
+    war_clamp_cam(S);
+    { char buf[72]; char *q=buf; q=sappend(q, "CONQUER "); q=sappend(q, REGION_NAME[region]);
+      q=sappend(q, "! HARVEST BITS. KILL THE HIVE"); if (nh>1) q=sappend(q, "S"); q=sappend(q, "."); *q=0;
+      war_note(S, buf); }
+    sfx(19);
+}
+static float war_axis(float a);   // defined with the pad code below; the pause menu's pad handler needs it early
+// --- battle snapshots (v1.17, Daniel: leaving must SAVE the battle
+// and pause it) -------------------------------------------------------
+// The canonical text lives in war_snap[pi] (save section): keys wb /
+// wu / ws / wg / wt / wf in the "cw" idiom — ',' inside a record,
+// ';' between records, one space between keys. Coordinates are
+// arena-relative ints EXCEPT the rally (absolute, so 0 stays "unset").
+// The save writer emits the text verbatim; the loader rebuilds it;
+// restore parses it back into the BwSim. Projectiles, attack
+// cooldowns, selection and scorch marks are transient — never saved.
+static void war_snap_serialize(int pi){
+    BwSim *S = &BWS[pi];
+    char *p = war_snap[pi];
+    p = put_key(p, "wb");
+    p = put_int(p, S->war_region); *p++=','; *p=0;
+    p = put_int(p, S->war_bits); *p++=','; *p=0;
+    p = put_int(p, (int)S->war_t); *p++=','; *p=0;
+    p = put_int(p, (int)(S->war_wavet*10.0f + 0.5f)); *p++=','; *p=0;
+    p = put_int(p, (int)(S->war_camx - WAR_OX)); *p++=','; *p=0;
+    p = put_int(p, (int)(S->war_camy - WAR_OY));
+    { int first=1;   // wu: ALIVE units only, slot-stable (dead slots stay dead — refs in utarget must land)
+      for (int i=0;i<WAR_MAXU;i++){
+          if (S->war_uhp[i]<=0) continue;
+          if (first){ *p++=' '; *p=0; p = put_key(p, "wu"); first=0; } else { *p++=';'; *p=0; }
+          p = put_int(p, i); *p++=','; *p=0;
+          p = put_int(p, S->war_utype[i]); *p++=','; *p=0;
+          p = put_int(p, (int)(S->war_ux[i]-WAR_OX)); *p++=','; *p=0;
+          p = put_int(p, (int)(S->war_uy[i]-WAR_OY)); *p++=','; *p=0;
+          p = put_int(p, (int)S->war_uhp[i]); *p++=','; *p=0;
+          p = put_int(p, S->war_umaxhp[i]); *p++=','; *p=0;
+          p = put_int(p, S->war_ustate[i]); *p++=','; *p=0;
+          p = put_int(p, S->war_utarget[i]); *p++=','; *p=0;
+          p = put_int(p, (int)(S->war_utx[i]-WAR_OX)); *p++=','; *p=0;
+          p = put_int(p, (int)(S->war_uty[i]-WAR_OY)); *p++=','; *p=0;
+          p = put_int(p, S->war_ucarry[i]); *p++=','; *p=0;
+          p = put_int(p, (int)(S->war_uharv[i]*10.0f + 0.5f));
+      } }
+    { int first=1;   // ws: ALIVE structs — queue rides as qlen + the queued types (addendum 2), rally last (addendum 3)
+      for (int s=0;s<WAR_MAXS;s++){
+          if (S->war_shp[s]<=0) continue;
+          if (first){ *p++=' '; *p=0; p = put_key(p, "ws"); first=0; } else { *p++=';'; *p=0; }
+          p = put_int(p, s); *p++=','; *p=0;
+          p = put_int(p, S->war_stype[s]); *p++=','; *p=0;
+          p = put_int(p, S->war_sside[s]); *p++=','; *p=0;
+          p = put_int(p, (int)(S->war_sx[s]-WAR_OX)); *p++=','; *p=0;
+          p = put_int(p, (int)(S->war_sy[s]-WAR_OY)); *p++=','; *p=0;
+          p = put_int(p, (int)S->war_shp[s]); *p++=','; *p=0;
+          p = put_int(p, S->war_smaxhp[s]); *p++=','; *p=0;
+          p = put_int(p, S->war_qlen[s]); *p++=','; *p=0;
+          p = put_int(p, (int)(S->war_qt[s]*10.0f + 0.5f)); *p++=','; *p=0;
+          p = put_int(p, (int)(S->war_scd[s]*10.0f + 0.5f));
+          for (int k=0;k<S->war_qlen[s];k++){ *p++=','; *p=0; p = put_int(p, S->war_queue[s][k]); }
+          *p++=','; *p=0; p = put_int(p, (int)S->war_rallyx[s]);
+          *p++=','; *p=0; p = put_int(p, (int)S->war_rallyy[s]);
+      } }
+    *p++=' '; *p=0; p = put_key(p, "wg");   // bit nodes: every slot, amounts may be 0 — indices matter
+    for (int n=0;n<S->war_nn;n++){
+        if (n){ *p++=';'; *p=0; }
+        p = put_int(p, (int)(S->war_nx[n]-WAR_OX)); *p++=','; *p=0;
+        p = put_int(p, (int)(S->war_ny[n]-WAR_OY)); *p++=','; *p=0;
+        p = put_int(p, S->war_namt[n]);
+    }
+    *p++=' '; *p=0; p = put_key(p, "wt");   // terrain: ALL entries — WAR_TREF aims at these indices
+    for (int t=0;t<S->war_tn;t++){
+        if (t){ *p++=';'; *p=0; }
+        p = put_int(p, (int)(S->war_tx[t]-WAR_OX)); *p++=','; *p=0;
+        p = put_int(p, (int)(S->war_ty[t]-WAR_OY)); *p++=','; *p=0;
+        p = put_int(p, S->war_ttype[t]); *p++=','; *p=0;
+        p = put_int(p, S->war_trad[t]); *p++=','; *p=0;
+        p = put_int(p, (int)S->war_thp[t]); *p++=','; *p=0;
+        p = put_int(p, S->war_tmaxhp[t]);
+    }
+    *p++=' '; *p=0; p = put_key(p, "wf");   // fog: explored-or-visible as a 1200-bit set in 38 u32 words
+    for (int w=0;w<38;w++){
+        if (w){ *p++=','; *p=0; }
+        u32 word=0;
+        for (int b=0;b<32;b++){ int c=w*32+b; if (c<WAR_FOG_W*WAR_FOG_H && S->war_fog[c]) word |= (1u<<b); }
+        p = put_int(p, (int)word);
+    }
+    *p=0;
+    war_snap_on[pi]=1;
+    war_snap_reg[pi]=S->war_region;
+}
+static const char *war_snap_for_save(int pi){   // the save writer's door: refresh from a live battle, then hand over the text (0 = nothing parked)
+    // v1.18: a live battle in a DIFFERENT region than the parked one
+    // must NOT re-serialize over the park — the autosave would
+    // silently evict the saved battle from the file (Daniel's
+    // playtest: SAVE & QUIT, tap a region, fresh fight, saved
+    // fight gone). The parked text is returned as-is instead.
+    if (BWS[pi].war_state==1 && !(war_snap_on[pi] && war_snap_reg[pi]!=BWS[pi].war_region)) war_snap_serialize(pi);
+    return war_snap_on[pi]? war_snap[pi] : 0;
+}
+static const char *war_snap_val(const char *snap, const char *key){
+    int kl = slen(key);
+    const char *s = snap;
+    while (*s){
+        if ((s==snap || s[-1]==' ') && s[0]==key[0]){
+            int ok=1; for (int i=0;i<kl;i++) if (s[i]!=key[i]){ ok=0; break; }
+            if (ok && s[kl]=='=') return s+kl+1;
+        }
+        while (*s && *s!=' ') s++;
+        if (*s==' ') s++;
+    }
+    return 0;
+}
+static int war_rd_int(const char **qp){   // one int, then step over exactly one separator (',' / ';' / ' ')
+    const char *q = *qp;
+    int v = parse_int(q);
+    while (*q && *q!=',' && *q!=';' && *q!=' ') q++;
+    if (*q==',' || *q==';') q++;
+    *qp = q;
+    return v;
+}
+static void war_snap_restore(int pi){
+    BwSim *S = &BWS[pi];
+    const char *snap = war_snap[pi];
+    const char *v;
+    war_clear_field(S);
+    if ((v = war_snap_val(snap, "wb"))){
+        S->war_region = war_rd_int(&v);
+        S->war_bits = war_rd_int(&v);
+        S->war_t = (float)war_rd_int(&v);
+        S->war_wavet = war_rd_int(&v) * 0.1f;
+        S->war_camx = WAR_OX + (float)war_rd_int(&v);
+        S->war_camy = WAR_OY + (float)war_rd_int(&v);
+    }
+    if (S->war_region<0) S->war_region=0; if (S->war_region>7) S->war_region=7;
+    if ((v = war_snap_val(snap, "wu"))){
+        while (*v && *v!=' '){
+            int idx = war_rd_int(&v);
+            int type = war_rd_int(&v);
+            int x = war_rd_int(&v), y = war_rd_int(&v);
+            int hp = war_rd_int(&v), maxhp = war_rd_int(&v);
+            int state = war_rd_int(&v), target = war_rd_int(&v);
+            int tx = war_rd_int(&v), ty = war_rd_int(&v);
+            int carry = war_rd_int(&v), harv = war_rd_int(&v);
+            if (idx>=0 && idx<WAR_MAXU){
+                S->war_utype[idx]=type; S->war_ux[idx]=WAR_OX+(float)x; S->war_uy[idx]=WAR_OY+(float)y;
+                S->war_uhp[idx]=(float)hp; S->war_umaxhp[idx]=maxhp;
+                S->war_ustate[idx]=state; S->war_utarget[idx]=target;
+                S->war_utx[idx]=WAR_OX+(float)tx; S->war_uty[idx]=WAR_OY+(float)ty;
+                S->war_ucarry[idx]=carry; S->war_uharv[idx]=harv*0.1f;
+                S->war_uatk[idx]=0; S->war_usel[idx]=0;
+                S->war_wpn[idx]=0; S->war_wpi[idx]=0; S->war_stallt[idx]=0; S->war_repath[idx]=0;
+                S->war_stallx[idx]=S->war_ux[idx]; S->war_stally[idx]=S->war_uy[idx];
+            }
+        }
+    }
+    if ((v = war_snap_val(snap, "ws"))){
+        while (*v && *v!=' '){
+            int idx = war_rd_int(&v);
+            int type = war_rd_int(&v), side = war_rd_int(&v);
+            int x = war_rd_int(&v), y = war_rd_int(&v);
+            int hp = war_rd_int(&v), maxhp = war_rd_int(&v);
+            int qlen = war_rd_int(&v);
+            int qt = war_rd_int(&v), scd = war_rd_int(&v);
+            int qn = qlen<0? 0 : qlen>9? 9 : qlen;
+            int qt_[9];
+            for (int k=0;k<qn;k++) qt_[k] = war_rd_int(&v);
+            int rx = war_rd_int(&v), ry = war_rd_int(&v);
+            if (idx>=0 && idx<WAR_MAXS){
+                S->war_stype[idx]=type; S->war_sside[idx]=side;
+                S->war_sx[idx]=WAR_OX+(float)x; S->war_sy[idx]=WAR_OY+(float)y;
+                S->war_shp[idx]=(float)hp; S->war_smaxhp[idx]=maxhp;
+                S->war_qlen[idx]=qn;
+                for (int k=0;k<qn;k++) S->war_queue[idx][k]=qt_[k];
+                S->war_qt[idx]=qt*0.1f; S->war_scd[idx]=scd*0.1f;
+                S->war_rallyx[idx]=(float)rx; S->war_rallyy[idx]=(float)ry;
+            }
+        }
+    }
+    if ((v = war_snap_val(snap, "wg"))){
+        int n=0;
+        while (*v && *v!=' ' && n<10){
+            S->war_nx[n]=WAR_OX+(float)war_rd_int(&v);
+            S->war_ny[n]=WAR_OY+(float)war_rd_int(&v);
+            S->war_namt[n]=war_rd_int(&v);
+            n++;
+        }
+        S->war_nn=n;
+    }
+    if ((v = war_snap_val(snap, "wt"))){
+        int t=0;
+        while (*v && *v!=' ' && t<WAR_MAXT){
+            S->war_tx[t]=WAR_OX+(float)war_rd_int(&v);
+            S->war_ty[t]=WAR_OY+(float)war_rd_int(&v);
+            S->war_ttype[t]=war_rd_int(&v);
+            S->war_trad[t]=war_rd_int(&v);
+            S->war_thp[t]=(float)war_rd_int(&v);
+            S->war_tmaxhp[t]=war_rd_int(&v);
+            S->war_tdeadt[t]=0;
+            t++;
+        }
+        S->war_tn=t;
+    }
+    for (int c=0;c<WAR_FOG_W*WAR_FOG_H;c++) S->war_fog[c]=0;
+    if ((v = war_snap_val(snap, "wf"))){
+        for (int w=0;w<38;w++){
+            if (!*v || *v==' ') break;
+            u32 word = (u32)war_rd_int(&v);
+            for (int b=0;b<32;b++){ int c=w*32+b; if (c<WAR_FOG_W*WAR_FOG_H && ((word>>b)&1u)) S->war_fog[c]=1; }
+        }
+    }
+    S->war_state=1; S->war_pause=0; S->war_bcat=-1;
+    S->war_grace=0.35f; S->war_ordt=0; S->war_msgt=0; S->war_endt=0;
+    S->war_ltap_t=-10.0f; S->war_ltap_unit=-1; S->war_drag_id=-1;
+    war_clamp_cam(S);
+    war_fog_update(S);   // stored cells come back explored; this re-marks the visible ones
+    war_note(S, "BATTLE RESTORED. WELCOME BACK, COMMANDER.");
+}
+// --- the pause menu (v1.17) ------------------------------------------
+// Esc in a battle no longer abandons it: the battle freezes behind a
+// three-choice panel — RESUME, RESTART BATTLE, SAVE & QUIT. One set
+// of rects, shared by the renderer and every input path (tap, pad
+// cursor, keys 1-3), so they can never disagree about the buttons.
+static void war_pause_rects(int vx, int vy, int vw2, int vh2, int *px, int *py, int *pw, int *ph){
+    *pw = vw2<420? vw2-24 : 396; *ph = 196;
+    *px = vx+(vw2-*pw)/2; *py = vy+(vh2-*ph)/2 - 10;
+}
+static int war_pause_btn_y(int py, int n){ return py + 56 + n*44; }   // three 36px buttons, 8px apart
+static void war_pause_pick(int pi, int n){
+    BwSim *S = &BWS[pi];
+    if (n==0){ S->war_pause=0; S->war_grace=0.3f; sfx(6); }   // RESUME (the grace keeps the closing press from leaking an order)
+    else if (n==1){   // RESTART BATTLE: this region, fresh, and no snapshot of the old fight survives — unless the park belongs to another region (v1.18 scoping, as in war_win/war_lose)
+        if (!war_snap_on[pi] || war_snap_reg[pi]==S->war_region) war_snap_clear(pi);
+        S->war_pause=0;
+        war_start_battle(pi, S->war_region);
+    } else if (n==2){   // SAVE & QUIT: park the battle, persist, back to the map
+        war_snap_serialize(pi);
+        do_save();
+        S->war_pause=0;
+        war_clear_field(S);
+        S->war_state=0; S->war_grace=0.3f;
+        war_note(S, "BATTLE SAVED. IT WILL WAIT FOR YOU.");
+        sfx(19);
+    }
+}
+static void war_pause_tap(int pi, int sx, int sy){
+    int vx, vy, vw2, vh2; p1_view_rect(&vx, &vy, &vw2, &vh2);
+    int px, py, pw, ph; war_pause_rects(vx, vy, vw2, vh2, &px, &py, &pw, &ph);
+    for (int n=0;n<3;n++){
+        int by = war_pause_btn_y(py, n);
+        if (sx>=px+40 && sx<px+pw-40 && sy>=by && sy<by+36){ war_pause_pick(pi, n); return; }
+    }
+    // a tap outside the panel does nothing: the menu is modal
+}
+// the pad in the pause menu: the cursor flies the frozen field, A
+// presses through war_pause_tap, B resumes — war_pad_update's peel
+// logic stays out of it
+static void war_pad_pause(int pi, float dt){
+    BwSim *S = &BWS[pi];
+    if (pi!=G.my_id) return;
+    int vx, vy, vw2, vh2; p1_view_rect(&vx, &vy, &vw2, &vh2);
+    float lx = war_axis(IN.pad_ax[0]), ly = war_axis(IN.pad_ax[1]);
+    int stick = (IN.pad_ax[0]>0.18f || IN.pad_ax[0]<-0.18f || IN.pad_ax[1]>0.18f || IN.pad_ax[1]<-0.18f);
+    u32 pe = IN.pad_edges;
+    u32 btns = (1u<<ACT_FIRE)|(1u<<ACT_INTERACT);
+    if (!S->war_curon){
+        if (!pad_mode() || !(stick || (pe & btns))) return;
+        S->war_curon = 1;
+        S->war_curx = S->war_camx; S->war_cury = S->war_camy + WAR_BAR_H*0.5f;   // wake at the camera's centre, under the panel
+        if (!stick) return;   // a button wake spends the press on waking
+        pe = 0;
+    }
+    if (lx || ly){ S->war_curx += lx * 540.0f * dt; S->war_cury += ly * 540.0f * dt; }
+    if (S->war_curx < WAR_OX) S->war_curx = WAR_OX;
+    if (S->war_curx > WAR_OX+WAR_AW) S->war_curx = WAR_OX+WAR_AW;
+    if (S->war_cury < WAR_OY) S->war_cury = WAR_OY;
+    if (S->war_cury > WAR_OY+WAR_AH) S->war_cury = WAR_OY+WAR_AH;
+    { float csx = (float)vx + vw2/2 + (S->war_curx - S->war_camx);   // no edge-follow: the camera holds still, the cursor stays on screen
+      float csy = (float)vy + vh2/2 + (S->war_cury - S->war_camy - WAR_BAR_H*0.5f);
+      if (csx < vx) S->war_curx += (vx - csx);
+      if (csx > vx+vw2) S->war_curx -= (csx - (vx+vw2));
+      if (csy < vy) S->war_cury += (vy - csy);
+      if (csy > vy+vh2) S->war_cury -= (csy - (vy+vh2));
+    }
+    if (pe & (1u<<ACT_INTERACT)){ war_pause_pick(pi, 0); return; }   // B = RESUME
+    if ((pe & (1u<<ACT_FIRE)) && S->war_grace<=0){
+        int csx = vx + vw2/2 + (int)(S->war_curx - S->war_camx);
+        int csy = vy + vh2/2 + (int)(S->war_cury - S->war_camy - WAR_BAR_H*0.5f);
+        war_pause_tap(pi, csx, csy);
+    }
+}
+static void war_enter(int pi){
+    BwSim *S = &BWS[pi]; Buddy *b = &G.bud[pi];
+    if (war_snap_on[pi]){   // v1.17: a parked battle resumes instead of the bare map
+        war_snap_restore(pi);
+        war_snap_clear(pi);   // consumed — the live BwSim is authoritative now; later saves re-serialize from it
+        b->x = WAR_OX+800; b->y = WAR_OY+600;   // parked mid-arena; this mode never draws him
+        b->bw_x = b->x; b->bw_y = b->y;
+        return;
+    }
+    war_clear_field(S);
+    S->war_state=0;
+    S->war_map_sel = b->war_prog<8? b->war_prog : 7;
+    S->war_grace=0.35f; S->war_msgt=0; S->war_region=0; S->war_bits=0;
+    b->x = WAR_OX+800; b->y = WAR_OY+600;   // parked mid-arena; this mode never draws him
+    b->bw_x = b->x; b->bw_y = b->y;
+}
+// the command bar: one list of actions, shared by the renderer and
+// the tap handler so they can never disagree about what's on offer.
+// acts: 0 train harvester, 1-3 place patch/zapper/firewall,
+// 4 train melee, 5 train ranged, 6 cancel placement, 7 hold position,
+// 8 train scout, 9 train siege tank, 10 place assembly plant,
+// 11 place gate, 20/21/22 the TRAIN / BUILD / DEFENSE categories.
+// v1.17 (addendum 1): structure contexts are TWO-LEVEL — the bar
+// shows categories; opening one puts its options in a strip directly
+// above the bar. war_bar_list stays the single source: it returns
+// the CURRENT row (the open category's options, else the top level).
+// A building with a single category (Patch Bay, Assembly Plant)
+// starts OPEN — no two-tap tax for a menu of one.
+static int war_cat_items(int st, int cat, int acts[5], int costs[5], const char *names[5]){
+    int n=0;
+    if (cat==0){   // TRAIN
+        if (st==WAR_S_HQ){ acts[n]=0; costs[n]=WAR_TRAIN_COST[0]; names[n]="HARVESTER"; n++; }
+        else if (st==WAR_S_PATCH){ acts[n]=4; costs[n]=WAR_TRAIN_COST[1]; names[n]="WRENCH"; n++;
+                                   acts[n]=5; costs[n]=WAR_TRAIN_COST[2]; names[n]="BOLT"; n++; }
+        else if (st==WAR_S_ASM){ acts[n]=8; costs[n]=WAR_TRAIN_COST[5]; names[n]="SCOUT BUGGY"; n++;
+                                 acts[n]=9; costs[n]=WAR_TRAIN_COST[6]; names[n]="SIEGE TANK"; n++; }
+    } else if (cat==1){   // BUILD
+        if (st==WAR_S_HQ){ acts[n]=1; costs[n]=WAR_BUILD_COST[1]; names[n]="PATCH BAY"; n++;
+                           acts[n]=10; costs[n]=WAR_BUILD_COST[5]; names[n]="ASSEMBLY"; n++; }
+    } else {   // DEFENSE
+        if (st==WAR_S_HQ){ acts[n]=2; costs[n]=WAR_BUILD_COST[2]; names[n]="ZAPPER"; n++;
+                           acts[n]=3; costs[n]=WAR_BUILD_COST[3]; names[n]="FIREWALL"; n++;
+                           acts[n]=11; costs[n]=WAR_BUILD_COST[6]; names[n]="GATE"; n++; }
+    }
+    return n;
+}
+// the category row itself: what the main bar shows while a category
+// is open in the strip above it
+static int war_bar_cats(BwSim *S, int acts[5], int costs[5], const char *names[5]){
+    int n=0;
+    if (S->war_selstruct>=0 && war_struct_alive(S, S->war_selstruct)){
+        int st = S->war_stype[S->war_selstruct];
+        int ta[5], tc[5]; const char *tn[5];
+        for (int c=0;c<3;c++) if (war_cat_items(st, c, ta, tc, tn)>0){
+            acts[n]=20+c; costs[n]=0; names[n]= c==0? "TRAIN" : c==1? "BUILD" : "DEFENSE"; n++;
+        }
+    }
+    return n;
+}
+static int war_bar_list(BwSim *S, int acts[5], int costs[5], const char *names[5]){
+    if (S->war_place>=0){ acts[0]=6; costs[0]=0; names[0]="CANCEL"; return 1; }
+    int n=0;
+    if (S->war_selstruct>=0 && war_struct_alive(S, S->war_selstruct)){
+        int st = S->war_stype[S->war_selstruct];
+        if (S->war_bcat>=0){
+            int m = war_cat_items(st, S->war_bcat, acts, costs, names);
+            if (m>0) return m;
+            S->war_bcat=-1;   // the open category has nothing for this building: fall back to the top level
+        }
+        int nc = war_bar_cats(S, acts, costs, names);
+        if (nc==1){   // a menu of one opens itself
+            S->war_bcat = acts[0]-20;
+            return war_cat_items(st, S->war_bcat, acts, costs, names);
+        }
+        return nc;
+    }
+    if (war_sel_count(S)>0){ acts[n]=7; costs[n]=0; names[n]="HOLD"; n++; }
+    return n;
+}
+static void war_bar_activate(int pi, int slot){
+    BwSim *S = &BWS[pi];
+    int acts[5], costs[5]; const char *names[5];
+    int n = war_bar_list(S, acts, costs, names);
+    if (slot<0 || slot>=n) return;
+    int act = acts[slot], cost = costs[slot];
+    if (act==6){ S->war_place=-1; S->war_bcat=-1; sfx(6); return; }
+    if (act==7){
+        for (int i=0;i<WAR_MAXU;i++)
+            if (S->war_uhp[i]>0 && S->war_usel[i] && S->war_utype[i]!=WAR_U_HARV){ S->war_ustate[i]=0; S->war_utarget[i]=0; }
+        sfx(6); return;
+    }
+    if (act>=20 && act<=22){ S->war_bcat = act-20; sfx(6); return; }   // opening a category costs nothing, trains nothing, builds nothing
+    if (act==0 || act==4 || act==5 || act==8 || act==9){   // TRAIN: pay-to-queue (addendum 2)
+        int s = S->war_selstruct;
+        if (s<0 || !war_struct_alive(S, s)) return;
+        if (S->war_qlen[s]>=9){ sfx(16); war_note(S, "QUEUE FULL (9)."); return; }
+        if (S->war_bits < cost){ sfx(16); war_note(S, "NOT ENOUGH BITS TO QUEUE THAT."); return; }
+        int ut = act==0? WAR_U_HARV : act==4? WAR_U_MELEE : act==5? WAR_U_RANGED : act==8? WAR_U_SCOUT : WAR_U_SIEGE;
+        S->war_bits -= cost;
+        if (S->war_qlen[s]==0) S->war_qt[s]=WAR_TRAIN_TIME[ut];   // an idle building starts its front item NOW — exactly the old feel
+        S->war_queue[s][S->war_qlen[s]++]=ut;
+        sfx(6); return;   // the category stays open: queue the next one
+    }
+    if (S->war_bits < cost){ sfx(16); war_note(S, "NOT ENOUGH BITS! SEND THE HARVESTER OUT."); return; }
+    if (act==10){ S->war_place = WAR_S_ASM; S->war_bcat=-1; sfx(6); war_note(S, "TAP GROUND TO PLACE THE ASSEMBLY PLANT."); return; }
+    S->war_place = act==11? WAR_S_GATE : act;   // acts 1..3 are the struct kinds 1..3; act 11 arms the gate
+    S->war_bcat=-1;   // arming a placement hands the bar to [CANCEL]
+    sfx(6);
+    war_note(S, act==1? "TAP GROUND TO PLACE THE PATCH BAY." : act==2? "TAP GROUND TO PLACE THE ZAPPER TOWER." : act==11? "TAP GROUND TO PLACE THE GATE - YOUR UNITS PASS THROUGH IT. BUGS DON'T." : "TAP GROUND TO PLACE THE FIREWALL.");
+}
+// the property rule (Daniel, Nov 16): you build on your own land.
+// Every friendly structure radiates a property zone — its radius + 76
+// for buildings, + 52 for a firewall segment. Round 3 (Daniel, later
+// that day: "make the build region more generous, and require only
+// that the new build be adjacent to the current area"): a placement
+// is legal when the new structure's FOOTPRINT touches the property —
+// its centre within (zone radius + its own radius) of some friendly
+// structure's centre. The build may sit mostly outside the zone as
+// long as it touches it, and every placed structure extends the
+// property, so a firewall line (or a chain of buildings) can grow
+// outward step by step.
+static float war_zone_rad(int kind){
+    return (kind==WAR_S_WALL || kind==WAR_S_GATE)? (float)WAR_SRAD[kind] + 52.0f : (float)WAR_SRAD[kind] + 76.0f;   // a gate is wall family: it radiates the wall's +52 zone, not a building's +76
+}
+static int war_in_property(BwSim *S, int kind, float x, float y){
+    float own = (float)WAR_SRAD[kind];
+    for (int s=0;s<WAR_MAXS;s++){
+        if (S->war_shp[s]<=0 || S->war_sside[s]!=0) continue;
+        float dx=x-S->war_sx[s], dy=y-S->war_sy[s], rr = war_zone_rad(S->war_stype[s]) + own;
+        if (dx*dx+dy*dy <= rr*rr) return 1;
+    }
+    return 0;
+}
+// physical room only: inside the arena, not on top of anything, not
+// on a bit node. (The property rule is separate, above.)
+static int war_place_space(BwSim *S, int kind, float x, float y){
+    if (x < WAR_OX+36 || x > WAR_OX+WAR_AW-36 || y < WAR_OY+36 || y > WAR_OY+WAR_AH-36) return 0;
+    float rad = (float)WAR_SRAD[kind];
+    for (int s=0;s<WAR_MAXS;s++){
+        if (S->war_shp[s]<=0) continue;
+        float dx=x-S->war_sx[s], dy=y-S->war_sy[s];
+        // firewall segments are meant to stand shoulder to shoulder on
+        // the 24u grid: wall-family on wall-family (walls AND gates,
+        // either way round) only needs its own centre clear — the
+        // full radii sum (13+13+8 = 34) would reject the 24u spacing
+        // a gate in a wall line depends on
+        int wallfam_new = (kind==WAR_S_WALL || kind==WAR_S_GATE);
+        int wallfam_old = (S->war_stype[s]==WAR_S_WALL || S->war_stype[s]==WAR_S_GATE);
+        float rr = (wallfam_new && wallfam_old)? 20.0f
+                 : rad + WAR_SRAD[S->war_stype[s]] + 8.0f;
+        if (dx*dx+dy*dy < rr*rr) return 0;
+    }
+    for (int n=0;n<S->war_nn;n++){
+        if (S->war_namt[n]<=0) continue;
+        float dx=x-S->war_nx[n], dy=y-S->war_ny[n], rr = rad + 26.0f;
+        if (dx*dx+dy*dy < rr*rr) return 0;
+    }
+    for (int t=0;t<S->war_tn;t++){
+        if (S->war_thp[t]<=0) continue;   // cleared ground can be built on
+        float dx=x-S->war_tx[t], dy=y-S->war_ty[t], rr = rad + (float)S->war_trad[t] + 4.0f;
+        if (dx*dx+dy*dy < rr*rr) return 0;
+    }
+    return 1;
+}
+static int war_place_ok(BwSim *S, int kind, float x, float y){
+    return war_place_space(S, kind, x, y) && war_in_property(S, kind, x, y);
+}
+static float war_snap24(float w, float origin){
+    float l = w - origin;
+    return origin + (float)((int)(l/24.0f + 0.5f)) * 24.0f;
+}
+static void war_try_place(int pi, float wx, float wy){
+    BwSim *S = &BWS[pi];
+    int kind = S->war_place, cost = WAR_BUILD_COST[kind];
+    if (S->war_bits < cost){ sfx(16); war_note(S, "NOT ENOUGH BITS!"); S->war_place=-1; S->war_bcat=-1; return; }
+    if (kind==WAR_S_WALL || kind==WAR_S_GATE){ wx = war_snap24(wx, WAR_OX); wy = war_snap24(wy, WAR_OY); }   // wall-family segments align on the grid, so lines (and the doors in them) join up
+    if (!war_place_space(S, kind, wx, wy)){ sfx(16); war_note(S, "NO ROOM THERE!"); return; }
+    if (!war_in_property(S, kind, wx, wy)){ sfx(16); war_note(S, "TOO FAR FROM YOUR BASE - BUILD ON YOUR OWN LAND!"); return; }
+    S->war_bits -= cost;
+    int s = war_spawn_struct(S, kind, 0, wx, wy);
+    S->war_place = -1; S->war_bcat=-1;
+    for (int i=0;i<WAR_MAXU;i++) S->war_usel[i]=0;
+    S->war_selstruct = s;
+    sfx(19);
+    war_note(S, kind==1? "PATCH BAY ONLINE! IT TRAINS FIGHTERS." : kind==2? "ZAPPER TOWER ONLINE!" : kind==5? "ASSEMBLY PLANT ONLINE! IT BUILDS VEHICLES." : kind==6? "GATE UP! YOUR UNITS PASS - BUGS DON'T." : "FIREWALL UP!");
+}
+static void war_select_unit(BwSim *S, int i, int all_of_type){
+    for (int j=0;j<WAR_MAXU;j++) S->war_usel[j]=0;
+    S->war_selstruct = -1; S->war_bcat = -1;   // a selection change closes any open category
+    if (all_of_type){
+        int t = S->war_utype[i];
+        for (int j=0;j<WAR_MAXU;j++){
+            if (S->war_uhp[j]<=0 || S->war_utype[j]!=t) continue;
+            float dx=S->war_ux[j]-S->war_camx, dy=S->war_uy[j]-S->war_camy;
+            if (dx>-360 && dx<360 && dy>-220 && dy<220) S->war_usel[j]=1;   // on screen, with a margin
+        }
+        if (!S->war_usel[i]) S->war_usel[i]=1;
+    } else S->war_usel[i]=1;
+    sfx(6);
+}
+// the third tap of a streak: EVERY combat unit you own — melee,
+// ranged and both vehicles, map-wide. Harvesters stay out of it.
+static void war_select_all_combat(BwSim *S){
+    for (int j=0;j<WAR_MAXU;j++)
+        S->war_usel[j] = (S->war_uhp[j]>0 && war_u_side(S->war_utype[j])==0 && war_u_combat(S->war_utype[j]))? 1 : 0;
+    S->war_selstruct = -1; S->war_bcat = -1;
+    sfx(6);
+}
+static void war_order_move(BwSim *S, float wx, float wy){
+    int ord = 0;
+    for (int i=0;i<WAR_MAXU;i++){
+        if (S->war_uhp[i]<=0 || !S->war_usel[i]) continue;
+        float ox = (float)(ord%4 - 1.5f) * 16.0f, oy = (float)((ord/4)%3 - 1) * 16.0f;
+        ord++;
+        S->war_ustate[i]=1; S->war_utarget[i]=0;
+        S->war_utx[i]=wx+ox; S->war_uty[i]=wy+oy;
+        S->war_wpn[i]=0;   // a fresh order drops any old path (v1.17)
+    }
+}
+static void war_order_attack(BwSim *S, int eref){
+    float tx, ty;
+    if (!war_ref_alive(S, eref, &tx, &ty)) return;
+    for (int i=0;i<WAR_MAXU;i++){
+        if (S->war_uhp[i]<=0 || !S->war_usel[i]) continue;
+        if (S->war_utype[i]==WAR_U_HARV){ S->war_ustate[i]=1; S->war_utx[i]=tx; S->war_uty[i]=ty; }
+        else { S->war_ustate[i]=2; S->war_utarget[i]=eref; }
+        S->war_wpn[i]=0;   // a fresh order drops any old path (v1.17)
+    }
+}
+// the heart of every tap: a point on the battlefield (world coords)
+static void war_tap_world(int pi, float wx, float wy){
+    BwSim *S = &BWS[pi];
+    if (S->war_place>=0){ war_try_place(pi, wx, wy); return; }
+    int bu=-1; float bd=20.0f*20.0f;
+    for (int i=0;i<WAR_MAXU;i++){
+        if (S->war_uhp[i]<=0 || war_u_side(S->war_utype[i])!=0) continue;
+        float dx=wx-S->war_ux[i], dy=wy-S->war_uy[i], d2=dx*dx+dy*dy;
+        if (d2<bd){ bd=d2; bu=i; }
+    }
+    if (bu>=0){
+        // the tap streak (Daniel's ladder): one tap selects the unit,
+        // a second inside the window selects its whole type on screen,
+        // a third escalates to every combat unit you own — and further
+        // taps inside the same streak hold that full selection.
+        int streak = (S->war_ltap_unit==bu && S->war_t - S->war_ltap_t < 0.35f)? S->war_ltap_n + 1 : 1;
+        S->war_ltap_unit=bu; S->war_ltap_t=S->war_t; S->war_ltap_n=streak;
+        if (streak>=3) war_select_all_combat(S);
+        else war_select_unit(S, bu, streak==2);
+        return;
+    }
+    S->war_ltap_unit=-1; S->war_ltap_n=0;   // any other tap ends the streak
+    for (int s=0;s<WAR_MAXS;s++){
+        if (S->war_shp[s]<=0 || S->war_sside[s]!=0) continue;
+        float dx=wx-S->war_sx[s], dy=wy-S->war_sy[s], rr=(float)WAR_SRAD[S->war_stype[s]]+8.0f;
+        if (dx*dx+dy*dy < rr*rr){
+            for (int i=0;i<WAR_MAXU;i++) S->war_usel[i]=0;
+            S->war_selstruct=s; S->war_bcat=-1; sfx(6); return;   // a selection change closes any open category (a lone category reopens itself in the bar)
+        }
+    }
+    int eref=0; float ed=1e18f, edist=1e18f;
+    for (int i=0;i<WAR_MAXU;i++){
+        if (S->war_uhp[i]<=0 || war_u_side(S->war_utype[i])!=1) continue;
+        float dx=wx-S->war_ux[i], dy=wy-S->war_uy[i], d2=dx*dx+dy*dy;
+        if (d2<18.0f*18.0f && d2<ed){ ed=d2; edist=fsqrt(d2); eref=i+1; }
+    }
+    for (int s=0;s<WAR_MAXS;s++){
+        if (S->war_shp[s]<=0 || S->war_sside[s]!=1) continue;
+        float dx=wx-S->war_sx[s], dy=wy-S->war_sy[s], rr=(float)WAR_SRAD[S->war_stype[s]]+8.0f;
+        if (dx*dx+dy*dy < rr*rr){ eref=-(s+1); edist=fsqrt(dx*dx+dy*dy); break; }
+    }
+    // debris (Daniel, Nov 16): a tap on a terrain feature is an attack
+    // order on it — your combat units can clear the field — unless an
+    // enemy unit or structure sits even closer to the tap point.
+    // Harvesters in the selection just walk there, as for any tap.
+    { int fref=0; float fdist=1e18f;
+      for (int t=0;t<S->war_tn;t++){
+          if (S->war_thp[t]<=0) continue;
+          if (S->war_ttype[t]==5) continue;   // v1.18: barriers are NOT attack targets — a tap on one falls through to a plain move order below
+          float dx=wx-S->war_tx[t], dy=wy-S->war_ty[t], rr=(float)S->war_trad[t]+6.0f, d2=dx*dx+dy*dy;
+          if (d2 < rr*rr){ float d=fsqrt(d2); if (d<fdist){ fdist=d; fref=WAR_TREF(t); } }
+      }
+      if (fref && (!eref || fdist < edist)){
+          if (war_sel_count(S)>0){
+              war_order_attack(S, fref);
+              S->war_ordx=wx; S->war_ordy=wy; S->war_ordt=0.5f; sfx(6);
+          }
+          return;
+      } }
+    if (eref){
+        if (war_sel_count(S)>0){
+            war_order_attack(S, eref);
+            S->war_ordx=wx; S->war_ordy=wy; S->war_ordt=0.5f; sfx(6);
+        }
+        return;
+    }
+    if (war_sel_count(S)>0){
+        war_order_move(S, wx, wy);
+        S->war_ordx=wx; S->war_ordy=wy; S->war_ordt=0.5f; sfx(6);
+    } else if (S->war_selstruct>=0){
+        int ss = S->war_selstruct;
+        int st = war_struct_alive(S, ss)? S->war_stype[ss] : -1;
+        if (st==WAR_S_HQ || st==WAR_S_PATCH || st==WAR_S_ASM){
+            // rally point (addendum 3): a field tap with a PRODUCER
+            // selected plants its flag instead of deselecting — the
+            // building stays selected, fresh units walk to the flag
+            S->war_rallyx[ss]=wx; S->war_rallyy[ss]=wy;
+            S->war_ordx=wx; S->war_ordy=wy; S->war_ordt=0.5f;   // the order-marker flash, reused
+            sfx(6);
+        } else { S->war_selstruct=-1; S->war_bcat=-1; sfx(6); }   // a non-producer just deselects, as always
+    }
+}
+static void war_handle_tap(int pi, int sx, int sy){
+    BwSim *S = &BWS[pi];
+    if (S->war_pause){ war_pause_tap(pi, sx, sy); return; }   // v1.17: the pause menu is modal — the tap never reaches the field
+    int vx, vy, vw2, vh2; p1_view_rect(&vx, &vy, &vw2, &vh2);
+    if (S->war_bcat>=0 && sy >= vy+vh2-WAR_BAR_H-WAR_SUB_H && sy < vy+vh2-WAR_BAR_H){
+        // the options strip (addendum 1): it holds the row war_bar_list
+        // describes. WAR_BAR_H is untouched — the world view never
+        // resizes; the strip simply owns these taps while it is drawn.
+        if (sx>=vx && sx<vx+vw2){
+            int rel = sx - vx - 6;
+            int slot = rel/90;
+            if (rel>=0 && slot<5 && (rel%90)<84) war_bar_activate(pi, slot);
+        }
+        return;
+    }
+    if (sy >= vy+vh2-WAR_BAR_H){   // the command bar owns the bottom strip
+        if (sx>=vx && sx<vx+vw2){
+            int rel = sx - vx - 6;
+            int slot = rel/90;
+            if (rel>=0 && slot<5 && (rel%90)<84){
+                if (S->war_bcat>=0){
+                    // a category is open above: the bar row itself IS
+                    // the categories — tapping one switches the strip
+                    int ca[5], cc[5]; const char *cn[5];
+                    int cn2 = war_bar_cats(S, ca, cc, cn);
+                    if (slot<cn2){ S->war_bcat = ca[slot]-20; S->war_barhl=-1; sfx(6); }
+                } else war_bar_activate(pi, slot);
+            }
+        }
+        return;
+    }
+    float wx = S->war_camx + (float)(sx - vx - vw2/2);
+    float wy = S->war_camy + WAR_BAR_H*0.5f + (float)(sy - vy - vh2/2);
+    war_tap_world(pi, wx, wy);
+}
+// Grab-the-world panning (reworked Nov 16, Daniel: the old pan
+// "didn't expect what was actually happening"). The old code anchored
+// on wherever the finger happened to be when the touch crossed the
+// 14px "moved" threshold, so the world trailed the finger by that
+// much on every drag — and on the STICK scheme it never ran at all,
+// leaving the field stick to shove the camera at a fixed 430 u/s
+// through BwIn keys. Now the anchor is the DOWN point (tp x0/y0) and
+// the camera as it stood when the finger landed: cam = anchor -
+// (finger - down), so the world point grabbed stays under the finger
+// from the first pixel, on touch and mouse alike (same channel).
+// Returns 1 while a pan drag owns the field (the caller then skips
+// the key/stick camera pan, so the two never fight).
+static int war_drag_pan(int pi){
+    BwSim *S = &BWS[pi];
+    int found=-1;
+    for (int i=0;i<6;i++){
+        if (!IN.tp[i].active) continue;
+        if (S->war_drag_id>=0 && IN.tp[i].id != S->war_drag_id) continue;   // one drag pointer at a time
+        if (IN.tp[i].zone!=0 && IN.tp[i].zone!=8) continue;                 // field touches only — buttons never pan
+        found=i; break;
+    }
+    if (found<0){ S->war_drag_id=-1; return 0; }
+    int vx, vy, vw2, vh2; p1_view_rect(&vx, &vy, &vw2, &vh2);
+    if (IN.tp[found].y0 >= vy+vh2-WAR_BAR_H){ S->war_drag_id=-1; return 0; }   // drags off the bar don't pan
+    if (S->war_drag_id != IN.tp[found].id){
+        S->war_drag_id = IN.tp[found].id;
+        S->war_drag_cx = S->war_camx; S->war_drag_cy = S->war_camy;
+    }
+    S->war_camx = S->war_drag_cx - (float)(IN.tp[found].x - IN.tp[found].x0);
+    S->war_camy = S->war_drag_cy - (float)(IN.tp[found].y - IN.tp[found].y0);
+    war_clamp_cam(S);
+    return 1;
+}
+static void war_node_pos(int vx, int vy, int vw2, int vh2, int r, int *nx, int *ny){
+    float cx = (float)(vx + vw2/2), cy = (float)(vy + vh2/2 + 14);
+    float a = -PI/2 + (float)r * (PI/4);
+    *nx = (int)(cx + fcos(a) * (float)vw2 * 0.36f);
+    *ny = (int)(cy + fsin(a) * (float)vh2 * 0.295f);
+}
+// v1.18: the ONE door into a battle from the map. A region with a
+// battle parked in it (SAVE & QUIT) RESUMES that battle — before
+// this helper existed, both confirm paths called war_start_battle
+// unconditionally, so the natural player move (walk to the map, tap
+// the region you were fighting) silently started a fresh fight and
+// the autosave then overwrote the parked one in the save file.
+static void war_map_launch(int pi, int r){
+    BwSim *S = &BWS[pi]; Buddy *b = &G.bud[pi];
+    if (war_snap_on[pi] && war_snap_reg[pi]==r){
+        war_snap_restore(pi);   // sets war_state=1 and posts the RESTORED note itself
+        war_snap_clear(pi);     // consumed — the live BwSim is authoritative now
+        return;
+    }
+    if (r <= b->war_prog){ war_start_battle(pi, r); }
+    else { sfx(16); war_note(S, "THAT REGION IS STILL WILD. CONQUER THE ONES BEFORE IT!"); }
+}
+static void war_map_update(int pi, float dt, const BwIn *in){
+    BwSim *S = &BWS[pi];
+    (void)dt;
+    if (in->exit_){ bw_exit(pi, 0); return; }
+    if (S->war_grace > 0) return;
+    if ((in->keys&K_LEFT) || in->up) { S->war_map_sel = (S->war_map_sel+7)%8; sfx(6); }
+    if ((in->keys&K_RIGHT) || in->down) { S->war_map_sel = (S->war_map_sel+1)%8; sfx(6); }
+    if (in->sel || in->interact){
+        war_map_launch(pi, S->war_map_sel);
+        return;
+    }
+    if (pi==G.my_id && IN.tapped){
+        IN.tapped = 0;
+        int vx, vy, vw2, vh2; p1_view_rect(&vx, &vy, &vw2, &vh2);
+        for (int r=0;r<8;r++){
+            int nx, ny; war_node_pos(vx, vy, vw2, vh2, r, &nx, &ny);
+            int dx=IN.tap_x-nx, dy=IN.tap_y-ny;
+            if (dx*dx+dy*dy < 34*34){
+                S->war_map_sel = r;
+                war_map_launch(pi, r);
+                return;
+            }
+        }
+    }
+}
+// --- WAR! on a gamepad (v1.16, Daniel) --------------------------------
+// The pad never had a tap channel, so every WAR! verb — select,
+// order, build, the command bar — was touch/mouse only; a pad could
+// pan and nothing more. The fix is a cursor that IS a finger: the
+// left stick flies it, A presses it through war_handle_tap itself
+// (so the double/triple-tap muster ladder falls out of the existing
+// streak code), B peels one layer back, LB/RB walk the command bar.
+// Last device wins, as everywhere in this game: a real tap retires
+// the cursor, and any pad input summons it again. P1 only — P2 keeps
+// its pan + centre-tap.
+static float war_axis(float a){   // deadzone 0.18, rescaled past it so a gentle push is a gentle fly
+    float m = a<0? -a : a;
+    if (m<=0.18f) return 0;
+    float r = (m-0.18f)/0.82f; if (r>1.0f) r=1.0f;
+    return a<0? -r : r;
+}
+static void war_pad_update(int pi, float dt){
+    BwSim *S = &BWS[pi];
+    if (pi!=G.my_id) return;
+    int vx, vy, vw2, vh2; p1_view_rect(&vx, &vy, &vw2, &vh2);
+    float lx = war_axis(IN.pad_ax[0]), ly = war_axis(IN.pad_ax[1]);
+    float rx = war_axis(IN.pad_ax[2]), ry = war_axis(IN.pad_ax[3]);
+    int stick = (IN.pad_ax[0]>0.18f || IN.pad_ax[0]<-0.18f || IN.pad_ax[1]>0.18f || IN.pad_ax[1]<-0.18f
+              || IN.pad_ax[2]>0.18f || IN.pad_ax[2]<-0.18f || IN.pad_ax[3]>0.18f || IN.pad_ax[3]<-0.18f);
+    u32 pe = IN.pad_edges;
+    u32 btns = (1u<<ACT_FIRE)|(1u<<ACT_INTERACT)|(1u<<ACT_WPREV)|(1u<<ACT_WNEXT);
+    if (!S->war_curon){
+        if (!pad_mode() || !(stick || (pe & btns))) return;
+        S->war_curon = 1;
+        // spawn on the first selected unit, else at the camera's centre
+        int si=-1;
+        for (int i=0;i<WAR_MAXU;i++) if (S->war_uhp[i]>0 && S->war_usel[i]){ si=i; break; }
+        if (si>=0){ S->war_curx = S->war_ux[si]; S->war_cury = S->war_uy[si]; }
+        else { S->war_curx = S->war_camx; S->war_cury = S->war_camy + WAR_BAR_H*0.5f; }
+        if (!stick) return;   // a button wake spends the press on waking; it does not also tap
+        pe = 0;               // a stick wake still flies this frame, but its buttons wait
+    }
+    // the bar highlight belongs to one structure's selection; any
+    // change of selection — from any device — retires it
+    if (S->war_barhl_s != S->war_selstruct){ S->war_barhl = -1; S->war_barhl_s = S->war_selstruct; }
+    // left stick: the cursor flies (and retires the bar highlight —
+    // A goes back to pressing the field)
+    if (lx || ly){
+        S->war_curx += lx * 540.0f * dt;
+        S->war_cury += ly * 540.0f * dt;
+        S->war_barhl = -1;
+    }
+    // right stick: pan the camera at key speed; the cursor keeps its
+    // SCREEN spot, so its world coords ride along with the pan
+    if (rx || ry){
+        float ox = S->war_camx, oy = S->war_camy;
+        S->war_camx += rx * 430.0f * dt;
+        S->war_camy += ry * 430.0f * dt;
+        war_clamp_cam(S);
+        S->war_curx += S->war_camx - ox;
+        S->war_cury += S->war_camy - oy;
+    }
+    // world clamp first; then the camera edge-follows a cursor that
+    // pushes to within 28u of the view's edge; then the cursor is
+    // clamped back onto the screen (a key/d-pad pan can strand it)
+    if (S->war_curx < WAR_OX) S->war_curx = WAR_OX;
+    if (S->war_curx > WAR_OX+WAR_AW) S->war_curx = WAR_OX+WAR_AW;
+    if (S->war_cury < WAR_OY) S->war_cury = WAR_OY;
+    if (S->war_cury > WAR_OY+WAR_AH) S->war_cury = WAR_OY+WAR_AH;
+    { float csx = (float)vx + vw2/2 + (S->war_curx - S->war_camx);
+      float csy = (float)vy + vh2/2 + (S->war_cury - S->war_camy - WAR_BAR_H*0.5f);
+      if (csx < vx+28) S->war_camx -= (vx+28 - csx);
+      if (csx > vx+vw2-28) S->war_camx += (csx - (vx+vw2-28));
+      if (csy < vy+28) S->war_camy -= (vy+28 - csy);
+      if (csy > vy+vh2-28) S->war_camy += (csy - (vy+vh2-28));   // the bottom margin sits inside the bar strip, so dropping into the bar itself never pans — only pushing off the screen's edge does
+      war_clamp_cam(S);
+      csx = (float)vx + vw2/2 + (S->war_curx - S->war_camx);
+      csy = (float)vy + vh2/2 + (S->war_cury - S->war_camy - WAR_BAR_H*0.5f);
+      if (csx < vx) S->war_curx += (vx - csx);
+      if (csx > vx+vw2) S->war_curx -= (csx - (vx+vw2));
+      if (csy < vy) S->war_cury += (vy - csy);
+      if (csy > vy+vh2) S->war_cury -= (csy - (vy+vh2));
+    }
+    // LB / RB walk the selected structure's command bar
+    if (S->war_selstruct>=0 && (pe & ((1u<<ACT_WPREV)|(1u<<ACT_WNEXT)))){
+        int acts[5], costs[5]; const char *names[5];
+        int n = war_bar_list(S, acts, costs, names);
+        if (n>0){
+            int dir = (pe & (1u<<ACT_WNEXT))? 1 : -1;
+            S->war_barhl = S->war_barhl<0? (dir>0? 0 : n-1) : (S->war_barhl + dir + n) % n;
+            sfx(6);
+        }
+    }
+    // B peels one layer: a pending placement, then an open
+    // category (v1.17), then the bar highlight, then the selection
+    // itself. A single-category building's menu reopens itself, so
+    // there B skips the category step and deselects as it always did.
+    if (pe & (1u<<ACT_INTERACT)){
+        int ca[5], cc[5]; const char *cn[5];
+        if (S->war_place>=0){ S->war_place = -1; S->war_bcat = -1; sfx(6); }
+        else if (S->war_bcat>=0 && war_bar_cats(S, ca, cc, cn)>1){ S->war_bcat = -1; S->war_barhl = -1; sfx(6); }
+        else if (S->war_barhl>=0){ S->war_barhl = -1; }
+        else { for (int i=0;i<WAR_MAXU;i++) S->war_usel[i]=0; S->war_selstruct = -1; S->war_bcat = -1; sfx(6); }
+    }
+    // A: the finger comes down — on the lit bar button if one is
+    // lit, else on the field at the cursor, through the very same
+    // door a real tap uses (same grace gate, same streak ladder)
+    if ((pe & (1u<<ACT_FIRE)) && S->war_grace<=0){
+        if (S->war_barhl>=0){ int hl = S->war_barhl; S->war_barhl = -1; war_bar_activate(pi, hl); }
+        else {
+            int csx = vx + vw2/2 + (int)(S->war_curx - S->war_camx);
+            int csy = vy + vh2/2 + (int)(S->war_cury - S->war_camy - WAR_BAR_H*0.5f);
+            war_handle_tap(pi, csx, csy);
+        }
+    }
+}
+static void war_update(int pi, float dt, const BwIn *in){
+    BwSim *S = &BWS[pi]; Buddy *b = &G.bud[pi];
+    if (S->war_msgt > 0) S->war_msgt -= dt;
+    if (S->war_grace > 0) S->war_grace -= dt;
+    if (S->war_state==0){ war_map_update(pi, dt, in); return; }
+    if (S->war_state==2 || S->war_state==3){
+        S->war_endt -= dt;
+        if (pi==G.my_id && IN.tapped){ IN.tapped=0; if (S->war_endt > 0.4f) S->war_endt = 0.4f; }
+        if (S->war_endt <= 0){
+            war_clear_field(S);
+            S->war_state=0; S->war_map_sel = b->war_prog<8? b->war_prog : 7; S->war_grace=0.3f;
+        }
+        return;
+    }
+    if (S->war_pause){   // v1.17: the battle holds its breath — only the pause menu's inputs run; war_t, waves, units and structures all stay frozen
+        if (in->exit_){ S->war_pause=0; S->war_grace=0.3f; sfx(6); return; }   // Esc again = RESUME
+        if (pi==G.my_id){
+            if (IN.tapped){ IN.tapped=0; war_pause_tap(pi, IN.tap_x, IN.tap_y); }
+            if (IN.weapon_key>=1 && IN.weapon_key<=3){ int k=IN.weapon_key; IN.weapon_key=0; war_pause_pick(pi, k-1); }
+        }
+        war_pad_pause(pi, dt);
+        return;
+    }
+    S->war_t += dt;
+    for (int t=0;t<S->war_tn;t++) if (S->war_tdeadt[t] > 0) S->war_tdeadt[t] -= dt;   // scorch marks fade
+    if (in->exit_){   // Esc in a battle (v1.17): the pause menu — RESUME / RESTART / SAVE & QUIT — not an abandonment
+        S->war_pause=1; sfx(6);
+        return;
+    }
+    int dragging = (pi==G.my_id)? war_drag_pan(pi) : 0;
+    if (!dragging){   // a field drag owns the camera; keys/stick pan only when no drag does
+        int kx=0, ky=0;
+        if (in->keys&K_LEFT) kx-=1; if (in->keys&K_RIGHT) kx+=1;
+        if (in->keys&K_UP) ky-=1; if (in->keys&K_DOWN) ky+=1;
+        if (kx || ky){ S->war_camx += (float)kx*430.0f*dt; S->war_camy += (float)ky*430.0f*dt; war_clamp_cam(S); }
+    }
+    if (pi==G.my_id && IN.tapped){
+        S->war_curon=0;   // a real tap: the finger/mouse takes the field back (last device wins)
+        if (S->war_grace<=0){ IN.tapped=0; war_handle_tap(pi, IN.tap_x, IN.tap_y); }
+    }
+    else if (pi!=G.my_id && in->interact && S->war_grace<=0) war_tap_world(pi, S->war_camx, S->war_camy);
+    if (pi==G.my_id && IN.weapon_key>=1 && IN.weapon_key<=5){ war_bar_activate(pi, IN.weapon_key-1); IN.weapon_key=0; }
+    war_pad_update(pi, dt);
+    S->war_wavet -= dt;
+    if (S->war_wavet <= 0){
+        S->war_wavet = war_wave_dt(S->war_region);
+        int sent = 0;
+        for (int s=0;s<WAR_MAXS;s++)
+            if (S->war_shp[s]>0 && S->war_stype[s]==WAR_S_HIVE){
+                int k = 2 + (S->war_region>=4? 1:0);
+                for (int j=0;j<k;j++) war_spawn_bug(S, s, 1);
+                sent = 1;
+            }
+        if (sent) war_note(S, "THE HIVE SENDS A WAVE!");
+    }
+    for (int s=0;s<WAR_MAXS;s++) if (S->war_shp[s]>0) war_struct_update(pi, s, dt);
+    for (int i=0;i<WAR_MAXU;i++) if (S->war_uhp[i]>0) war_unit_update(pi, i, dt);
+    war_separate(S);
+    war_proj_update(pi, dt);
+    war_fog_update(S);
+    if (S->war_ordt > 0) S->war_ordt -= dt;
+}
+static void war_hp_bar(int x, int y, int w, float f, int enemy){
+    if (f<0) f=0; if (f>1) f=1;
+    rect_fill(x, y, w, 3, COL(24,20,28));
+    rect_fill(x, y, (int)(w*f), 3, enemy? COL(255,110,90) : COL(120,230,90));
+}
+static void war_render_map(int pi, int vx, int vy, int vw2, int vh2){
+    BwSim *S = &BWS[pi]; Buddy *b = &G.bud[pi];
+    rect_fill(vx, vy, vw2, vh2, COL(12,10,24));
+    for (int i=0;i<40;i++){
+        u32 h = hash2(i*7+1, i*13+5, 0x5EEDu);
+        int sx = vx + (int)(h % (u32)(vw2>0? vw2 : 1)), sy = vy + (int)((h>>9) % (u32)(vh2>0? vh2 : 1));
+        pset(sx, sy, COL(70,66,100));
+    }
+    draw_text_center(vx+vw2/2, vy+14, "WAR!", 3, COL(255,120,90));
+    draw_text_center(vx+vw2/2, vy+42, "CONQUER THE EIGHT REGIONS", 1, COL(200,210,230));
+    int cx = vx+vw2/2, cy = vy+vh2/2+8;
+    for (int r=0;r<8;r++){
+        int nx, ny; war_node_pos(vx, vy, vw2, vh2, r, &nx, &ny);
+        line_thick(cx, cy, nx, ny, 1, r < b->war_prog? REGION_GA[r] : COL(52,48,78));
+    }
+    disc_fill(cx, cy, 10, COL(255,90,70)); disc_fill(cx, cy, 5, COL(255,200,120));
+    draw_text_center(cx, cy+13, "EPICENTER", 1, COL(255,170,150));
+    for (int r=0;r<8;r++){
+        int nx, ny; war_node_pos(vx, vy, vw2, vh2, r, &nx, &ny);
+        int done = r < b->war_prog, frontier = r == b->war_prog;
+        if (frontier){
+            int pr = 27 + (int)(fsin(G.anim_t*4.0f)*2.5f);
+            circle_out(nx, ny, pr, COL(255,240,200));
+        }
+        if (war_snap_on[pi] && war_snap_reg[pi]==r){   // v1.18: a battle is parked HERE — tapping this node resumes it, and the player must be able to see that
+            int pr2 = 34 + (int)(fsin(G.anim_t*4.0f + 1.5f)*3.0f);
+            circle_out(nx, ny, pr2, COL(140,255,170));
+            draw_text_center(nx, ny+44, "IN PROGRESS", 1, COL(160,255,190));
+        }
+        if (r == S->war_map_sel) circle_out(nx, ny, 31, COL(255,220,90));
+        disc_fill(nx, ny, 24, done? REGION_GA[r] : frontier? col_shade(REGION_GA[r], 0.75f) : COL(52,50,66));
+        circle_out(nx, ny, 24, done || frontier? col_shade(REGION_GA[r], 0.6f) : COL(84,80,104));
+        if (done){
+            line_thick(nx-8, ny, nx-2, ny+7, 2, COL(20,30,20));
+            line_thick(nx-2, ny+7, nx+9, ny-8, 2, COL(20,30,20));
+        } else if (!frontier){
+            rect_fill(nx-6, ny-2, 12, 9, COL(120,116,140));
+            rect_fill(nx-4, ny-8, 8, 6, COL(120,116,140));
+            disc_fill(nx, ny+2, 2, COL(40,38,54));
+        } else {
+            char nb[4]; char *q=nb; q=sapp_int(q, r+1); *q=0;
+            draw_text_center(nx, ny-7, nb, 2, COL(16,16,24));
+        }
+        static const char *SHORT[8] = { "MEADOWS", "SPAGHETTI", "LEGACY", "BADLANDS", "CACHE FIELDS", "RAM FLATS", "CABLE JUNGLE", "THE DEPTHS" };
+        draw_text_center_fit(nx, r==4? ny-40 : ny+30, 150, SHORT[r], 1,
+                             done? col_shade(REGION_GA[r], 1.25f) : frontier? COL(240,244,250) : COL(110,106,130));
+    }
+    { char buf[48]; char *q=buf; q=sappend(q, "REGIONS CONQUERED: "); q=sapp_int(q, b->war_prog); q=sappend(q, " / 8"); *q=0;
+      draw_text_center(vx+vw2/2, vy+vh2-34, buf, 1, COL(255,220,120)); }
+    if (b->war_prog>=8) draw_text_center(vx+vw2/2, vy+vh2-19, "ALL REGIONS CONQUERED! TAP ANY REGION TO FIGHT IT AGAIN.", 1, COL(200,230,200));
+    else draw_text_center(vx+vw2/2, vy+vh2-19, mobile_ui()? "TAP A REGION TO INVADE IT" : "TAP A REGION - OR ARROWS + SPACE", 1, COL(150,160,185));
+    if (S->war_msgt>0) draw_text_center(vx+vw2/2, vy+58, S->war_msg, 1, COL(255,170,150));
+}
+static void war_draw_bar_btn(BwSim *S, int bx, int by, int act, int cost, const char *name, int hl){
+    int afford = S->war_bits >= cost;
+    if ((act==0 || act==4 || act==5 || act==8 || act==9) && S->war_selstruct>=0 && S->war_qlen[S->war_selstruct]>=9) afford = 0;   // a full queue greys its train buttons out (addendum 2)
+    u32 fill = afford? COL(38,44,60) : COL(26,26,34);
+    u32 edge = afford? COL(198,164,84) : COL(70,66,84);
+    if (act>=20 && act<=22 && act-20==S->war_bcat){ fill = COL(56,64,88); edge = COL(255,220,120); }   // the open category, lit
+    rect_fill(bx, by+6, 84, 34, fill);
+    rect_line(bx, by+6, 84, 34, edge);
+    draw_text_center(bx+42, by+11, name, 1, afford? COL(240,244,250) : COL(130,126,150));
+    if (cost>0){
+        char cb[16]; char *q=cb; q=sapp_int(q, cost); q=sappend(q, " BITS"); *q=0;
+        draw_text_center(bx+42, by+24, cb, 1, afford? COL(255,205,40) : COL(120,110,90));
+    } else if (act>=20 && act<=22) draw_text_center(bx+42, by+24, act-20==S->war_bcat? "OPEN" : "PICK", 1, COL(160,170,190));
+    else draw_text_center(bx+42, by+24, act==6? "STOP" : "FREE", 1, COL(160,170,190));
+    // a train button carries the building's QUEUE (addendum 2): the
+    // front item's progress tick plus the depth in the corner
+    if ((act==0 || act==4 || act==5 || act==8 || act==9) && S->war_selstruct>=0 && S->war_qlen[S->war_selstruct]>0){
+        int ut = S->war_queue[S->war_selstruct][0];
+        float f = 1.0f - S->war_qt[S->war_selstruct] / WAR_TRAIN_TIME[ut];
+        if (f<0) f=0; if (f>1) f=1;
+        rect_fill(bx+4, by+36, 76, 3, COL(20,18,30));
+        rect_fill(bx+4, by+36, (int)(76*f), 3, COL(120,230,90));
+        char qb[8]; char *q=qb; *q++='x'; q=sapp_int(q, S->war_qlen[S->war_selstruct]); *q=0;
+        draw_text(bx+84-text_w(qb,1)-2, by+8, qb, 1, COL(160,255,190));
+    }
+    if (hl){   // the pad's LB/RB highlight (v1.16): a bright double frame — A presses THIS button
+        rect_line(bx-2, by+4, 88, 38, COL(255,240,160));
+        rect_line(bx, by+6, 84, 34, COL(255,240,160));
+    }
+}
+static void war_render_bar(int pi, int vx, int vy, int vw2, int vh2){
+    BwSim *S = &BWS[pi];
+    int by = vy + vh2 - WAR_BAR_H;
+    rect_fill(vx, by, vw2, WAR_BAR_H, COL(14,13,22));
+    rect_fill(vx, by, vw2, 2, COL(52,48,74));
+    int acts[5], costs[5]; const char *names[5];
+    int n = war_bar_list(S, acts, costs, names);
+    if (S->war_bcat>=0 && S->war_place<0){
+        // two rows (addendum 1): the open category's options in the
+        // strip directly above the bar, the categories in the bar
+        // itself. The pad highlight walks the OPTIONS (the current
+        // row), so it is drawn up there; WAR_BAR_H never changes.
+        int sy2 = by - WAR_SUB_H;
+        rect_fill(vx, sy2, vw2, WAR_SUB_H, COL(18,17,28));
+        rect_fill(vx, sy2, vw2, 2, COL(52,48,74));
+        for (int i=0;i<n;i++) war_draw_bar_btn(S, vx + 6 + i*90, sy2, acts[i], costs[i], names[i], i==S->war_barhl);
+        { const char *cl = S->war_bcat==0? "TRAIN" : S->war_bcat==1? "BUILD" : "DEFENSE";
+          int ix = vx + 6 + n*90 + 10;
+          if (ix + text_w(cl,1) < vx+vw2) draw_text(ix, sy2+17, cl, 1, COL(255,220,120)); }
+        int ca[5], cc[5]; const char *cn[5];
+        int cn2 = war_bar_cats(S, ca, cc, cn);
+        for (int i=0;i<cn2;i++) war_draw_bar_btn(S, vx + 6 + i*90, by, ca[i], cc[i], cn[i], 0);
+    } else {
+        for (int i=0;i<n;i++) war_draw_bar_btn(S, vx + 6 + i*90, by, acts[i], costs[i], names[i], i==S->war_barhl);
+    }
+    if (vw2 >= VW){   // the info zone only earns its keep at full width
+        int ix = vx + 6 + n*90 + 10;
+        if (S->war_place>=0) draw_text(ix, by+17, "TAP GROUND TO PLACE IT", 1, COL(255,220,150));
+        else if (S->war_selstruct>=0 && war_struct_alive(S, S->war_selstruct)){
+            int s = S->war_selstruct;
+            static const char *SN[7] = { "COMPILER CORE", "PATCH BAY", "ZAPPER TOWER", "FIREWALL", "BUG HIVE", "ASSEMBLY PLANT", "GATE" };
+            char buf[56]; char *q=buf; q=sappend(q, SN[S->war_stype[s]]); q=sappend(q, "  ");
+            q=sapp_int(q, (int)S->war_shp[s]); q=sappend(q, "/"); q=sapp_int(q, S->war_smaxhp[s]);
+            if (S->war_qlen[s]>0){ q=sappend(q, "  TRAINING x"); q=sapp_int(q, S->war_qlen[s]); }
+            *q=0;
+            draw_text(ix, by+17, buf, 1, COL(200,214,220));
+        }
+        else if (war_sel_count(S)>0){
+            char buf[48]; char *q=buf; q=sapp_int(q, war_sel_count(S)); q=sappend(q, " SELECTED - TAP GROUND: MOVE, TAP A BUG: ATTACK"); *q=0;
+            draw_text(ix, by+17, buf, 1, COL(200,230,200));
+        }
+        else draw_text(ix, by+17, "TAP A BUDDY OR A BUILDING", 1, COL(150,160,185));
+    }
+}
+static void war_draw_struct(BwSim *S, int s){
+    float x = S->war_sx[s], y = S->war_sy[s];
+    int type = S->war_stype[s];
+    int sx = SX(x), sy = SY(y);
+    int rad = WAR_SRAD[type];
+    ellipse_fill(sx, sy + rad*3/4, rad, rad/3, COL(16,14,24));
+    if (S->war_selstruct == s)   // a selection disc BEHIND the body: a green rim (circle_out fills, so it must go first)
+        disc_fill(sx, sy, rad + 5 + (int)(fsin(G.anim_t*5.0f)*1.5f), COL(140,255,140));
+    if (type==WAR_S_HQ){
+        rect_fill(sx-30, sy-26, 60, 52, COL(52,58,78)); rect_line(sx-30, sy-26, 60, 52, COL(120,140,180));
+        rect_fill(sx-30, sy-26, 60, 8, COL(70,80,110));
+        int pr = 10 + (int)(fsin(G.anim_t*2.4f)*1.5f);
+        disc_fill(sx, sy+2, pr+4, COL(30,90,110));
+        disc_fill(sx, sy+2, pr, COL(110,235,255));
+        disc_fill(sx-3, sy-1, 3, COL(240,255,255));
+        rect_fill(sx-2, sy-40, 3, 14, COL(120,140,180));
+        disc_fill(sx, sy-42, 3, COL(255,120,90));
+        draw_text_center(sx, sy+32, "COMPILER CORE", 1, COL(200,230,255));
+    } else if (type==WAR_S_PATCH){
+        rect_fill(sx-24, sy-16, 48, 34, COL(88,98,118)); rect_line(sx-24, sy-16, 48, 34, COL(160,170,200));
+        rect_fill(sx-24, sy-16, 48, 7, COL(240,170,60));
+        line_thick(sx-8, sy+8, sx+6, sy-6, 3, COL(220,226,235));
+        disc_fill(sx+9, sy-9, 4, COL(220,226,235));
+        draw_text_center(sx, sy+24, "PATCH BAY", 1, COL(220,228,240));
+    } else if (type==WAR_S_ZAP){
+        rect_fill(sx-11, sy+2, 22, 10, COL(70,76,96)); rect_line(sx-11, sy+2, 22, 10, COL(140,150,180));
+        rect_fill(sx-2, sy-16, 4, 18, COL(120,130,160));
+        u32 orb = S->war_scd[s] > 0.4f? COL(255,255,255) : COL(120,220,255);
+        disc_fill(sx, sy-20, 7, orb); disc_fill(sx, sy-20, 3, COL(230,250,255));
+        draw_text_center(sx, sy+18, "ZAPPER", 1, COL(200,230,255));
+    } else if (type==WAR_S_WALL){
+        // segments on the 24u grid join into ONE barrier (Daniel,
+        // Nov 16): a centre tile plus an arm toward every friendly
+        // firewall segment a grid step away, so runs, columns and
+        // corners all read as a single wall.
+        int armE=0, armW=0, armN=0, armS=0;
+        for (int o=0;o<WAR_MAXS;o++){
+            if (o==s || S->war_shp[o]<=0 || S->war_stype[o]!=WAR_S_WALL) continue;
+            float dx=S->war_sx[o]-x, dy=S->war_sy[o]-y;
+            if (dy>-4.0f && dy<4.0f){ if (dx>20.0f && dx<28.0f) armE=1; else if (dx<-20.0f && dx>-28.0f) armW=1; }
+            else if (dx>-4.0f && dx<4.0f){ if (dy>20.0f && dy<28.0f) armS=1; else if (dy<-20.0f && dy>-28.0f) armN=1; }
+        }
+        if (armW) rect_fill(sx-24, sy-7, 24, 14, COL(196,92,44));
+        if (armE) rect_fill(sx, sy-7, 24, 14, COL(196,92,44));
+        if (armN) rect_fill(sx-7, sy-24, 14, 24, COL(196,92,44));
+        if (armS) rect_fill(sx-7, sy, 14, 24, COL(196,92,44));
+        rect_fill(sx-13, sy-7, 26, 14, COL(196,92,44)); rect_line(sx-13, sy-7, 26, 14, COL(255,170,80));
+        for (int f=0; f<3; f++){
+            int fx = sx-11 + f*10, fh = 5 + (int)(fsin(G.anim_t*9.0f + (float)(s*7+f*3))*2.0f);
+            tri_fill(fx-4, sy-7, fx+4, sy-7, fx, sy-7-fh, COL(255,170,60));
+        }
+        if (!armE && !armW && !armN && !armS) draw_text_center(sx, sy+14, "FIREWALL", 1, COL(255,200,150));
+    } else if (type==WAR_S_GATE){
+        // the gate (addendum 1): two gold posts and the energy panel
+        // between them. The panel brightens while any of YOUR units
+        // stands close — the door is open — and dims when the field
+        // is clear. Bugs only ever see it shut.
+        int open = 0;
+        for (int i=0;i<WAR_MAXU;i++){
+            if (S->war_uhp[i]<=0 || war_u_side(S->war_utype[i])!=0) continue;
+            float dx=S->war_ux[i]-x, dy=S->war_uy[i]-y;
+            if (dx*dx+dy*dy < 30.0f*30.0f){ open=1; break; }
+        }
+        blend_rect(sx-11, sy-9, 22, 18, COL(255,205,80), open? 170 : 90);
+        rect_fill(sx-13, sy-11, 4, 22, COL(120,90,20)); rect_line(sx-13, sy-11, 4, 22, COL(255,205,80));
+        rect_fill(sx+9, sy-11, 4, 22, COL(120,90,20)); rect_line(sx+9, sy-11, 4, 22, COL(255,205,80));
+        disc_fill(sx-11, sy-13, 3, COL(255,205,80)); disc_fill(sx+11, sy-13, 3, COL(255,205,80));
+        draw_text_center(sx, sy+16, "GATE", 1, COL(255,225,150));
+    } else if (type==WAR_S_ASM){
+        rect_fill(sx-26, sy-14, 52, 32, COL(96,88,110)); rect_line(sx-26, sy-14, 52, 32, COL(170,160,190));
+        rect_fill(sx-26, sy-14, 52, 7, COL(90,160,220));
+        rect_fill(sx+14, sy-26, 8, 12, COL(70,64,88)); rect_line(sx+14, sy-26, 8, 12, COL(140,132,160));
+        disc_fill(sx-8, sy+3, 8, COL(52,48,66)); disc_fill(sx-8, sy+3, 4, COL(200,205,220));
+        line_thick(sx-8, sy-5, sx-8, sy+11, 2, COL(200,205,220)); line_thick(sx-16, sy+3, sx, sy+3, 2, COL(200,205,220));
+        rect_fill(sx+6, sy-2, 12, 10, COL(255,205,40)); rect_line(sx+6, sy-2, 12, 10, COL(120,90,20));
+        draw_text_center(sx, sy+26, "ASSEMBLY", 1, COL(220,228,240));
+    } else {   // the HIVE
+        int strain = REGION_BUG[S->war_region]>=0? REGION_BUG[S->war_region] : 0;
+        u32 hc = col_shade(BUG_COL[strain], 0.8f);
+        ellipse_fill(sx, sy+6, 30, 20, hc);
+        ellipse_fill(sx, sy-4, 22, 16, col_shade(BUG_COL[strain], 0.95f));
+        for (int k=0;k<5;k++){
+            int kx = sx-20 + k*10;
+            tri_fill(kx-4, sy-14, kx+4, sy-14, kx, sy-26-((k%2)? 4:0), col_shade(BUG_COL[strain], 0.6f));
+        }
+        int pr = 6 + (int)(fsin(G.anim_t*3.0f + (float)s)*1.5f);
+        disc_fill(sx, sy-2, pr, BUG_BELLY[strain]);
+        disc_fill(sx-9, sy-8, 3, COL(24,16,30)); disc_fill(sx+9, sy-8, 3, COL(24,16,30));
+        draw_text_center(sx, sy+32, "BUG HIVE", 1, COL(255,190,170));
+    }
+    if (S->war_shp[s] < S->war_smaxhp[s])
+        war_hp_bar(sx - rad, sy - rad - 12, rad*2, S->war_shp[s] / (float)S->war_smaxhp[s], S->war_sside[s]);
+}
+static void war_draw_unit(BwSim *S, Buddy *b, int i){
+    float x = S->war_ux[i], y = S->war_uy[i];
+    int type = S->war_utype[i];
+    int sx = SX(x), sy = SY(y);
+    int veh = (type==WAR_U_SCOUT || type==WAR_U_SIEGE);
+    if (S->war_usel[i]) circle_out(sx, sy+4, type==WAR_U_SIEGE? 20 : type==WAR_U_SCOUT? 15 : 12, COL(140,255,140));
+    ellipse_fill(sx, sy+6, veh? (type==WAR_U_SIEGE? 17:13) : 8, 3, COL(16,14,24));
+    if (war_u_side(type)==0){
+        u32 coat = bud_coat(b, WAR_SPCOL[b->species % BUDN]);
+        int bob = (S->war_ustate[i]!=0)? ((int)(G.anim_t*9.0f + (float)i*1.7f) & 1) : 0;
+        if (type==WAR_U_SCOUT){
+            // the scout buggy: light frame, four wheels, the driver's
+            // head up top and a little pop-gun out front
+            disc_fill(sx-8, sy+5, 3, COL(24,22,30)); disc_fill(sx+8, sy+5, 3, COL(24,22,30));
+            disc_fill(sx-8, sy-5, 3, COL(24,22,30)); disc_fill(sx+8, sy-5, 3, COL(24,22,30));
+            rect_fill(sx-11, sy-5, 22, 11, col_shade(coat, 0.9f)); rect_line(sx-11, sy-5, 22, 11, col_shade(coat, 0.6f));
+            disc_fill(sx-2, sy-3-bob, 5, coat);
+            disc_fill(sx-3, sy-4-bob, 1, COL(24,20,28)); disc_fill(sx, sy-4-bob, 1, COL(24,20,28));
+            line_thick(sx+8, sy-1, sx+15, sy-1, 2, COL(220,226,235));
+        } else if (type==WAR_U_SIEGE){
+            // the siege tank: treads, a heavy hull, turret + long gun,
+            // and the driver peeking out of the hatch
+            rect_fill(sx-17, sy+3, 34, 6, COL(30,28,38)); rect_fill(sx-17, sy-10, 34, 6, COL(30,28,38));
+            for (int w=0;w<4;w++){ disc_fill(sx-13+w*9, sy+6, 2, COL(90,86,100)); disc_fill(sx-13+w*9, sy-7, 2, COL(90,86,100)); }
+            rect_fill(sx-15, sy-7, 30, 14, col_shade(coat, 0.85f)); rect_line(sx-15, sy-7, 30, 14, col_shade(coat, 0.55f));
+            disc_fill(sx-3, sy-1, 7, col_shade(coat, 0.7f)); disc_fill(sx-3, sy-1, 4, col_shade(coat, 0.5f));
+            line_thick(sx+2, sy-1, sx+21, sy-1, 3, COL(52,48,66));
+            disc_fill(sx-10, sy-6-bob, 4, coat);
+            disc_fill(sx-11, sy-7-bob, 1, COL(24,20,28)); disc_fill(sx-8, sy-7-bob, 1, COL(24,20,28));
+        } else {
+        disc_fill(sx, sy - bob, 8, coat);
+        disc_fill(sx-3, sy-3-bob, 2, COL(24,20,28)); disc_fill(sx+3, sy-3-bob, 2, COL(24,20,28));
+        if (type==WAR_U_HARV){
+            rect_fill(sx-6, sy-10-bob, 12, 4, COL(255,205,40));   // the hard hat
+            if (S->war_ucarry[i]>0) disc_fill(sx+8, sy+2-bob, 3, COL(255,205,40));
+        } else if (type==WAR_U_MELEE){
+            line_thick(sx+5, sy+4-bob, sx+11, sy-4-bob, 2, COL(220,226,235));   // the wrench
+            disc_fill(sx+12, sy-5-bob, 2, COL(220,226,235));
+        } else {
+            disc_fill(sx, sy-9-bob, 3, COL(120,235,255));   // the bolt buddy's charged cap
+            rect_fill(sx-1, sy-14-bob, 2, 4, COL(120,235,255));
+        }
+        }
+    } else {
+        int strain = REGION_BUG[S->war_region]>=0? REGION_BUG[S->war_region] : (i % 4);
+        int legph = (int)(G.anim_t*11.0f + (float)i*2.1f) & 1;
+        for (int l=0;l<3;l++){
+            int lx = sx-6 + l*6;
+            line_thick(lx, sy+3, lx-2, sy+8, 1, col_shade(BUG_COL[strain], 0.55f));
+            line_thick(lx, sy+3, lx+3, sy+8 - (legph? 2:0), 1, col_shade(BUG_COL[strain], 0.55f));
+        }
+        ellipse_fill(sx, sy, type==WAR_U_SPIT? 10:9, 7, BUG_COL[strain]);
+        ellipse_fill(sx, sy+2, 6, 4, BUG_BELLY[strain]);
+        if (type==WAR_U_SPIT) rect_fill(sx+6, sy-2, 6, 4, col_shade(BUG_COL[strain], 0.8f));
+        disc_fill(sx-3, sy-3, 2, COL(255,250,240)); disc_fill(sx+3, sy-3, 2, COL(255,250,240));
+        disc_fill(sx-3, sy-3, 1, COL(16,12,20)); disc_fill(sx+3, sy-3, 1, COL(16,12,20));
+    }
+    if (S->war_uhp[i] < S->war_umaxhp[i])
+        war_hp_bar(sx - (veh? 13:9), sy - (type==WAR_U_SIEGE? 22:16), veh? 26:18, S->war_uhp[i] / (float)S->war_umaxhp[i], war_u_side(type));
+}
+static void war_blend_disc(int cx, int cy, int r, u32 c, int alpha){
+    for (int dy=-r; dy<=r; dy++){ int dx=(int)fsqrt((float)(r*r-dy*dy)); blend_rect(cx-dx, cy+dy, dx*2, 1, c, alpha); }
+}
+static void war_draw_terrain(BwSim *S, int t){
+    float x = S->war_tx[t], y = S->war_ty[t];
+    int sx = SX(x), sy = SY(y), kind = S->war_ttype[t], rad = S->war_trad[t];
+    u32 vary = hash2(t, 11, 0x7E44u);
+    if (S->war_thp[t]<=0){   // destroyed: only the fading scorch remains
+        if (S->war_tdeadt[t]>0){
+            ellipse_fill(sx, sy + rad*3/4, rad, rad/3, COL(28,24,22));
+            disc_fill(sx - rad/3, sy + rad/2, 2, COL(44,38,32));
+            disc_fill(sx + rad/4, sy + rad*2/3, 2, COL(38,32,28));
+        }
+        return;
+    }
+    ellipse_fill(sx, sy + rad*3/4, rad, rad/3, COL(16,14,24));
+    if (kind==0){   // a tree: trunk, then a two-tone canopy in the region's tint
+        u32 can = WAR_TREE_COL[S->war_region];
+        rect_fill(sx-2, sy, 4, rad, COL(90,64,40));
+        disc_fill(sx, sy - rad/2, rad + 2, col_shade(can, 0.75f));
+        disc_fill(sx - rad/3, sy - rad/2 - 3, rad - 2, can);
+        disc_fill(sx + rad/4, sy - rad/3, 3, col_shade(can, 1.3f));
+    } else if (kind==1){   // rocks: grey lumps
+        u32 rk = col_shade(COL(128,124,118), 0.85f + (float)(vary % 30u) * 0.01f);
+        ellipse_fill(sx, sy, rad, rad*2/3, rk);
+        ellipse_fill(sx - rad/2, sy + 2, rad/2, rad/3, col_shade(rk, 0.8f));
+        disc_fill(sx + rad/4, sy - rad/3, 2, col_shade(rk, 1.25f));
+    } else if (kind==2){   // a broken terminal, left by whoever debugged here last
+        rect_fill(sx-9, sy-8, 18, 15, COL(40,42,54)); rect_line(sx-9, sy-8, 18, 15, COL(90,96,120));
+        rect_fill(sx-6, sy-5, 12, 8, COL(24,60,66));
+        line_thick(sx-5, sy-4, sx+1, sy+1, 1, COL(120,235,255)); line_thick(sx+1, sy+1, sx+5, sy-3, 1, COL(120,235,255));
+        rect_fill(sx-3, sy+7, 6, 3, COL(52,54,68));
+    } else if (kind==3){   // a cable spool
+        ellipse_fill(sx, sy, rad, rad*3/4, COL(110,82,50));
+        ellipse_fill(sx, sy, rad*2/3, rad/2, COL(84,60,36));
+        disc_fill(sx, sy, 3, COL(52,40,26));
+        line_thick(sx - rad*2/3, sy - rad/4, sx + rad*2/3, sy + rad/4, 2, COL(38,34,48));
+    } else if (kind==4){   // rubble
+        tri_fill(sx - rad, sy + 4, sx - rad/3, sy - rad/2, sx + 1, sy + 4, COL(104,96,88));
+        tri_fill(sx - 2, sy + 4, sx + rad/3, sy - rad/3, sx + rad, sy + 4, COL(88,80,74));
+        disc_fill(sx + 2, sy + 1, 2, COL(130,120,108));
+    } else {   // kind 5 (v1.18): a barrier slab — dark slate, a lit top edge, one cyan seam. It will outlive us all.
+        u32 sl = col_shade(COL(52,58,72), 0.9f + (float)(vary % 20u) * 0.01f);
+        rect_fill(sx-rad, sy-rad, rad*2, rad*2, sl);
+        rect_fill(sx-rad, sy-rad, rad*2, 3, col_shade(sl, 1.45f));
+        rect_fill(sx-1, sy-rad+4, 2, rad*2-8, COL(110,225,235));
+        rect_line(sx-rad, sy-rad, rad*2, rad*2, col_shade(sl, 0.6f));
+    }
+    if (S->war_thp[t] < (float)S->war_tmaxhp[t])   // the house health bar, same as units and buildings
+        war_hp_bar(sx - rad, sy - rad - 12, rad*2, S->war_thp[t] / (float)S->war_tmaxhp[t], 0);
+}
+// the property tint, drawn while a build is in hand: your land glows
+// softly, so you can see exactly how far your building rights reach.
+// The faint outer ring is the adjacency reach for the build in hand:
+// its footprint may poke that far past the zone edge and still count
+// as touching your land (the ghost is the exact judge either way).
+static void war_render_zones(BwSim *S){
+    if (S->war_place<0) return;
+    for (int s=0;s<WAR_MAXS;s++){
+        if (S->war_shp[s]<=0 || S->war_sside[s]!=0) continue;
+        int sx = SX(S->war_sx[s]), sy = SY(S->war_sy[s]);
+        int zr = (int)war_zone_rad(S->war_stype[s]);
+        int reach = zr + WAR_SRAD[S->war_place];
+        war_blend_disc(sx, sy, reach, COL(120,220,255), 12);
+        war_blend_disc(sx, sy, zr, COL(120,220,255), 34);
+        circle_out(sx, sy, zr, COL(120,220,255));
+        circle_out(sx, sy, reach, COL(90,160,190));
+    }
+}
+// the placement ghost: green where the build is legal, red where
+// it is not — drawn at a world point, whoever's finger is asking.
+static void war_ghost_at(BwSim *S, float wx, float wy){
+    int kind = S->war_place;
+    if (kind==WAR_S_WALL){ wx = war_snap24(wx, WAR_OX); wy = war_snap24(wy, WAR_OY); }
+    int okp = war_place_ok(S, kind, wx, wy);
+    int sx = SX(wx), sy = SY(wy), rad = WAR_SRAD[kind];
+    war_blend_disc(sx, sy, rad, okp? COL(120,255,120) : COL(255,90,80), 110);
+    circle_out(sx, sy, rad, okp? COL(140,255,140) : COL(255,110,90));
+}
+// the placement ghost under your finger. (Touch gives no hover, so
+// the ghost lives while a finger or mouse button is down.) The pad
+// cursor is a finger too (v1.16): while it is on and no touch point
+// is asking, the ghost hovers at the cursor instead, so a pad player
+// can judge a placement before pressing A.
+static void war_render_ghost(int pi, int vx, int vy, int vw2, int vh2){
+    BwSim *S = &BWS[pi];
+    if (pi!=G.my_id || S->war_place<0) return;   // the touch points belong to the local player
+    for (int i=0;i<6;i++){
+        if (!IN.tp[i].active || IN.tp[i].y >= vy+vh2-WAR_BAR_H) continue;
+        float wx = S->war_camx + (float)(IN.tp[i].x - vx - vw2/2);
+        float wy = S->war_camy + WAR_BAR_H*0.5f + (float)(IN.tp[i].y - vy - vh2/2);
+        war_ghost_at(S, wx, wy);
+        return;
+    }
+    if (S->war_curon) war_ghost_at(S, S->war_curx, S->war_cury);
+}
+static void war_render(int pi){
+    BwSim *S = &BWS[pi]; Buddy *b = &G.bud[pi];
+    int vx = G.view_x0, vy = G.view_y0, vw2 = G.view_w>0? G.view_w : VW, vh2 = G.view_h>0? G.view_h : VH;
+    if (S->war_state==0){ war_render_map(pi, vx, vy, vw2, vh2); return; }
+    G.zoom = 1.0f;
+    G.camx = S->war_camx; G.camy = S->war_camy + WAR_BAR_H*0.5f;
+    int rg = S->war_region;
+    rect_fill(vx, vy, vw2, vh2, col_shade(REGION_GB[rg], 0.5f));
+    { float wx0 = S->war_camx - vw2/2 - 80, wy0 = S->war_camy - vh2/2 - 80;
+      float wx1 = S->war_camx + vw2/2 + 80, wy1 = S->war_camy + vh2/2 + 80;
+      int gx0 = (int)(wx0/80.0f), gy0 = (int)(wy0/80.0f), gx1 = (int)(wx1/80.0f), gy1 = (int)(wy1/80.0f);
+      for (int gy=gy0; gy<=gy1; gy++) for (int gx=gx0; gx<=gx1; gx++){
+          float cxp = gx*80.0f+40, cyp = gy*80.0f+40;
+          int inside = cxp>WAR_OX && cxp<WAR_OX+WAR_AW && cyp>WAR_OY && cyp<WAR_OY+WAR_AH;
+          u32 c = inside? (((gx+gy)&1)? REGION_GA[rg] : REGION_GB[rg]) : col_shade(REGION_GB[rg], 0.45f);
+          c = col_shade(c, 0.95f + hash_f(gx, gy, 0xB17u)*0.09f);
+          rect_fill(SX(gx*80.0f), SY(gy*80.0f), 81, 81, c);
+          if (inside && hash2(gx, gy, 0x7A55u) % 5 == 0)
+              disc_fill(SX(gx*80.0f + 20 + (int)(hash2(gx, gy, 3u) % 36)), SY(gy*80.0f + 22 + (int)(hash2(gx, gy, 9u) % 34)), 3, REGION_TUFT[rg]);
+      }
+      // the arena fence
+      int ax0 = SX(WAR_OX), ay0 = SY(WAR_OY), ax1 = SX(WAR_OX+WAR_AW), ay1 = SY(WAR_OY+WAR_AH);
+      rect_fill(ax0-5, ay0-5, (int)WAR_AW+10, 5, COL(70,44,44)); rect_fill(ax0-5, ay1, (int)WAR_AW+10, 5, COL(70,44,44));
+      rect_fill(ax0-5, ay0-5, 5, (int)WAR_AH+10, COL(70,44,44)); rect_fill(ax1, ay0-5, 5, (int)WAR_AH+10, COL(70,44,44));
+    }
+    war_render_zones(S);
+    for (int t=0;t<S->war_tn;t++)   // terrain is scenery: remembered once explored
+        if (war_fog_at(S, S->war_tx[t], S->war_ty[t])>=1) war_draw_terrain(S, t);
+    for (int n=0;n<S->war_nn;n++){
+        if (S->war_namt[n]<=0) continue;
+        if (war_fog_at(S, S->war_nx[n], S->war_ny[n])<1) continue;   // an unmapped node is just a rumour
+        int sx = SX(S->war_nx[n]), sy = SY(S->war_ny[n]);
+        int big = S->war_namt[n] > 200;
+        ellipse_fill(sx, sy+8, 16, 5, COL(90,74,30));
+        tri_fill(sx-12, sy+8, sx-5, sy-12, sx+1, sy+8, COL(255,205,40));
+        tri_fill(sx-2, sy+8, sx+4, sy-16 - (big? 4:0), sx+10, sy+8, COL(255,190,30));
+        tri_fill(sx+4, sy+8, sx+10, sy-8, sx+15, sy+8, COL(240,180,40));
+        disc_fill(sx+3, sy-6, 2, COL(255,250,220));
+        { char nb[8]; char *q=nb; q=sapp_int(q, S->war_namt[n]); *q=0;
+          draw_text_center(sx, sy+14, nb, 1, COL(255,230,150)); }
+    }
+    for (int s=0;s<WAR_MAXS;s++){
+        if (S->war_shp[s]<=0) continue;
+        if (S->war_sside[s]==1 && war_fog_at(S, S->war_sx[s], S->war_sy[s])<1) continue;   // a hive shows once scouted, and stays on the map
+        war_draw_struct(S, s);
+    }
+    for (int i=0;i<WAR_MAXU;i++){
+        if (S->war_uhp[i]<=0) continue;
+        if (war_u_side(S->war_utype[i])==1 && war_fog_at(S, S->war_ux[i], S->war_uy[i])<2) continue;   // bugs only while watched
+        war_draw_unit(S, b, i);
+    }
+    for (int i=0;i<WAR_MAXP;i++){
+        if (S->war_pt[i]<=0) continue;
+        if (S->war_pside[i]==1 && war_fog_at(S, S->war_px[i], S->war_py[i])<2) continue;
+        int sx = SX(S->war_px[i]), sy = SY(S->war_py[i]);
+        disc_fill(sx, sy, 3, S->war_pside[i]==0? COL(140,240,255) : COL(170,255,120));
+        disc_fill(sx, sy, 1, COL(255,255,255));
+    }
+    // the fog itself: unexplored is solid dark, explored-but-unwatched
+    // is dimmed. It sits above the field and below every marker.
+    { float wx0 = S->war_camx - vw2/2, wy0 = S->war_camy - vh2/2;
+      float wx1 = S->war_camx + vw2/2, wy1 = S->war_camy + vh2/2;
+      int cx0 = (int)((wx0 - WAR_OX)/40.0f), cx1 = (int)((wx1 - WAR_OX)/40.0f);
+      int cy0 = (int)((wy0 - WAR_OY)/40.0f), cy1 = (int)((wy1 - WAR_OY)/40.0f);
+      if (cx0<0) cx0=0; if (cy0<0) cy0=0;
+      if (cx1>=WAR_FOG_W) cx1=WAR_FOG_W-1; if (cy1>=WAR_FOG_H) cy1=WAR_FOG_H-1;
+      for (int cy=cy0; cy<=cy1; cy++) for (int cx=cx0; cx<=cx1; cx++){
+          int f = S->war_fog[cy*WAR_FOG_W + cx];
+          if (f==2) continue;
+          int sx = SX(WAR_OX + cx*40.0f), sy = SY(WAR_OY + cy*40.0f);
+          if (f==0) rect_fill(sx, sy, 41, 41, COL(6,6,12));
+          else blend_rect(sx, sy, 41, 41, COL(4,4,10), 145);
+      } }
+    for (int i=0;i<WAR_MAXU;i++){   // selected units redraw above the fog, marker disc and all —
+        if (S->war_uhp[i]<=0 || !S->war_usel[i]) continue;   // a bare circle_out here would bury the buddy under its own marker
+        war_draw_unit(S, b, i);
+    }
+    war_render_ghost(pi, vx, vy, vw2, vh2);
+    if (pi==G.my_id && S->war_curon && S->war_state==1){   // the pad cursor rides above the fog, like the selected units do (v1.16)
+        int csx = SX(S->war_curx), csy = SY(S->war_cury);
+        int cr = 10 + (int)(fsin(G.anim_t*5.0f)*1.5f);
+        circle_out(csx, csy, cr+3, COL(120,100,40));
+        circle_out(csx, csy, cr, COL(255,240,160));
+        line_thick(csx-cr-5, csy, csx-cr+2, csy, 2, COL(255,240,160));
+        line_thick(csx+cr-2, csy, csx+cr+5, csy, 2, COL(255,240,160));
+        line_thick(csx, csy-cr-5, csx, csy-cr+2, 2, COL(255,240,160));
+        line_thick(csx, csy+cr-2, csx, csy+cr+5, 2, COL(255,240,160));
+        disc_fill(csx, csy, 2, COL(255,240,160));
+    }
+    if (S->war_ordt > 0){
+        int sx = SX(S->war_ordx), sy = SY(S->war_ordy);
+        int r = 6 + (int)((0.5f - S->war_ordt) * 14.0f);
+        circle_out(sx, sy, r, COL(140,255,140));
+        disc_fill(sx, sy, 2, COL(140,255,140));
+    }
+    if (S->war_selstruct>=0 && war_struct_alive(S, S->war_selstruct) && S->war_rallyx[S->war_selstruct]!=0){
+        // the rally flag (addendum 3): while a producer with a rally
+        // set is selected, a thin line runs from the building to the
+        // flag. Like the order marker, it ignores fog.
+        int ss = S->war_selstruct;
+        int bx = SX(S->war_sx[ss]), by2 = SY(S->war_sy[ss]);
+        int fx = SX(S->war_rallyx[ss]), fy = SY(S->war_rallyy[ss]);
+        line_thick(bx, by2, fx, fy, 1, COL(140,255,140));
+        line_thick(fx, fy, fx, fy-14, 2, COL(200,220,200));
+        tri_fill(fx, fy-14, fx, fy-7, fx+9, fy-10, COL(140,255,140));
+        disc_fill(fx, fy, 2, COL(140,255,140));
+    }
+    // the top strip: bits, region, what's left to kill
+    rect_fill(vx, vy, vw2, 20, COL(10,10,18));
+    disc_fill(vx+12, vy+10, 5, COL(255,205,40));
+    { char buf[64]; char *q=buf; q=sappend(q, "BITS "); q=sapp_int(q, S->war_bits); *q=0;
+      draw_text(vx+22, vy+6, buf, 1, COL(255,230,150)); }
+    draw_text_center(vx+vw2/2, vy+6, REGION_NAME[rg], 1, COL(240,244,250));
+    { char buf[48]; char *q=buf; q=sappend(q, "HIVES "); q=sapp_int(q, war_hives_alive(S));
+      q=sappend(q, "   ARMY "); q=sapp_int(q, war_count_units(S, 0)); q=sappend(q, "/24"); *q=0;
+      draw_text(vx+vw2-text_w(buf, 1)-8, vy+6, buf, 1, COL(255,190,170)); }
+    if (S->war_msgt > 0){
+        int tw = text_w(S->war_msg, 1);
+        rect_fill(vx+vw2/2 - tw/2 - 6, vy+25, tw+12, 15, COL(16,14,24));
+        draw_text_center(vx+vw2/2, vy+28, S->war_msg, 1, COL(255,240,200));
+    }
+    war_render_bar(pi, vx, vy, vw2, vh2);
+    if (S->war_state==2 || S->war_state==3){
+        blend_rect(vx, vy, vw2, vh2, COL(8,8,14), 110);
+        int pw = vw2<420? vw2-24 : 396, ph = 108;
+        int px = vx+(vw2-pw)/2, py = vy+(vh2-ph)/2 - 20;
+        rect_fill(px, py, pw, ph, COL(16,18,28)); rect_line(px, py, pw, ph, S->war_state==2? COL(255,205,40) : COL(255,110,90));
+        if (S->war_state==2){
+            draw_text_center(px+pw/2, py+16, "REGION CONQUERED!", 2, COL(255,220,120));
+            draw_text_center(px+pw/2, py+44, REGION_NAME[rg], 1, COL(240,244,250));
+            draw_text_center(px+pw/2, py+62, "THE SWARM RETREATS... FOR NOW.", 1, COL(200,220,200));
+        } else {
+            draw_text_center(px+pw/2, py+16, "THE CORE HAS FALLEN", 2, COL(255,140,120));
+            draw_text_center(px+pw/2, py+44, REGION_NAME[rg], 1, COL(240,244,250));
+            draw_text_center(px+pw/2, py+62, "THE REGION STAYS WILD. REBUILD AND TRY AGAIN!", 1, COL(220,200,200));
+        }
+        draw_text_center(px+pw/2, py+ph-16, "TAP TO RETURN TO THE MAP", 1, COL(150,160,185));
+    }
+    if (S->war_pause){   // the pause menu (v1.17): same rects the tap handler and pad use
+        blend_rect(vx, vy, vw2, vh2, COL(8,8,14), 150);
+        int px, py, pw, ph; war_pause_rects(vx, vy, vw2, vh2, &px, &py, &pw, &ph);
+        rect_fill(px, py, pw, ph, COL(16,18,28)); rect_line(px, py, pw, ph, COL(255,205,40));
+        draw_text_center(px+pw/2, py+14, "PAUSED", 2, COL(255,220,120));
+        { char buf[48]; char *q=buf; q=sappend(q, REGION_NAME[rg]); q=sappend(q, " - THE BATTLE WAITS"); *q=0;
+          draw_text_center(px+pw/2, py+36, buf, 1, COL(200,210,230)); }
+        static const char *PLBL[3] = { "RESUME", "RESTART BATTLE", "SAVE & QUIT" };
+        for (int n=0;n<3;n++){
+            int by = war_pause_btn_y(py, n);
+            rect_fill(px+40, by, pw-80, 36, COL(38,44,60));
+            rect_line(px+40, by, pw-80, 36, COL(198,164,84));
+            draw_text_center(px+pw/2, by+12, PLBL[n], 2, COL(240,244,250));
+        }
+        draw_text_center(px+pw/2, py+ph-16, mobile_ui()? "TAP A CHOICE" : "TAP - OR KEYS 1 / 2 / 3 - ESC RESUMES", 1, COL(150,160,185));
+    }
+}
+
+static void bw_render_modes(int pi){
+    BwSim *S = &BWS[pi];
+    Buddy *b=&G.bud[pi];
+    if (S->bat.active){ bw_render_battle(pi); return; }
+    if (b->bw_mode==2){ bw_render_ent(pi); return; }
+    if (b->bw_mode==3){ plat_render(pi); return; }
+    if (b->bw_mode==4){ craft_render(pi); return; }
+    if (b->bw_mode==5){ tank_render(pi); return; }
+    if (b->bw_mode==6){ cas_render(pi); return; }
+    if (b->bw_mode==7){ if (S->crt_guest) crt_render_view(S->crt_guest - 1, pi); else crt_render(pi); return; }
+    if (b->bw_mode==8){ war_render(pi); return; }
+    u32 seed=(u32)b->bw_seed;
+    G.camx=b->x; G.camy=b->y;
+    // the view: full screen solo, or this player's split half in co-op
+    int vx=G.view_x0, vy=G.view_y0, vw2=G.view_w>0? G.view_w : VW, vh2=G.view_h>0? G.view_h : VH;
+    rect_fill(vx, vy, vw2, vh2, COL(84,156,62));
+    int tx0=bw_tileof(b->x - vw2/2 - BW_TILE), tx1=bw_tileof(b->x + vw2/2 + BW_TILE);
+    int ty0=bw_tileof(b->y - vh2/2 - BW_TILE), ty1=bw_tileof(b->y + vh2/2 + BW_TILE);
+    for (int ty=ty0; ty<=ty1; ty++) for (int tx=tx0; tx<=tx1; tx++){
+        int x=SX(tx*BW_TILE), y=SY(ty*BW_TILE);
+        u32 h = hash2(tx, ty, seed ^ 0x7A55u);
+        // palette lift (Nov 3, Daniel: "kinda drab"): a checker you can
+        // actually see, per-tile shade weather, and sunlit patches
+        int site = bw_site_at_xy(b, tx*BW_TILE+24, ty*BW_TILE+24);
+        int ocean = bw_outside_world(tx*BW_TILE+24, ty*BW_TILE+24);
+        { u32 base;
+          if (ocean){
+              // the sea: two blues in a checker, lighter in the
+              // shallows within a tile or so of the shore
+              float wx2 = tx*BW_TILE+24, wy2 = ty*BW_TILE+24;
+              int shallow = wx2 > BW_WX0-84 && wx2 < BW_WX1+84 && wy2 > BW_WY0-84 && wy2 < BW_WY1+84;
+              base = shallow? (((tx+ty)&1)==0? COL(74,146,196) : COL(66,136,186))
+                            : (((tx+ty)&1)==0? COL(36,88,146) : COL(32,80,136));
+              rect_fill(x, y, BW_TILE+1, BW_TILE+1, col_shade(base, 0.94f + (float)((h>>20)%14)*0.01f));
+              if (h % 7 == 0){ int wxp = x + (int)((h>>6) % 30) + 6 + (int)(G.anim_t*6 + (h%40)) % 13 - 6,
+                                  wyp = y + (int)((h>>11) % 32) + 8 + (int)(fsin(G.anim_t*1.3f + (float)(h%9))*1.5f);
+                  line_thick(wxp, wyp, wxp+4, wyp-2, 1, COL(150,200,235)); line_thick(wxp+4, wyp-2, wxp+8, wyp, 1, COL(150,200,235)); }
+              continue;
+          }
+          float road_d = (b->bw_mode==1 && site<0)? bw_road_dist(tx*BW_TILE+24, ty*BW_TILE+24) : 1e9f;
+          if (road_d < 42)  base = road_d<26? (((tx+ty)&1)==0? COL(170,150,98) : COL(160,140,90))    // the worn road itself
+                                            : (((tx+ty)&1)==0? COL(138,166,86) : COL(128,156,78));   // its trampled edge
+          else if (site==0) base = ((tx+ty)&1)==0? COL(182,156,102) : COL(172,146,94);
+          else if (site==1) base = ((tx+ty)&1)==0? COL(132,134,132) : COL(122,124,122);
+          else if (site==2) base = ((tx+ty)&1)==0? COL(178,216,236) : COL(166,204,226);
+          else if (site==3) base = ((tx+ty)&1)==0? COL(102,98,104) : COL(92,88,94);
+          else if (site==4) base = ((tx+ty)&1)==0? COL(126,136,100) : COL(116,126,92);
+          else { base = ((tx+ty)&1)==0? COL(104,178,80) : COL(84,156,62); if (h % 19 == 0) base = COL(126,192,86); }
+          rect_fill(x, y, BW_TILE+1, BW_TILE+1, col_shade(base, 0.94f + (float)((h>>20)%14)*0.01f)); }
+        // terrain grain on the open grass (Daniel, Nov 6): worn dirt
+        // patches and speckle, so the meadow reads as GROUND, not as
+        // one flat green sheet — kept quiet on purpose
+        if (!ocean && site<0){
+            if ((h>>3)%11==0){ int px2 = x + (int)((h>>6)%26)+8, py2 = y + (int)((h>>11)%24)+10;
+                disc_fill(px2, py2, 6, COL(156,138,92)); disc_fill(px2+7, py2+2, 4, COL(148,130,86)); disc_fill(px2-6, py2+3, 4, COL(150,134,90)); }
+            if ((h>>5)%3==0){ pset(x + (int)((h>>7)%40)+4, y + (int)((h>>13)%40)+4, COL(70,138,52));
+                pset(x + (int)((h>>17)%40)+4, y + (int)((h>>23)%40)+4, COL(140,205,105)); }
+        }
+        int lush = bw_lush_at(tx, ty, seed);
+        if (!ocean && site!=1 && site!=2 && site!=3){ // grass tufts, thick where it's lush
+            int tufts = lush==2? (h%5==0? 0 : 4) : lush==1? (h%3==0? 3 : (h%3==1? 2 : 0)) : (h%6==0? 2 : 0);
+            for (int g2=0; g2<tufts; g2++){ u32 hh = hash2(tx*7+g2*13, ty*7-g2*11, seed ^ 0x6A11u);
+                int gx = x + (int)(hh % 38) + 5, gy = y + (int)((hh>>8) % 36) + 7;
+                line_thick(gx, gy, gx-1, gy-5, 1, COL(58,124,46)); line_thick(gx+3, gy, gx+4, gy-4, 1, COL(134,202,100)); } }
+        if (!ocean && (site<0 || site==0) && lush>=1 && h % (lush==2? 9 : 16) == 0){ // a bush: clustered dark discs, one lit top
+            int bx2 = x + (int)((h>>7) % 30) + 9, by2 = y + (int)((h>>13) % 28) + 10;
+            disc_fill(bx2-5, by2+2, 5, COL(44,102,42)); disc_fill(bx2+5, by2+2, 5, COL(44,102,42));
+            disc_fill(bx2, by2-2, 6, COL(52,116,48)); disc_fill(bx2-2, by2-4, 3, COL(86,150,70)); }
+        if (!ocean && site<0 && lush==2 && (h>>5) % 14 == 0){ // mushrooms in the deep green only
+            int mx2 = x + (int)((h>>9) % 32) + 8, my2 = y + (int)((h>>15) % 30) + 9;
+            pset(mx2, my2, COL(240,238,228)); pset(mx2, my2-1, COL(240,238,228));
+            disc_fill(mx2, my2-3, 2, COL(206,64,54)); pset(mx2-1, my2-3, COL(255,240,230));
+            pset(mx2+6, my2+2, COL(240,238,228)); disc_fill(mx2+6, my2, 1, COL(206,64,54)); }
+        if (!ocean && h % (lush==2? 6 : lush==1? 11 : 33) == 0 && (site<0 || site==0)){ // flower clusters, not pinpricks: three petals + a heart
+            static const u32 FLW[4] = { COL(255,216,90), COL(255,150,190), COL(190,160,255), COL(250,250,246) };
+            u32 fc = FLW[(h>>16)&3];
+            int fx2 = x + (int)((h>>6) % 34) + 6, fy2 = y + (int)((h>>11) % 34) + 7;
+            disc_fill(fx2-2, fy2, 1, fc); disc_fill(fx2+2, fy2, 1, fc); disc_fill(fx2, fy2-2, 1, fc);
+            pset(fx2, fy2, COL(255,240,190)); }
+    }
+    // the shoreline (glow-up): a dashed foam line where meadow
+    // meets sea, crawling slowly so the water feels alive
+    { int ph = (int)(G.anim_t*2.0f);
+      int fx0 = SX(BW_WX0), fx1 = SX(BW_WX1), fy0 = SY(BW_WY0), fy1 = SY(BW_WY1);
+      int vy0 = vy, vy1 = vy+vh2, vx0 = vx, vx1 = vx+vw2;
+      if (fx0>=vx0 && fx0<vx1) for (int yy=vy0; yy<vy1; yy+=7) if ((((yy/7)+ph)&1)==0) rect_fill(fx0-1, yy, 2, 4, COL(228,244,252));
+      if (fx1>=vx0 && fx1<vx1) for (int yy=vy0; yy<vy1; yy+=7) if ((((yy/7)+ph)&1)==0) rect_fill(fx1-1, yy, 2, 4, COL(228,244,252));
+      if (fy0>=vy0 && fy0<vy1) for (int xx=vx0; xx<vx1; xx+=7) if ((((xx/7)+ph)&1)==0) rect_fill(xx, fy0-1, 4, 2, COL(228,244,252));
+      if (fy1>=vy0 && fy1<vy1) for (int xx=vx0; xx<vx1; xx+=7) if ((((xx/7)+ph)&1)==0) rect_fill(xx, fy1-1, 4, 2, COL(228,244,252)); }
+    bw_draw_gate();
+    bw_draw_objects(pi, 0);
+    draw_buddy(b);
+    bw_draw_objects(pi, 1);
+    ui_vignette(vx, vy, vw2, vh2);
+    // the buddy card
+    rect_fill(vx+8, vy+8, 168, 46, COL(20,26,20)); rect_line(vx+8, vy+8, 168, 46, COL(198,164,84));
+    { char buf[64]; char *q=buf; q=sappend(q, BUD_ELF[b->name_idx%BUD_NAMES_N]); q=sappend(q, " THE "); q=sappend(q, BUD_NAME[b->species%BUDN]); *q=0;
+      draw_text(vx+14, vy+13, buf, 1, COL(255,244,210)); }
+    { float f = b->maxhp>0? b->hp/b->maxhp : 0; if (f<0) f=0;
+      rect_fill(vx+14, vy+26, 120, 5, COL(40,30,40)); rect_fill(vx+14, vy+26, (int)(120*f), 5, f>0.35f? COL(120,230,90) : COL(255,170,60));
+      char hb[24]; char *q=hb; q=sapp_int(q, (int)b->hp); q=sappend(q, "/"); q=sapp_int(q, (int)b->maxhp); *q=0;
+      draw_text(vx+138, vy+25, hb, 1, COL(230,240,230)); }
+    { float f = b->energy/BUD_ENERGY_MAX; if (f<0) f=0;
+      rect_fill(vx+14, vy+36, 120, 4, COL(40,30,40)); rect_fill(vx+14, vy+36, (int)(120*f), 4, COL(120,200,255));
+      draw_text(vx+138, vy+35, "ENERGY", 1, COL(170,220,255)); }
+    // the context prompt (Daniel, Nov 6): ONE line, only when there is
+    // something to interact with, naming the actual key/button for
+    // the device in hand — never the whole control list
+    { const char *verb = 0;
+      float dx=b->x, dy=b->y+6;
+      if (bw_npc_near(b, 46)>=0) verb = "TALK";
+      else if (bw_term_near(b, 44)>=0) verb = "PRESS THE TERMINAL";
+      else if (bw_sign_near(b, 44)) verb = "READ THE SCRATCHES";
+      else if (bw_hsign_near(b, 44)>=0) verb = "READ THE SIGN";
+      else if (bw_bitling_near(b, 44)) verb = "SAY HI";
+      else if (bw_tool_near(b, 44)>=0) verb = "PICK IT UP";
+      else if (dx*dx+dy*dy < 46*46) verb = "BACK TO THE BUG MALL";
+      else { float tx, ty; if (bw_tent_near(b, 42, &tx, &ty)) verb = "SLEEP (FULL HP + ENERGY)"; }
+      if (verb){ char hb[72]; const char *hint = key_prompt(hb, lbl_int(), verb);
+      int hw2 = text_w(hint, 1);
+      rect_fill(vx + vw2/2 - hw2/2 - 6, vy + vh2-22, hw2+12, 14, COL(20,26,20));
+      draw_text_center(vx + vw2/2, vy + vh2-19, hint, 1, COL(240,248,240)); } }
+    bw_draw_minimap(pi);
+    bw_draw_note(pi);
+    if (S->log_open){
+        static const char *QN[10] = { "MEET ELDER PATCHINA", "CLEAR THE SERVER FARM", "HOUSE CALL FOR A HERMIT", "ZERO-DAY FUNERAL", "MOP'S LOST TOOLS", "THE SUNKEN CACHE", "COLD STORAGE", "SPECIAL DELIVERY", "THE STRAY PROCESS", "READ THE SIGNS" };
+        // a guiding line per quest (Nov 4, Daniel: "more detailed,
+        // clearer — don't give it all away"): shown while ACTIVE only
+        static const char *QD[10] = {
+            "THE ELDER WAITS IN PATCH VILLAGE, NORTH-WEST.",
+            "BONK 3 HACKERS AT THE FARM. THEN MIND THE TERMINALS.",
+            "GLITCH LIVES ALONE AT THE FROZEN LAKE, FAR SOUTH.",
+            "ZED WAITS PAST HIS FENCE. GATES OPEN FOR CRANKS.",
+            "TOOLS GLINT GOLD OUT THERE. THE DIAMOND FINDS ONE.",
+            "THE HOARDER SITS IN THE WESTERN RUINS. 4TH HITS HEAL IT.",
+            "BONK 2 HACKERS ON THE FROZEN LAKE ITSELF.",
+            "CARRY MOP'S PARCEL TO GLITCH AT THE LAKE.",
+            "A STRAY PROCESS WANDERS SOUTH OF PATCH VILLAGE.",
+            "READ SCRATCHED SIGNS BY ROADS AND PASSES. ANY THREE." };
+        int w = vw2<420? vw2-16 : 404;
+        int need = 26 + 4 + 14 + 4*13 + 16;
+        if (b->bw_mode!=1) need = 26 + 14 + 4 + 14 + 4*13 + 16;
+        else for (int q2=0; q2<10; q2++){ int st = bw_qstate_g(b, q2); if (st) need += st==1? 23 : 12; }
+        int h = need; if (h > vh2-8) h = vh2-8; if (h < 150) h = 150;
+        int x = vx + (vw2-w)/2, y = vy + (vh2-h)/2; if (y < vy+4) y = vy+4;
+        rect_fill(x, y, w, h, COL(16,20,18)); rect_line(x, y, w, h, COL(198,164,84));
+        draw_text(x+12, y+8, "QUEST LOG", 1, COL(255,214,64));
+        draw_text(x+w-104, y+8, "F / X - CLOSE", 1, COL(150,170,190));
+        int ry = y + 26;
+        if (b->bw_mode!=1){
+            draw_text(x+12, ry, "NO STORY HERE. JUST MEADOW, TEA, AND VIOLENCE.", 1, COL(200,214,200)); ry += 14;
+        } else for (int q2=0; q2<10; q2++){
+            int st = bw_qstate_g(b, q2);
+            if (st==0) continue;
+            if (ry > y+h-86) break;   // keep room for the backpack below
+            draw_text(x+12, ry, QN[q2], 1, st==2? COL(140,160,140) : COL(255,244,210));
+            char tb[28]; char *tq=tb;
+            if (st==2){ tq=sappend(tq, "DONE"); }
+            else if (q2==1){ tq=sappend(tq, "ACTIVE "); tq=sapp_int(tq, bw_farmkills(b)); tq=sappend(tq, "/3"); }
+            else if (q2==4){ tq=sappend(tq, "ACTIVE "); tq=sapp_int(tq, bw_tools_found(b)); tq=sappend(tq, "/3"); }
+            else if (q2==6){ tq=sappend(tq, "ACTIVE "); tq=sapp_int(tq, bw_lakekills(b)); tq=sappend(tq, "/2"); }
+            else if (q2==9){ tq=sappend(tq, "ACTIVE "); tq=sapp_int(tq, bw_signs_read(b)); tq=sappend(tq, "/3"); }
+            else tq=sappend(tq, "ACTIVE");
+            *tq=0;
+            draw_text(x+w-12-text_w(tb, 1), ry, tb, 1, st==2? COL(120,200,120) : COL(255,200,110));
+            ry += 12;
+            if (st==1){ draw_text(x+24, ry, QD[q2], 1, COL(168,190,205)); ry += 11; }
+        }
+        ry += 4;
+        draw_text(x+12, ry, "BACKPACK (BW ONLY)", 1, COL(255,214,64)); ry += 14;
+        for (int it=0; it<4; it++){
+            if (it==S->log_sel){ rect_fill(x+8, ry-2, w-16, 13, COL(70,58,30)); draw_text(x+12, ry, ">", 1, COL(255,220,90)); }
+            draw_text(x+24, ry, BW_ITEM_NAME[it], 1, b->items[it]>0? COL(240,248,240) : COL(110,110,120));
+            char cb[12]; char *cq=cb; cq=sappend(cq, "x"); cq=sapp_int(cq, b->items[it]); *cq=0;
+            draw_text(x+w-12-text_w(cb, 1), ry, cb, 1, COL(255,210,130));
+            ry += 13;
+        }
+        draw_text_center(x+w/2, y+h-14, "SPACE / A - USE.  ITEMS ALSO WORK MID-BATTLE.", 1, COL(150,170,190));
+    }
+    if (pi==G.my_id && mobile_ui() && !pad_mode() && !S->log_open){
+        const char *hint = G.touch_ctl? "STICK MOVE - TALK TALKS - PICK FOR BATTLES" : "DRAG TO MOVE - TAP TO TALK";
+        int hw2 = text_w(hint, 1);
+        rect_fill(vx + vw2/2 - hw2/2 - 6, vy + vh2-22, hw2+12, 14, COL(20,26,20));
+        draw_text_center(vx + vw2/2, vy + vh2-19, hint, 1, COL(240,248,240));
+    }
+    if (S->sleep_t>0){
+        float d = 1.0f - (S->sleep_t>0.7f? (S->sleep_t-0.7f)/0.7f : S->sleep_t/0.7f);
+        blend_rect(vx, vy, vw2, vh2, COL(6,6,16), (int)(210*d));
+        if (d>0.75f) draw_text_center(vx + vw2/2, vy + vh2/2-4, "Z Z Z", 2, COL(200,210,255));
+    }
+}
+// --- touch controls inside Banzai World (Daniel, Nov 5) ----------------
+// The main game's HUD drew the stick and buttons; the minigames never
+// did, so on a phone they were invisible — and an invisible control
+// scheme reads as a broken one. Same fixed spots as the meadow, with
+// the button captions naming what they DO in this mode.
+static void bw_draw_touch(int pi){
+    if (pi!=G.my_id || !mobile_ui() || pad_mode()) return;
+    Buddy *b=&G.bud[pi]; BwSim *S=&BWS[pi];
+    if (S->bat.active) return;                    // battles run on taps + menus
+    if (b->bw_mode==8) return;                    // WAR! is tap-only: its command bar owns the bottom strip
+    int vw2 = G.view_w>0? G.view_w : VW;
+    if (vw2<VW) return;                           // split view: fixed buttons are full-screen furniture
+    const char *wl = (b->bw_mode==4)? "CRAFT" : (b->bw_mode==2)? "PATCH" : "WALL";
+    if (G.touch_ctl==0){                          // DRAG: the finger steers; one button is furniture enough
+        if (b->bw_mode==3 || b->bw_mode==5 || S->craft_menu) return;
+        tbtn_base(TP_WALL_CX, TP_WALL_CY, 24, COL(62,56,86));
+        { u32 br = COL(232,186,108);
+          rect_fill(TP_WALL_CX-10, TP_WALL_CY-11, 9, 4, br); rect_fill(TP_WALL_CX+1, TP_WALL_CY-11, 9, 4, br);
+          rect_fill(TP_WALL_CX-10, TP_WALL_CY-6, 6, 4, br);  rect_fill(TP_WALL_CX-3, TP_WALL_CY-6, 6, 4, br);
+          rect_fill(TP_WALL_CX+4, TP_WALL_CY-6, 6, 4, br); }
+        draw_text(TP_WALL_CX-text_w(wl,1)/2, TP_WALL_CY+4, wl, 1, COL(255,244,200));
+        return;
+    }
+    // STICK: FIRE + USE + WALL, captioned per mode, plus the stick itself
+    const char *fl = "PICK", *ul = "TALK";
+    int have_wall = 1;
+    if (b->bw_mode==2){ fl="THROW"; ul="OPEN"; }
+    else if (b->bw_mode==3){ fl="JUMP"; ul=0; have_wall=0; }
+    else if (b->bw_mode==4){ fl="SWING"; ul="USE"; }
+    else if (b->bw_mode==5){ fl="FIRE"; ul=0; have_wall=0; }
+    if (!S->craft_menu){
+        tbtn_base(TP_FIRE_CX, TP_FIRE_CY, 34, (IN.tp_held&32)? COL(224,88,62):COL(158,54,46));
+        { u32 lc = COL(255,240,230); int gy = TP_FIRE_CY-6;
+          rect_fill(TP_FIRE_CX-1, gy-10, 3, 6, lc); rect_fill(TP_FIRE_CX-1, gy+5, 3, 6, lc);
+          rect_fill(TP_FIRE_CX-10, gy-1, 6, 3, lc); rect_fill(TP_FIRE_CX+5, gy-1, 6, 3, lc);
+          disc_fill(TP_FIRE_CX, gy, 2, lc); }
+        draw_text(TP_FIRE_CX-text_w(fl,1)/2, TP_FIRE_CY+14, fl, 1, COL(255,240,230));
+        if (ul){
+            tbtn_base(TP_ACT_CX, TP_ACT_CY, 22, COL(56,92,62));
+            { u32 lc = COL(230,255,235); int gy = TP_ACT_CY-3;
+              tri_fill(TP_ACT_CX, gy-8, TP_ACT_CX-6, gy+1, TP_ACT_CX+6, gy+1, lc);
+              rect_fill(TP_ACT_CX-2, gy+1, 5, 5, lc); }
+            draw_text(TP_ACT_CX-text_w(ul,1)/2, TP_ACT_CY+9, ul, 1, COL(230,255,235));
+        }
+        if (have_wall){
+            tbtn_base(TP_WALL_CX, TP_WALL_CY, 24, COL(62,56,86));
+            { u32 br = COL(232,186,108);
+              rect_fill(TP_WALL_CX-10, TP_WALL_CY-11, 9, 4, br); rect_fill(TP_WALL_CX+1, TP_WALL_CY-11, 9, 4, br);
+              rect_fill(TP_WALL_CX-10, TP_WALL_CY-6, 6, 4, br);  rect_fill(TP_WALL_CX-3, TP_WALL_CY-6, 6, 4, br);
+              rect_fill(TP_WALL_CX+4, TP_WALL_CY-6, 6, 4, br); }
+            draw_text(TP_WALL_CX-text_w(wl,1)/2, TP_WALL_CY+4, wl, 1, COL(255,244,200));
+        }
+    }
+    if (IN.joy_on){
+        circle_out(IN.joy_ax, IN.joy_ay, 42, COL(34,31,52));
+        circle_shade(IN.joy_ax, IN.joy_ay, 39, COL(40,36,58));
+        disc_fill(IN.joy_ax, IN.joy_ay, 25, COL(30,27,46));
+        circle_out(IN.joy_kx, IN.joy_ky, 17, COL(198,204,220));
+        circle_shade(IN.joy_kx, IN.joy_ky, 14, COL(198,204,220));
+        disc_fill(IN.joy_kx-5, IN.joy_ky-5, 4, COL(244,246,250));
+    } else if (!S->craft_menu){
+        disc_fill(TP_DPAD_CX, TP_DPAD_CY, 42, COL(24,22,38));
+        circle_out(TP_DPAD_CX, TP_DPAD_CY, 15, COL(52,48,72));
+    }
+}
+static void bw_render(int pi){
+    bw_render_modes(pi);
+    bw_draw_touch(pi);
+    // the Start-menu and its CONTROLS panel, over this player's view
+    BwSim *S = &BWS[pi]; Buddy *b = &G.bud[pi];
+    if (S->bw_menu){
+        int vx=G.view_x0, vy=G.view_y0, vw2=G.view_w>0? G.view_w : VW, vh2=G.view_h>0? G.view_h : VH;
+        if (S->bw_menu==2){ draw_controls_panel(vx, vy, vw2, vh2, b->bw_mode<2? 1 : (b->bw_mode==5? 6 : b->bw_mode)); return; }
+        int pw=300, ph=140, px=vx+(vw2-pw)/2, py=vy+(vh2-ph)/2;
+        blend_rect(vx, vy, vw2, vh2, COL(8,8,14), 120);
+        rect_fill(px, py, pw, ph, COL(16,18,28)); rect_line(px, py, pw, ph, COL(198,164,84));
+        draw_text_center(px+pw/2, py+12, "PAUSED", 2, COL(255,214,64));
+        { static const char *rows[3] = { "RESUME", "CONTROLS", "LEAVE" };
+          for (int i=0;i<3;i++){
+              int ry = py+48+i*26;
+              if (i==S->bw_msel){ rect_fill(px+10, ry-4, pw-20, 19, COL(255,205,40)); draw_text_center(px+pw/2, ry, rows[i], 2, COL(30,26,44)); }
+              else draw_text_center(px+pw/2, ry, rows[i], 2, COL(235,238,245));
+          } }
+        draw_text_center(px+pw/2, py+ph-16, pad_mode()? "STICK/DPAD + A" : (mobile_ui()? "TAP A ROW" : "ARROWS + SPACE"), 1, COL(140,150,170));
+    }
+}
+static void bw_render_battle(int pi){
+    BwSim *S = &BWS[pi];
+    Buddy *b=&G.bud[pi];
+    int vx=G.view_x0, vy=G.view_y0, vw2=G.view_w>0? G.view_w : VW, vh2=G.view_h>0? G.view_h : VH;
+    int band = vh2<300? vh2/2 : 150;
+    rect_fill(vx, vy, vw2, vh2, COL(22,40,28));
+    rect_fill(vx, vy+vh2-band, vw2, band, COL(30,56,34));
+    ellipse_fill(vx+vw2/2, vy+vh2*58/100, vw2*39/100, vh2*12/100, COL(52,92,50));
+    ellipse_fill(vx+vw2/2, vy+vh2*58/100, vw2*26/100, vh2*8/100, COL(66,110,58));
+    // fighters on a stage far from any real map
+    float sx = b->x, sy = b->y, sa = b->aim;
+    G.camx = 20000; G.camy = 20000;
+    // spotlight pools under the fighters (glow-up)
+    { int bxp = SX(20000-112), byp = SY(20000+34), exp2 = SX(20000+118), eyp = SY(20000-24);
+      ellipse_fill(bxp, byp+9, 46, 13, COL(84,128,66)); ellipse_fill(bxp, byp+9, 30, 8, COL(102,148,80));
+      ellipse_fill(exp2, eyp+17, 46, 13, COL(84,128,66)); ellipse_fill(exp2, eyp+17, 30, 8, COL(102,148,80)); }
+    b->x = 20000-112; b->y = 20000+34; b->aim = 0;
+    draw_buddy(b);
+    b->x = sx; b->y = sy; b->aim = sa;
+    if (S->bat.boss) bw_draw_big_hacker(20000+118, 20000-14, S->bat.boss, 0);
+    else bw_draw_hacker(20000+118, 20000-24, S->bat.lvl, (S->bat.phase==2 && S->bat.t>0.85f)? 1.0f : 0.0f, 0);
+    // foe plate
+    rect_fill(vx+14, vy+12, 212, 34, COL(16,20,16)); rect_line(vx+14, vy+12, 212, 34, COL(255,120,110));
+    { char buf[64]; char *q=buf; q=sappend(q, bw_foe_name(S)); q=sappend(q, "  LV "); q=sapp_int(q, S->bat.lvl); *q=0;
+      draw_text(vx+20, vy+17, buf, 1, COL(255,210,200)); }
+    { float f = S->bat.hmax>0? S->bat.hhp/S->bat.hmax : 0; if (f<0) f=0;
+      rect_fill(vx+20, vy+31, 150, 5, COL(40,30,40)); rect_fill(vx+20, vy+31, (int)(150*f), 5, COL(255,120,90));
+      char hb[24]; char *q=hb; q=sapp_int(q, (int)S->bat.hhp); q=sappend(q, "/"); q=sapp_int(q, (int)S->bat.hmax); *q=0;
+      draw_text(vx+174, vy+30, hb, 1, COL(255,225,215)); }
+    // buddy plate (bottom-right of the view, above the command box)
+    { int px0 = vx+vw2-224, py0 = vy+vh2-128-((S->bat.natt>6)? ((S->bat.natt+1)/2-3)*15 : 0); if (py0 < vy+52) py0 = vy+52;
+    rect_fill(px0, py0, 210, 40, COL(16,20,16)); rect_line(px0, py0, 210, 40, COL(198,164,84));
+    { char buf[64]; char *q=buf; q=sappend(q, BUD_ELF[b->name_idx%BUD_NAMES_N]); q=sappend(q, " THE "); q=sappend(q, BUD_NAME[b->species%BUDN]); *q=0;
+      draw_text(px0+6, py0+5, buf, 1, COL(255,244,210)); }
+    { float f = b->maxhp>0? b->hp/b->maxhp : 0; if (f<0) f=0;
+      rect_fill(px0+6, py0+17, 130, 5, COL(40,30,40)); rect_fill(px0+6, py0+17, (int)(130*f), 5, f>0.35f? COL(120,230,90) : COL(255,170,60));
+      char hb[24]; char *q=hb; q=sapp_int(q, (int)b->hp); q=sappend(q, "/"); q=sapp_int(q, (int)b->maxhp); *q=0;
+      draw_text(px0+140, py0+16, hb, 1, COL(230,240,230));
+      float ef = b->energy/BUD_ENERGY_MAX; if (ef<0) ef=0;
+      rect_fill(px0+6, py0+26, 130, 4, COL(40,30,40)); rect_fill(px0+6, py0+26, (int)(130*ef), 4, COL(120,200,255));
+      char eb[24]; char *q2=eb; q2=sapp_int(q2, (int)b->energy); q2=sappend(q2, " EN"); *q2=0;
+      draw_text(px0+140, py0+25, eb, 1, COL(170,220,255)); } }
+    // the bottom box: attack menu or message (taller once items join)
+    int rows = (S->bat.natt+1)/2, bh = 84 + (rows>3? (rows-3)*15 : 0), rstep = rows>3? 15 : 18;
+    rect_fill(vx, vy+vh2-bh, vw2, bh, COL(14,16,22)); rect_line(vx, vy+vh2-bh, vw2, bh, COL(198,164,84));
+    if (S->bat.phase==0){
+        draw_text(vx+16, vy+vh2-bh+6, "CHOOSE AN ATTACK:", 1, COL(255,244,210));
+        for (int i=0;i<S->bat.natt;i++){
+            int mv = S->bat.attacks[i];
+            const char *nm; float cost, mult; bw_attack_info(b, mv, &nm, &cost, &mult);
+            int cxp = vx+16 + (i%2)*(vw2/2-20), cyp = vy+vh2-bh+22 + (i/2)*rstep;
+            int afford = b->energy >= cost;
+            if (i==S->bat.sel) draw_text(cxp, cyp, ">", 1, COL(255,220,90));
+            draw_text(cxp+12, cyp, nm, 1, afford? COL(240,248,240) : COL(110,110,120));
+            if (mv>=6){ char cb[20]; char *q=cb; q=sappend(q, "x"); q=sapp_int(q, b->items[mv-6]); *q=0;
+                draw_text(cxp + vw2/2-130, cyp, cb, 1, COL(255,210,130)); }
+            else if (cost>0){ char cb[20]; char *q=cb; q=sapp_int(q, (int)cost); q=sappend(q, " EN"); *q=0;
+                draw_text(cxp + vw2/2-130, cyp, cb, 1, afford? COL(170,220,255) : COL(110,110,120)); }
+            else if (mv!=5) draw_text(cxp + vw2/2-130, cyp, "FREE", 1, COL(160,230,160));
+        }
+    } else {
+        draw_text(vx+16, vy+vh2-bh+14, S->bat.msg, 1, COL(255,250,235));
+        if (S->bat.msg2[0]) draw_text(vx+16, vy+vh2-bh+32, S->bat.msg2, 1, COL(200,214,235));
+    }
+}
+
