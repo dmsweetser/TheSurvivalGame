@@ -1,1 +1,6 @@
-{"apkUrl": "https://github.com/dmsweetser/TheSurvivalGame/releases/download/v1.19/TheSurvivalGame.apk", "notes": "BOOT CAMP - every Arcade cabinet win now pays your Banzai Buddy XP toward training and taught moves. WAR! gains SKIRMISH mode: pick a field size (Small, Standard, Large) and an enemy (Easy, Normal, Hard) and fight a one-off battle with no campaign strings - winning pays buddy XP too. Campaign fields run richer: eleven bit nodes worth 8,200 bits, harvesters carry 30, you open with 300, and the first wave now waits at least 45 seconds. The Patch Bay trains the PATCHER, an autoseeking repair buddy that roams your base fixing buildings for bits. Plus: tap a selected building again to unselect it.", "versionCode": 19, "versionName": "1.19"}
+{
+  "versionCode": 20,
+  "versionName": "1.20",
+  "apkUrl": "https://github.com/dmsweetser/TheSurvivalGame/releases/download/v1.20/TheSurvivalGame.apk",
+  "notes": "TAKING COMMAND: WAR! gamepad cursor capture - selecting a building captures the command bar; navigate the menu only, A orders, B peels out. Training keeps the capture; arming a placement hands the field cursor back."
+}
