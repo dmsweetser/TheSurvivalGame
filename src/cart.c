@@ -15,11 +15,20 @@
 // ---------------------------------------------------------------------------
 #define CRT_OX 30000.0f
 #define CRT_OY 20000.0f
-#define CRT_MAXW 168
+#define CRT_MAXW 384
 static float CRT_WX[CRT_MAXW], CRT_WY[CRT_MAXW], CRT_CUM[CRT_MAXW + 1];
 static int CRT_N = 0;
 static float CRT_LEN = 0, CRT_OFF = 0;
-static float CRT_PAD[3][2];
+static float CRT_PAD[5][2];
+// v1.23 progression: each regional track lives in its own scaled
+// world (CRT_WW x CRT_WH, centre CRT_CX/CRT_CY, base radius CRT_RAD)
+// so the circuits can grow far beyond the old 640x360 frame; the road
+// half-width (CRT_HW, with rumble/apron/edge derived), the boost-pad
+// count and the on-road tire-stack obstacles (CRT_OBS) all ride along.
+static float CRT_WW = 640, CRT_WH = 360, CRT_CX = 320, CRT_CY = 180, CRT_RAD = 92;
+static float CRT_HW = 30, CRT_RUM = 37, CRT_APR = 45, CRT_EDG = 32.5f;
+static int CRT_NPAD = 3, CRT_NOBS = 0;
+static float CRT_OBS[5][2];
 // trackside scenery: trees, tire stacks, one grandstand (Nov 14 overhaul)
 #define CRT_SCN_N 49
 static float CRT_SCX[CRT_SCN_N], CRT_SCY[CRT_SCN_N]; static int CRT_SCT[CRT_SCN_N];
@@ -89,9 +98,28 @@ static const float CRT_PARAM[7][4] = {
     { 16, 16, 0.2f, 5.0f },   // 6 Cable Jungle
     { 22, 13, 3.3f, 2.8f },   // 7 The Unmaintained Depths
 };
+// v1.23 progression (Daniel): the races grow — each regional circuit
+// is its v1.11 self scaled up by CRT_SCALE and given a third, faster
+// wiggle (CRT_H3: amplitude in scale-1 units, harmonic, phase), so
+// centreline length ramps 1.15x / 1.30x / 1.50x / 1.70x / 1.90x /
+// 2.10x / 2.40x against the Meadows oval (tuned offline against a
+// replica of this builder; verified in-game via dbg_crtskip).
+// CRT_M is the waypoint sample count (spacing stays ~8 units).
+static const float CRT_SCALE[7] = { 1.504f, 1.658f, 2.070f, 2.106f, 2.594f, 2.580f, 2.992f };
+static const float CRT_H3[7][3] = {
+    { 11, 4, 4.5f }, { 9, 4, 4.5f }, { 7, 4, 0.0f }, { 11, 4, 4.5f },
+    { 9, 4, 1.8f },  { 13, 4, 3.6f }, { 13, 4, 0.0f },
+};
+static const int CRT_M[7] = { 168, 188, 217, 246, 275, 304, 347 };
+// per-track dressing (index = track): the road narrows, the boost
+// pads multiply and tire stacks appear on the road in the far country
+static const float CRT_HW_T[8]  = { 30, 30, 30, 30, 28, 26, 24, 22 };
+static const int CRT_NPAD_T[8]  = { 3, 3, 3, 4, 4, 5, 5, 5 };
+static const int CRT_NOBS_T[8]  = { 0, 0, 0, 0, 2, 3, 4, 5 };
 static void crt_build(int track){
     CRT_N = 0;
     if (track <= 0){
+        CRT_WW = 640; CRT_WH = 360; CRT_CX = 320; CRT_CY = 180; CRT_RAD = 92;
         crt_line(180, 290, 460, 290);          // bottom straight (start/finish)
         crt_arc(460, 220, PI/2, 0);            // bottom-right corner
         crt_line(530, 220, 530, 140);          // right straight
@@ -102,20 +130,29 @@ static void crt_build(int track){
         crt_arc(180, 220, PI, PI/2);           // bottom-left corner, closing the loop
     } else {
         const float *P = CRT_PARAM[track-1];
-        int M = 168;
+        const float *H = CRT_H3[track-1];
+        float s = CRT_SCALE[track-1];
+        int M = CRT_M[track-1];
+        CRT_WW = 640.0f * s; CRT_WH = 360.0f * s;
+        CRT_CX = 320.0f * s; CRT_CY = 180.0f * s; CRT_RAD = 92.0f * s;
         for (int i = 0; i < M; i++){
             float th = (float)i / (float)M * 6.2831853f;
-            float r = 92.0f + P[0]*fsin(2.0f*th + P[2]) + P[1]*fsin(3.0f*th + P[3]);
-            crt_addpt(320.0f + fcos(th) * r * 1.82f, 180.0f + fsin(th) * r);
+            float r = CRT_RAD + P[0]*s*fsin(2.0f*th + P[2]) + P[1]*s*fsin(3.0f*th + P[3])
+                    + H[0]*s*fsin(H[1]*th + H[2]);
+            crt_addpt(CRT_CX + fcos(th) * r * 1.82f, CRT_CY + fsin(th) * r);
         }
     }
+    CRT_HW = CRT_HW_T[track];
+    CRT_RUM = CRT_HW * 37.0f / 30.0f; CRT_APR = CRT_HW * 1.5f; CRT_EDG = CRT_HW * 32.5f / 30.0f;
+    CRT_NPAD = CRT_NPAD_T[track]; CRT_NOBS = CRT_NOBS_T[track];
     CRT_CUM[0] = 0;
     for (int i = 1; i <= CRT_N; i++){ int a = i-1, b = i % CRT_N;
         float dx = CRT_WX[b] - CRT_WX[a], dy = CRT_WY[b] - CRT_WY[a];
         CRT_CUM[i] = CRT_CUM[i-1] + fsqrt(dx*dx + dy*dy); }
     CRT_LEN = CRT_CUM[CRT_N];
-    { int bi = 0; float bd = 1e18f;        // the start line sits at the bottom, near (320, 290)
-      for (int i = 0; i < CRT_N; i++){ float dx = CRT_WX[i]-320, dy = CRT_WY[i]-290;
+    { int bi = 0; float bd = 1e18f;        // the start line sits at the bottom of the loop
+      float tx = CRT_CX, ty = (track <= 0)? 290.0f : CRT_CY + CRT_RAD * 1.02f;
+      for (int i = 0; i < CRT_N; i++){ float dx = CRT_WX[i]-tx, dy = CRT_WY[i]-ty;
           float d = dx*dx + dy*dy; if (d < bd){ bd = d; bi = i; } }
       CRT_OFF = CRT_CUM[bi]; }
     if (track <= 0){
@@ -123,10 +160,24 @@ static void crt_build(int track){
         CRT_PAD[1][0] = 530; CRT_PAD[1][1] = 180;
         CRT_PAD[2][0] = 110; CRT_PAD[2][1] = 180;
     } else {
-        static const float PF[3] = { 0.30f, 0.56f, 0.82f };
-        for (int k = 0; k < 3; k++){ float x, y, hx, hy;
+        static const float PF3[3] = { 0.30f, 0.56f, 0.82f };
+        static const float PF4[4] = { 0.20f, 0.44f, 0.66f, 0.88f };
+        static const float PF5[5] = { 0.14f, 0.32f, 0.50f, 0.68f, 0.86f };
+        const float *PF = (CRT_NPAD == 5)? PF5 : (CRT_NPAD == 4)? PF4 : PF3;
+        for (int k = 0; k < CRT_NPAD; k++){ float x, y, hx, hy;
             crt_point_at(CRT_OFF + PF[k] * CRT_LEN, 0, &x, &y, &hx, &hy);
             CRT_PAD[k][0] = x; CRT_PAD[k][1] = y; }
+        // tire-stack obstacles on the road's edge, alternating sides —
+        // the far country's racing line is not a clean one
+        static const float OF2[2] = { 0.35f, 0.72f };
+        static const float OF3[3] = { 0.26f, 0.52f, 0.78f };
+        static const float OF4[4] = { 0.24f, 0.46f, 0.64f, 0.84f };
+        static const float OF5[5] = { 0.18f, 0.36f, 0.54f, 0.72f, 0.88f };
+        const float *OF = (CRT_NOBS == 5)? OF5 : (CRT_NOBS == 4)? OF4 : (CRT_NOBS == 3)? OF3 : OF2;
+        for (int k = 0; k < CRT_NOBS; k++){ float x, y, hx, hy;
+            float lat = ((k % 2)? -1.0f : 1.0f) * (CRT_HW - 4.0f);
+            crt_point_at(CRT_OFF + OF[k] * CRT_LEN, lat, &x, &y, &hx, &hy);
+            CRT_OBS[k][0] = x; CRT_OBS[k][1] = y; }
     }
     // scenery: a ring of trees and tire stacks outside the road, a few
     // infield trees, and the grandstand watching the top straight
@@ -137,7 +188,14 @@ static void crt_build(int track){
           float lat = (h & 64)? 1.0f : -1.0f;
           lat *= 56.0f + (float)((h >> 8) % 34);
           float x, y, hx, hy; crt_point_at(ap, lat, &x, &y, &hx, &hy);
-          if (x < 14 || x > 626 || y < 14 || y > 346) continue;
+          if (x < 14 || x > CRT_WW - 14 || y < 14 || y > CRT_WH - 14) continue;
+          if (track > 0){   // v1.23: on the big folded circuits a ring
+                            // spot can land on a NEIGHBOURING branch —
+                            // keep scenery a clear 48 off the asphalt
+              float bd2 = 1e18f;
+              for (int i = 0; i < CRT_N; i += 2){ float dx = CRT_WX[i]-x, dy = CRT_WY[i]-y; float d = dx*dx + dy*dy; if (d < bd2) bd2 = d; }
+              if (bd2 < 48.0f * 48.0f) continue;
+          }
           CRT_SCX[n] = x; CRT_SCY[n] = y; CRT_SCT[n] = ((h >> 12) % 6 == 0)? 1 : 0; n++;
       }
       if (track <= 0){
@@ -150,7 +208,7 @@ static void crt_build(int track){
           for (int k = 0; k < 14 && n < CRT_SCN_N - 2; k++){
               float x, y, hx, hy;
               crt_point_at(CRT_OFF + (k + 0.5f) * CRT_LEN / 14.0f, -72.0f - (float)(k % 3) * 14.0f, &x, &y, &hx, &hy);
-              if (x < 20 || x > 620 || y < 20 || y > 340) continue;
+              if (x < 20 || x > CRT_WW - 20 || y < 20 || y > CRT_WH - 20) continue;
               float bd2 = 1e18f;
               for (int i = 0; i < CRT_N; i += 2){ float dx = CRT_WX[i]-x, dy = CRT_WY[i]-y; float d = dx*dx + dy*dy; if (d < bd2) bd2 = d; }
               if (bd2 < 50.0f * 50.0f) continue;
@@ -159,8 +217,15 @@ static void crt_build(int track){
           // the grandstand watches the start from outside the loop
           // (Nov 15: pushed further out and further past the line —
           // at 116 it loomed over the grid as a screen-filling wall)
-          { float x, y, hx, hy; crt_point_at(CRT_OFF + CRT_LEN * 0.10f, 152.0f, &x, &y, &hx, &hy);
-            if (x > 56 && x < 584 && y > 22 && y < 338){ CRT_SCX[n] = x; CRT_SCY[n] = y; CRT_SCT[n] = 3; n++; } }
+          { float x, y, hx, hy; int placed = 0;
+            for (int side = 0; side < 2 && !placed; side++){
+                crt_point_at(CRT_OFF + CRT_LEN * 0.10f, side? -152.0f : 152.0f, &x, &y, &hx, &hy);
+                if (!(x > 56 && x < CRT_WW - 56 && y > 22 && y < CRT_WH - 22)) continue;
+                float bd2 = 1e18f;   // v1.23: never on a neighbouring branch
+                for (int i = 0; i < CRT_N; i += 2){ float dx = CRT_WX[i]-x, dy = CRT_WY[i]-y; float d = dx*dx + dy*dy; if (d < bd2) bd2 = d; }
+                if (bd2 < 48.0f * 48.0f) continue;
+                CRT_SCX[n] = x; CRT_SCY[n] = y; CRT_SCT[n] = 3; n++; placed = 1;
+            } }
       }
       while (n < CRT_SCN_N){ CRT_SCX[n] = -100; CRT_SCY[n] = -100; CRT_SCT[n] = 0; n++; }
     }
@@ -281,7 +346,8 @@ static void crt_start_race(int pi){
 static void crt_drive_kart(BwSim *S, int i, int keys, int go, float dt){
     int bi = crt_nearest_full(S->crt_x[i], S->crt_y[i]);
     float dxl = S->crt_x[i] - CRT_WX[bi], dyl = S->crt_y[i] - CRT_WY[bi];
-    int onroad = (dxl*dxl + dyl*dyl) <= 31.0f * 31.0f;
+    float hw1 = CRT_HW + 1.0f;
+    int onroad = (dxl*dxl + dyl*dyl) <= hw1 * hw1;
     float vmax = onroad? 168.0f : 62.0f;
     if (S->crt_boost[i] > 0){ S->crt_boost[i] -= dt; vmax *= 1.38f; }
     float v = S->crt_v[i];
@@ -516,7 +582,8 @@ static void crt_update(int pi, float dt, const BwIn *in){
         crt_point_at(CRT_OFF + S->crt_prog[i] + 48.0f, 0, &tx, &ty, &hx, &hy);
         { float cross = hx * h2y - hy * h2x;
           float want = S->crt_off[i] * 0.3f + cross * 20.0f;
-          if (want > 14.0f) want = 14.0f; if (want < -14.0f) want = -14.0f;
+          float lc = CRT_HW - 10.0f; if (lc > 14.0f) lc = 14.0f;
+          if (want > lc) want = lc; if (want < -lc) want = -lc;
           S->crt_line[i] += (want - S->crt_line[i]) * (dt * 2.2f > 1.0f? 1.0f : dt * 2.2f); }
         crt_point_at(CRT_OFF + S->crt_prog[i] + 48.0f, S->crt_line[i], &tx, &ty, &hx, &hy);
         // traffic sense: if a kart is right on your nose, shade away
@@ -536,10 +603,12 @@ static void crt_update(int pi, float dt, const BwIn *in){
         float curve = ffabs(crt_wrap(fatan2(h2y, h2x) - fatan2(hy, hx)));
         float tv = 158.0f * S->crt_skill[i] * (1.0f - (curve > 0.5f? 0.30f : curve * 0.30f));
         float rubber = S->crt_prog[0] - S->crt_prog[i];
-        tv *= (rubber > 160.0f)? 1.05f : (rubber < -160.0f)? 0.95f : 1.0f;
+        float rbw = CRT_LEN * 0.178f;   // v1.23: the band stretches with the circuit
+        tv *= (rubber > rbw)? 1.05f : (rubber < -rbw)? 0.95f : 1.0f;
         { int bi = crt_nearest_full(S->crt_x[i], S->crt_y[i]);
           float dxl = S->crt_x[i] - CRT_WX[bi], dyl = S->crt_y[i] - CRT_WY[bi];
-          if (dxl*dxl + dyl*dyl > 31.0f * 31.0f) tv *= 0.45f; }
+          float hw1 = CRT_HW + 1.0f;
+          if (dxl*dxl + dyl*dyl > hw1 * hw1) tv *= 0.45f; }
         if (S->crt_boost[i] > 0){ S->crt_boost[i] -= dt; tv *= 1.30f; }
         float v = S->crt_v[i];
         if (v < tv){ v += 130.0f * dt; if (v > tv) v = tv; }
@@ -549,7 +618,7 @@ static void crt_update(int pi, float dt, const BwIn *in){
         S->crt_y[i] += fsin(S->crt_h[i]) * v * dt;
     }
     // ---- boost pads
-    for (int i = 0; i < 6; i++) for (int pd = 0; pd < 3; pd++){
+    for (int i = 0; i < 6; i++) for (int pd = 0; pd < CRT_NPAD; pd++){
         float dx = S->crt_x[i] - CRT_PAD[pd][0], dy = S->crt_y[i] - CRT_PAD[pd][1];
         if (dx*dx + dy*dy < 19*19 && S->crt_boost[i] <= 0){
             S->crt_boost[i] = 0.9f;
@@ -570,10 +639,21 @@ static void crt_update(int pi, float dt, const BwIn *in){
             S->crt_v[i] += dv; S->crt_v[j] -= dv;
             S->crt_v[i] *= 0.995f; S->crt_v[j] *= 0.995f; }
     }
+    // ---- tire-stack obstacles (v1.23, far country): a firm bounce
+    // and a bite of speed for anyone who clips one, human or rival
+    for (int i = 0; i < 6; i++) for (int ob = 0; ob < CRT_NOBS; ob++){
+        float dx = S->crt_x[i] - CRT_OBS[ob][0], dy = S->crt_y[i] - CRT_OBS[ob][1];
+        float d2 = dx*dx + dy*dy;
+        if (d2 < 17.0f * 17.0f && d2 > 0.01f){ float d = fsqrt(d2);
+            S->crt_x[i] = CRT_OBS[ob][0] + dx / d * 17.0f;
+            S->crt_y[i] = CRT_OBS[ob][1] + dy / d * 17.0f;
+            if (S->crt_v[i] > 50.0f && (i == 0 || (i == 1 && S->crt_duo >= 0))) sfx(17);
+            S->crt_v[i] *= 0.55f; }
+    }
     // ---- bounds, progress, finishes
     for (int i = 0; i < 6; i++){
-        if (S->crt_x[i] < 18) S->crt_x[i] = 18; if (S->crt_x[i] > 622) S->crt_x[i] = 622;
-        if (S->crt_y[i] < 18) S->crt_y[i] = 18; if (S->crt_y[i] > 342) S->crt_y[i] = 342;
+        if (S->crt_x[i] < 18) S->crt_x[i] = 18; if (S->crt_x[i] > CRT_WW - 18) S->crt_x[i] = CRT_WW - 18;
+        if (S->crt_y[i] < 18) S->crt_y[i] = 18; if (S->crt_y[i] > CRT_WH - 18) S->crt_y[i] = CRT_WH - 18;
         crt_track_prog(S, i);
         if (!S->crt_finplace[i] && S->crt_prog[i] >= 3.0f * CRT_LEN){
             S->crt_finplace[i] = ++S->crt_fincount;
@@ -856,15 +936,15 @@ static void crt_render_view(int sim_pi, int viewer_pi){
             float dl = fsqrt(dxn*dxn + dyn*dyn); if (dl < 0.001f) dl = 1.0f;
             float nx = -dyn / dl, ny = dxn / dl;
             float f1, f2;
-            CRT_PROJ(CRT_WX[si] + nx * 30.0f, CRT_WY[si] + ny * 30.0f, f1, rsx[j], rsy[j]);
-            CRT_PROJ(CRT_WX[si] - nx * 30.0f, CRT_WY[si] - ny * 30.0f, f2, lsx[j], lsy[j]);
+            CRT_PROJ(CRT_WX[si] + nx * CRT_HW, CRT_WY[si] + ny * CRT_HW, f1, rsx[j], rsy[j]);
+            CRT_PROJ(CRT_WX[si] - nx * CRT_HW, CRT_WY[si] - ny * CRT_HW, f2, lsx[j], lsy[j]);
             rf[j] = (f1 + f2) * 0.5f;
-            CRT_PROJ(CRT_WX[si] + nx * 37.0f, CRT_WY[si] + ny * 37.0f, f1, rrx[j], rry[j]);
-            CRT_PROJ(CRT_WX[si] - nx * 37.0f, CRT_WY[si] - ny * 37.0f, f2, lrx[j], lry[j]);
-            CRT_PROJ(CRT_WX[si] + nx * 45.0f, CRT_WY[si] + ny * 45.0f, f1, arx[j], ary[j]);
-            CRT_PROJ(CRT_WX[si] - nx * 45.0f, CRT_WY[si] - ny * 45.0f, f2, alx[j], aly[j]);
-            CRT_PROJ(CRT_WX[si] + nx * 32.5f, CRT_WY[si] + ny * 32.5f, f1, erx[j], ery[j]);
-            CRT_PROJ(CRT_WX[si] - nx * 32.5f, CRT_WY[si] - ny * 32.5f, f2, elx[j], ely[j]);
+            CRT_PROJ(CRT_WX[si] + nx * CRT_RUM, CRT_WY[si] + ny * CRT_RUM, f1, rrx[j], rry[j]);
+            CRT_PROJ(CRT_WX[si] - nx * CRT_RUM, CRT_WY[si] - ny * CRT_RUM, f2, lrx[j], lry[j]);
+            CRT_PROJ(CRT_WX[si] + nx * CRT_APR, CRT_WY[si] + ny * CRT_APR, f1, arx[j], ary[j]);
+            CRT_PROJ(CRT_WX[si] - nx * CRT_APR, CRT_WY[si] - ny * CRT_APR, f2, alx[j], aly[j]);
+            CRT_PROJ(CRT_WX[si] + nx * CRT_EDG, CRT_WY[si] + ny * CRT_EDG, f1, erx[j], ery[j]);
+            CRT_PROJ(CRT_WX[si] - nx * CRT_EDG, CRT_WY[si] - ny * CRT_EDG, f2, elx[j], ely[j]);
         }
         for (int j = NS - 1; j >= 0; j--){
             if (rf[j + 1] < 4.0f) continue;
@@ -909,7 +989,7 @@ static void crt_render_view(int sim_pi, int viewer_pi){
           if (ff > 8.0f && ff < 620.0f && fl < ff * 1.1f + 50.0f && fl > -(ff * 1.1f + 50.0f)){
               float nx = -fhy, ny = fhx;
               for (int c2 = 0; c2 < 8; c2++){
-                  float la = -28.0f + c2 * 7.0f, lb = la + 7.0f;
+                  float la = (-28.0f + c2 * 7.0f) * CRT_HW / 30.0f, lb = la + 7.0f * CRT_HW / 30.0f;
                   int ax, ay, bx, by, cx2, cy2, dx2, dy2; float tf;
                   CRT_PROJ(fx + nx * la, fy + ny * la, tf, ax, ay);
                   CRT_PROJ(fx + nx * lb, fy + ny * lb, tf, bx, by);
@@ -922,7 +1002,7 @@ static void crt_render_view(int sim_pi, int viewer_pi){
               // the start gantry: two poles and the banner over the line
               { int gx[2], gy[2], gt[2]; float gf[2]; int ok = 1;
                 for (int p2 = 0; p2 < 2; p2++){
-                    float la = p2? 44.0f : -44.0f;
+                    float la = p2? CRT_HW + 14.0f : -(CRT_HW + 14.0f);
                     CRT_PROJ(fx + nx * la, fy + ny * la, gf[p2], gx[p2], gy[p2]);
                     if (gf[p2] < 6.0f) ok = 0;
                     gt[p2] = gy[p2] - (int)(30.0f * F / gf[p2]);
@@ -942,7 +1022,7 @@ static void crt_render_view(int sim_pi, int viewer_pi){
                 } }
           } }
         // boost pads lying on the road
-        for (int pd = 0; pd < 3; pd++){
+        for (int pd = 0; pd < CRT_NPAD; pd++){
             float pcx = CRT_PAD[pd][0], pcy = CRT_PAD[pd][1];
             float ff; int psx, psy; CRT_PROJ(pcx, pcy, ff, psx, psy);
             { float pdx = pcx - camx, pdy = pcy - camy;
@@ -955,16 +1035,17 @@ static void crt_render_view(int sim_pi, int viewer_pi){
             float ux = dxn / dl, uy = dyn / dl, nx = -uy, ny = ux;
             int ax, ay, bx, by, cx2, cy2, dx2, dy2; float tf;
             int gx2, gy2, hx2, hy2, ix2, iy2, jx2, jy2;
-            CRT_PROJ(pcx + nx * 22.0f - ux * 12.0f, pcy + ny * 22.0f - uy * 12.0f, tf, gx2, gy2);
-            CRT_PROJ(pcx - nx * 22.0f - ux * 12.0f, pcy - ny * 22.0f - uy * 12.0f, tf, hx2, hy2);
-            CRT_PROJ(pcx - nx * 22.0f + ux * 12.0f, pcy - ny * 22.0f + uy * 12.0f, tf, ix2, iy2);
-            CRT_PROJ(pcx + nx * 22.0f + ux * 12.0f, pcy + ny * 22.0f + uy * 12.0f, tf, jx2, jy2);
+            float pw = CRT_HW * 22.0f / 30.0f, pw2 = CRT_HW * 19.0f / 30.0f;
+            CRT_PROJ(pcx + nx * pw - ux * 12.0f, pcy + ny * pw - uy * 12.0f, tf, gx2, gy2);
+            CRT_PROJ(pcx - nx * pw - ux * 12.0f, pcy - ny * pw - uy * 12.0f, tf, hx2, hy2);
+            CRT_PROJ(pcx - nx * pw + ux * 12.0f, pcy - ny * pw + uy * 12.0f, tf, ix2, iy2);
+            CRT_PROJ(pcx + nx * pw + ux * 12.0f, pcy + ny * pw + uy * 12.0f, tf, jx2, jy2);
             tri_fill(gx2, gy2, hx2, hy2, ix2, iy2, COL(255, 216, 118));
             tri_fill(gx2, gy2, ix2, iy2, jx2, jy2, COL(255, 216, 118));
-            CRT_PROJ(pcx + nx * 19.0f - ux * 9.0f, pcy + ny * 19.0f - uy * 9.0f, tf, ax, ay);
-            CRT_PROJ(pcx - nx * 19.0f - ux * 9.0f, pcy - ny * 19.0f - uy * 9.0f, tf, bx, by);
-            CRT_PROJ(pcx - nx * 19.0f + ux * 9.0f, pcy - ny * 19.0f + uy * 9.0f, tf, cx2, cy2);
-            CRT_PROJ(pcx + nx * 19.0f + ux * 9.0f, pcy + ny * 19.0f + uy * 9.0f, tf, dx2, dy2);
+            CRT_PROJ(pcx + nx * pw2 - ux * 9.0f, pcy + ny * pw2 - uy * 9.0f, tf, ax, ay);
+            CRT_PROJ(pcx - nx * pw2 - ux * 9.0f, pcy - ny * pw2 - uy * 9.0f, tf, bx, by);
+            CRT_PROJ(pcx - nx * pw2 + ux * 9.0f, pcy - ny * pw2 + uy * 9.0f, tf, cx2, cy2);
+            CRT_PROJ(pcx + nx * pw2 + ux * 9.0f, pcy + ny * pw2 + uy * 9.0f, tf, dx2, dy2);
             { u32 padc = ((int)(S->crt_t * 6.0f + pd * 1.7f) & 1)? COL(240, 130, 40) : COL(252, 176, 64);
               tri_fill(ax, ay, bx, by, cx2, cy2, padc);
               tri_fill(ax, ay, cx2, cy2, dx2, dy2, padc); }
@@ -974,13 +1055,18 @@ static void crt_render_view(int sim_pi, int viewer_pi){
     // everything with depth — trackside scenery and rival karts —
     // in one far-to-near pass, so trees occlude and are occluded
     // exactly like the karts they stand beside
-    { enum { MAXIT = 6 + CRT_SCN_N + 20 };
+    { enum { MAXIT = 6 + CRT_SCN_N + 20 + 8 };
       float itf[MAXIT]; int itk[MAXIT], itx[MAXIT], itsx[MAXIT], itsy[MAXIT], itn = 0;
       for (int sn = 0; sn < CRT_SCN_N; sn++){
           if (CRT_SCX[sn] < -50.0f) continue;
           float f; int sx, sy; CRT_PROJ(CRT_SCX[sn], CRT_SCY[sn], f, sx, sy);
           if (f < 9.0f || f > 880.0f) continue;
           itf[itn] = f; itk[itn] = 1; itx[itn] = sn; itsx[itn] = sx; itsy[itn] = sy; itn++;
+      }
+      for (int ob = 0; ob < CRT_NOBS; ob++){
+          float f; int sx, sy; CRT_PROJ(CRT_OBS[ob][0], CRT_OBS[ob][1], f, sx, sy);
+          if (f < 9.0f || f > 880.0f) continue;
+          itf[itn] = f; itk[itn] = 4; itx[itn] = ob; itsx[itn] = sx; itsy[itn] = sy; itn++;
       }
       for (int q2 = 0; q2 < 20; q2++){
           if (S->crt_puffl[q2] <= 0) continue;
@@ -998,6 +1084,15 @@ static void crt_render_view(int sim_pi, int viewer_pi){
           itf[b2+1] = tf; itk[b2+1] = tk; itx[b2+1] = tx2; itsx[b2+1] = tsx; itsy[b2+1] = tsy; }
       for (int oi = 0; oi < itn; oi++){
         float f = itf[oi]; int sx = itsx[oi], base = itsy[oi];
+        if (itk[oi] == 4){   // v1.23: a tire-stack OBSTACLE on the road
+            int tw = (int)(13.0f * F / f); if (tw < 3) continue;
+            if (sx < vx - tw || sx > vx + vw2 + tw) continue;
+            int thh = tw/3; if (thh < 1) thh = 1;
+            rect_fill(sx - tw/2, base - thh, tw, thh, COL(38, 38, 44));
+            rect_fill(sx - tw/2, base - thh*2, tw, thh, COL(226, 226, 226));
+            rect_fill(sx - tw/2, base - thh*3, tw, thh, COL(255, 190, 40));
+            continue;
+        }
         if (itk[oi] == 1){
             int sn = itx[oi], tp = CRT_SCT[sn];
             if (tp == 0){   // a tree (every seventh wears the region's tuft colour)
@@ -1101,10 +1196,10 @@ static void crt_render_view(int sim_pi, int viewer_pi){
         rect_fill(mx0, my0, mw, mh, COL(10, 26, 14));
         rect_line(mx0, my0, mw, mh, COL(120, 160, 120));
         for (int i = 0; i < CRT_N; i += 2)
-            rect_fill(mx0 + 4 + (int)(CRT_WX[i] * (mw - 8) / 640.0f), my0 + 4 + (int)(CRT_WY[i] * (mh - 8) / 360.0f), 2, 2, COL(120, 130, 120));
+            rect_fill(mx0 + 4 + (int)(CRT_WX[i] * (mw - 8) / CRT_WW), my0 + 4 + (int)(CRT_WY[i] * (mh - 8) / CRT_WH), 2, 2, COL(120, 130, 120));
         for (int i = 0; i < 6; i++){
             u32 dc = (i == vk)? COL(255, 255, 255) : (S->crt_duo >= 0 && i == 1 - vk)? COL(255, 230, 90) : COL(160, 160, 160);
-            rect_fill(mx0 + 3 + (int)(S->crt_x[i] * (mw - 8) / 640.0f), my0 + 3 + (int)(S->crt_y[i] * (mh - 8) / 360.0f), 3, 3, dc);
+            rect_fill(mx0 + 3 + (int)(S->crt_x[i] * (mw - 8) / CRT_WW), my0 + 3 + (int)(S->crt_y[i] * (mh - 8) / CRT_WH), 3, 3, dc);
         }
     }
 #undef CRT_PROJ

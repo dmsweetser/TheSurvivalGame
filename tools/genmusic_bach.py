@@ -285,6 +285,19 @@ lead = [a if a >= 0 else b for a, b in zip(lead, f1g)]   # soprano first, flute 
 mid = grid(f2, SLICE)
 bass = grid(co, SLICE)
 
+# v1.23 rehash — a continuo REALIZATION of the bass: where the
+# throbbing pulse repeats a pitch on the next eighth, bounce the
+# repeat to the octave (the score's own bes' gestures, generalised).
+# Rhythm, counts and the flute/soprano lines are untouched.
+for bar in range(21):
+    prev = -1
+    for k in range(8):
+        s = bar * 16 + k * 2
+        v = bass[s]
+        if v >= 0:
+            if v == prev: bass[s] = v + 12
+            prev = v
+
 NAMES_OUT = {v: k for k, v in
              [(60, 'C4'), (62, 'D4'), (64, 'E4'), (65, 'F4'), (67, 'G4'), (69, 'A4'), (70, 'Bb4'),
               (72, 'C5'), (74, 'D5'), (75, 'Eb5'), (77, 'F5'), (79, 'G5'), (81, 'A5'), (82, 'Bb5'), (84, 'C6')]}
