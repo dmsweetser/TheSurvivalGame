@@ -1,6 +1,6 @@
 {
-  "versionCode": 23,
-  "versionName": "1.23",
-  "apkUrl": "https://github.com/dmsweetser/TheSurvivalGame/releases/download/v1.23/TheSurvivalGame.apk",
-  "notes": "GRAND TOUR: every piece of music re-arranged in place - same public-domain masterpieces in the same spots, with fresh voicings, bass lines and accompaniment, re-measured to sit at the old loudness. SUPER BUDDY CART is a progression now: the circuits stretch from the untouched Bug Meadows oval up to The Unmaintained Depths at 2.4x the length, the roads narrow as you climb, boost pads multiply, tire stacks sit on the racing line in the far country, and both Grand Prix cups inherit the whole ramp."
+  "versionCode": 24,
+  "versionName": "1.24",
+  "apkUrl": "https://github.com/dmsweetser/TheSurvivalGame/releases/download/v1.24/TheSurvivalGame.apk",
+  "notes": "POLISHED SEAMS: a whole-game polish pass - stepping between worlds now fades like an eyelid blink, split-screen co-op gets a gold-hearted seam with P1/P2 chips in each player's hoodie colour, the Walk of Fame marquee lights up in confetti colours, Bug Bowl gets its speckled alley wall and warm light pooled on the pin deck, motes drift in the meadow air, and Eddie Mode reaches the crawlers in Super Buddy Run. Plus a real fix: holding Backspace in the Whales Only code box now chews through the code on web the way it always did in the native apps."
 }
