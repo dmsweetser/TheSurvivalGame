@@ -2065,7 +2065,7 @@ static void war_pad_update(int pi, float dt){
         int si=-1;
         for (int i=0;i<WAR_MAXU;i++) if (S->war_uhp[i]>0 && S->war_usel[i]){ si=i; break; }
         if (si>=0){ S->war_curx = S->war_ux[si]; S->war_cury = S->war_uy[si]; }
-        else { S->war_curx = S->war_camx; S->war_cury = S->war_camy + WAR_BAR_H*0.5f; }
+        else { S->war_curx = S->war_camx; S->war_cury = S->war_camy; }   // v1.22 fix: wake AT the camera centre — the point dbg_warcam and P2's centre-tap already treat as centre. The old +WAR_BAR_H/2 spawn sat 23u below it, a hair outside a small building's tap disc (Zapper 22u), so a wake-press A missed until the stick was nudged
         if (!stick) return;   // a button wake spends the press on waking; it does not also tap
         pe = 0;               // a stick wake still flies this frame, but its buttons wait
     }

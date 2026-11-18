@@ -112,17 +112,12 @@ static void cas_update(int pi, float dt, const BwIn *in){
         return;
     }
     if (in->exit_){
-        // TRAPPED means trapped (Daniel, Nov 14): there is no
-        // bail-out from the castle. The only way out is the
-        // courtyard gate, and the gate wants the key — so leaving
-        // by ANY door requires cas_key. (Dying still carries you
-        // out; that is not leaving, that is losing.)
-        if (S->cas_key){ bw_exit(pi, 0); return; }
-        if (S->cas_notecd <= 0){
-            S->cas_notecd = 2.0f;
-            cas_note(S, "NO WAY OUT. SOMEWHERE IN HERE IS A KEY.", 2.0f);
-            sfx(16);
-        }
+        // v1.22 (Daniel, Nov 17): the v1.11 "no leaving without the
+        // key" gate was never his intent — CASTLE is a cabinet, not
+        // a prison, and walking back to the Arcade ALWAYS works.
+        // The key still gates the courtyard gate (the win) and
+        // nothing else.
+        bw_exit(pi, 0); return;
     }
     if (S->cas_hitcd > 0) S->cas_hitcd -= dt;
     if (S->cas_notecd > 0) S->cas_notecd -= dt;
@@ -252,9 +247,20 @@ static void cas_render(int pi){
 #define CRY(ly) (oy + (int)((ly) * cs))
 #define CRS(v) ((int)((v) * cs) < 1 ? 1 : (int)((v) * cs))
     rect_fill(vx, vy, vw2, vh2, COL(6, 8, 6));
-    // floor: a dim checker, text-mode green
-    for (int ty = 0; ty < 12; ty++) for (int tx = 0; tx < 20; tx++)
-        if ((tx + ty) & 1) rect_fill(CRX(tx*32), CRY(ty*32), CRS(32) + 1, CRS(32) + 1, COL(13, 19, 13));
+    // floor: a dim checker, text-mode green — v1.22: every flagstone
+    // wears its own shade now (hashed, never stored) with a sparse
+    // grit speckle, so the courtyard reads as stone, not graph paper
+    for (int ty = 0; ty < 12; ty++) for (int tx = 0; tx < 20; tx++){
+        u32 fb = ((tx + ty) & 1)? COL(13, 19, 13) : COL(10, 15, 10);
+        u32 fc = col_shade(fb, 0.90f + hash_f(tx, ty, 7)*0.20f);
+        rect_fill(CRX(tx*32), CRY(ty*32), CRS(32) + 1, CRS(32) + 1, fc);
+        float sp = hash_f(tx, ty, 21);
+        if (sp > 0.70f){
+            u32 sc = col_shade(fb, 1.35f);
+            pset(CRX(tx*32 + (int)(sp*83.0f)%26 + 3), CRY(ty*32 + (int)(sp*47.0f)%26 + 3), sc);
+            pset(CRX(tx*32 + (int)(sp*29.0f)%22 + 6), CRY(ty*32 + (int)(sp*61.0f)%22 + 6), sc);
+        }
+    }
     // the stone walls, with mortar lines
     { u32 wc = COL(74, 88, 74), wl = COL(52, 64, 52);
       rect_fill(CRX(0), CRY(0), CRS(640), CRS(CAS_Y0), wc);
@@ -278,6 +284,23 @@ static void cas_render(int pi){
           if (!S->cas_key) disc_fill(CRX(320), CRY(346), CRS(5), COL(255, 205, 40));
       }
     }
+    // v1.22: the walls fall off into shade where they meet the floor,
+    // and every doorway wears a pair of flickering sconces — the
+    // castle is lit now, not just drawn
+    blend_rect(CRX(CAS_X0), CRY(CAS_Y0), CRS(CAS_X1 - CAS_X0), CRS(9), COL(0, 0, 0), 56);
+    blend_rect(CRX(CAS_X0), CRY(CAS_Y1) - CRS(9), CRS(CAS_X1 - CAS_X0), CRS(9), COL(0, 0, 0), 56);
+    blend_rect(CRX(CAS_X0), CRY(CAS_Y0), CRS(9), CRS(CAS_Y1 - CAS_Y0), COL(0, 0, 0), 56);
+    blend_rect(CRX(CAS_X1) - CRS(9), CRY(CAS_Y0), CRS(9), CRS(CAS_Y1 - CAS_Y0), COL(0, 0, 0), 56);
+    { static const short SCN[8][3] = { {1, 272, 28}, {1, 368, 28}, {4, 272, 346}, {4, 368, 346},
+                                       {8, 14, 146}, {8, 14, 242}, {2, 626, 146}, {2, 626, 242} };
+      for (int si = 0; si < 8; si++){
+          if (!(CAS_DOORS[room] & SCN[si][0])) continue;
+          int sx2 = CRX(SCN[si][1]), sy2 = CRY(SCN[si][2]);
+          int fl = 82 + (int)(fsin(G.anim_t*11.0f + (float)si*2.3f)*16.0f) + (int)(hash2(SCN[si][1], SCN[si][2], 5u)%12u);
+          glow_ellipse(sx2, sy2, CRS(20), CRS(13), COL(255, 170, 70), fl);
+          disc_fill(sx2, sy2, CRS(3), COL(255, 214, 120));
+          disc_fill(sx2, sy2 - CRS(2), CRS(1) + 1, COL(255, 240, 200));
+      } }
     // the room's stone block
     { const short *P = CAS_PIL[room];
       if (P[2] > 0){ rect_fill(CRX(P[0]), CRY(P[1]), CRS(P[2]), CRS(P[3]), COL(64, 76, 64)); rect_line(CRX(P[0]), CRY(P[1]), CRS(P[2]), CRS(P[3]), COL(96, 110, 96)); } }
@@ -289,6 +312,8 @@ static void cas_render(int pi){
         int bob = (int)(fsin(G.anim_t * 3.0f + (float)id * 1.7f) * 2.0f);
         cy += CRS(bob);
         if (CAS_ITEM_KIND[id] == 0){           // a treasure: gold and glinting
+            // v1.22: a slow breathing halo so the gold calls across the room
+            glow_ellipse(cx, cy, CRS(14), CRS(10), COL(255, 205, 40), 58 + (int)(fsin(G.anim_t*3.0f + (float)id*1.7f)*18.0f));
             disc_fill(cx, cy, CRS(8), COL(255, 205, 40));
             tri_fill(cx - CRS(8), cy, cx, cy - CRS(10), cx + CRS(8), cy, COL(255, 230, 130));
             disc_fill(cx - CRS(3), cy - CRS(3), CRS(2), COL(255, 250, 220));
@@ -311,6 +336,10 @@ static void cas_render(int pi){
         if (!S->cas_malive[i] || S->cas_mroom[i] != room) continue;
         int cx = CRX(S->cas_mx[i] - CAS_OX), cy = CRY(S->cas_my[i] - CAS_OY);
         int ty = S->cas_mtype[i];
+        // v1.22: the grounded monsters cast a shadow now; the bat flies
+        if (ty == 1) shadow_ellipse(cx, cy + CRS(7), CRS(11), CRS(3));
+        else if (ty == 2) shadow_ellipse(cx, cy + CRS(15), CRS(13), CRS(4));
+        else if (ty == 3) shadow_ellipse(cx, cy + CRS(15), CRS(12), CRS(4));
         if (ty == 0){           // bat
             int flap = (int)(fsin(G.anim_t * 10.0f + (float)i * 2.0f) * CRS(5));
             tri_fill(cx, cy, cx - CRS(16), cy - CRS(6) - flap, cx - CRS(13), cy + CRS(5), COL(96, 84, 150));

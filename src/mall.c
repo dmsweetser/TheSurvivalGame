@@ -1077,6 +1077,7 @@ static void render_menu(void){
           float ph2 = G.anim_t*3.0f - (float)i*0.55f;
           int y = 8 + (int)(fsin(ph2)*3.0f);
           float t2 = (fsin(ph2)+1.0f)*0.5f;
+          draw_text(x0+i*32+2, y+3, ch, 4, COL(12, 10, 26));   // v1.22: a drop shadow grounds the logo
           draw_text(x0+i*32, y, ch, 4, COL(255, 214 + (int)(34.0f*t2), 64 + (int)(120.0f*t2)));
       } }
     { float tp = (fsin(G.anim_t*2.0f)+1.0f)*0.5f;
@@ -1142,15 +1143,15 @@ static void render_slots(void){
     draw_demo_scene();
     rect_fill(0, 0, VW, 96, COL(20,18,36));
     rect_fill(0, 94, VW, 2, COL(255,205,40));
+    draw_text_center(VW/2+2, 16, "THE SURVIVAL GAME", 2, COL(12, 10, 26));   // v1.22: shadow, matching the title
     draw_text_center(VW/2, 14, "THE SURVIVAL GAME", 2, COL(255,214,64));
     draw_text_center(VW/2, 44, G.slots_mode==0? "LOAD A SAVE" : "NEW GAME - PICK A SLOT", 2, COL(235,238,245));
     for (int i=0;i<3;i++){
         int s=i+1, y=116+i*52, x=100, w=440;
         int sel = (G.slots_sel==i);
-        rect_fill(x, y, w, 44, COL(26,24,42));
+        ui_panel(x, y, w, 44);   // v1.22: slot cards wear the shared panel chrome
         if (sel){ blend_rect(x, y, w, 44, COL(255,205,40), 36);
                   rect_line(x, y, w, 44, COL(255,205,40)); rect_line(x+1, y+1, w-2, 44-2, COL(255,205,40)); }
-        else rect_line(x, y, w, 44, COL(90,96,130));
         { char b[40]; char *q=b; q=sappend(q, "SLOT "); q=sapp_int(q, s);
           if (G.slot_has[s] && pk_name[s][0]){ q=sappend(q, " - "); q=sappend(q, pk_name[s]); }
           *q=0;
@@ -1524,7 +1525,7 @@ static float over_carried=0;
 static int over_have=0;
 static void render_over(void){
     render_world();
-    rect_fill(120, 60, 400, 220, COL(24,22,38));
+    ui_panel(120, 60, 400, 220);   // v1.22: shared panel chrome under the red border
     rect_line(120, 60, 400, 220, COL(255,90,90));
     // you, as you fell — wearing the hat you died in (Daniel). Drawn
     // before the text so a tall hat never hides a word.

@@ -2530,6 +2530,7 @@ static void draw_mall(void){
     // hanging lanterns down the carpet
     for (int i=0;i<3;i++){
         int lx=SX(-150 + i*150), ly=SY(MALL_CY-30);
+        glow_ellipse(lx, ly, (int)(30*cz), (int)(20*cz), COL(255,190,100), 52);   // v1.22: the lanterns cast light now
         disc_fill(lx, ly, 13, COL(255,196,96));
         disc_fill(lx, ly, 8, COL(255,226,150));
         rect_fill(lx-3, ly-6, 6, 8, COL(94,60,32));
@@ -3246,8 +3247,7 @@ static void render_hud(void){
     // status card (ends x=232) and the leaderboard (starts x=482) so long
     // zone names can never run into either panel
     float d = fsqrt(me->x*me->x + me->y*me->y);
-    rect_fill(254, 5, 214, 46, COL(16,14,28));          // readability pill
-    rect_line(254, 5, 214, 46, COL(84,78,112));
+    ui_panel(254, 5, 214, 46);   // v1.22: the zone pill wears the same panel chrome as the status card and the leaderboard
     if (me->in_mall && me->in_arcade){
         draw_text_center(361, 7, "THE ARCADE", 1, COL(255,255,255));
         draw_text_center(361, 19, "SEVEN FINE GAMES", 1, COL(200,210,230));

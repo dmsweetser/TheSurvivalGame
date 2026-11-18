@@ -635,7 +635,10 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   ok((await poll('dbg_warcur', [], v => v === -1, 4000)) === -1, 'pad: cursor retired before the camera move');
   await call('dbg_warcam', 280, 600); await sleep(250);
   await padTap(0);   // A wakes the cursor at the camera's centre (nothing selected now)
-  ok((await poll('dbg_warcur', [], v => v === 2800623, 4000)) === 2800623, 'pad: A summoned the cursor at the camera centre (280,623)',
+  // v1.22: the wake spawn IS the camera centre now (280,600). Before
+  // the fix this asserted (280,623) — the old spawn rode WAR_BAR_H/2
+  // below centre and only the Core's fat 42u tap disc absorbed it.
+  ok((await poll('dbg_warcur', [], v => v === 2800600, 4000)) === 2800600, 'pad: A summoned the cursor at the camera centre (280,600)',
      await call('dbg_warcur'));
   await padTap(0);   // A again: the tap itself — the Core is at the camera's centre
   ok((await poll('dbg_warselstruct', [], v => v === 0, 4000)) === 0, 'pad: A at the camera centre selected the Core');
@@ -1859,15 +1862,13 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   await call('dbg_warcam', zx34, zy34); await sleep(250);
   await padTap(0);
   ok((await poll('dbg_warcur', [], v => v >= 0, 4000)) >= 0, 'v1.21 check 34: A woke the pad cursor at the Zapper');
-  // the cursor wakes at the camera centre, which rides WAR_BAR_H/2
-  // below the view centre — a hair outside a small building's tap
-  // disc (the Zapper's is 22u; the wake offset is 23u). A player
-  // nudges the stick up onto the building; do exactly that.
-  for (let n34 = 0; n34 < 4; n34++) {
-    const [cx34, cy34] = unxy(await call('dbg_warcur'));
-    if (Math.abs(cy34 - zy34) <= 8 && Math.abs(cx34 - zx34) <= 8) break;
-    await padAxes(0, cy34 > zy34 ? -1 : 1, 0, 0); await sleep(45); await padAxes(0, 0, 0, 0); await sleep(120);
-  }
+  // v1.22 fix: the cursor wakes AT the camera centre — no stick
+  // nudge. (Before the fix it woke WAR_BAR_H/2 below centre, 23u
+  // from a centred Zapper: a hair outside its 22u tap disc, and this
+  // section had to nudge the stick up onto the building first.)
+  { const [cx34, cy34] = unxy(await call('dbg_warcur'));
+    ok(Math.abs(cx34 - zx34) <= 4 && Math.abs(cy34 - zy34) <= 4,
+       'v1.22 check 34: the woken cursor sits ON the centred Zapper (no nudge)', cx34 + ',' + cy34 + ' vs ' + zx34 + ',' + zy34); }
   await padTap(0);
   ok((await poll('dbg_warselstruct', [], v => v === zp34b, 4000)) === zp34b, 'v1.21 check 34: A selected the Zapper');
   ok((await poll('dbg_warbarcap', [], v => v === 1, 4000)) === 1, 'v1.21 check 34: the [DEMOLISH] bar CAPTURED the pad (the v1.20 capture, a new menu)');

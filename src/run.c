@@ -511,6 +511,10 @@ static void plat_update(int pi, float dt, const BwIn *in){
 }
 static void plat_draw_enemy(PlatEn *e, int bob, int strain){
     int x = SX(e->x), y = SY(e->y);
+    // v1.22: the grounded kinds sit ON the ground now — the fly and
+    // the pipe piranha ride above their ground line, so they skip it
+    if (e->kind==0 || e->kind==1 || e->kind==2 || e->kind==5 || e->kind==6)
+        shadow_ellipse(x, y+1, 9, 2);
     if (e->kind==7){   // the vault heart, gently bobbing
         int hy = y - 12 + (int)(fsin(e->t*3.0f)*2.0f);
         disc_fill(x-4, hy-3, 5, COL(240,80,90)); disc_fill(x+4, hy-3, 5, COL(240,80,90));

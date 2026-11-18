@@ -120,14 +120,21 @@ function T(name, cond, extra) { if (cond) { pass++; } else { fail++; console.log
   T('the escape score is the saved best', best >= 210, 'best=' + best);
   T('v1.19: the escape paid the buddy +50 XP', (await call('dbg_buddyxp')) === xpCas + 50, 'xp ' + xpCas + ' -> ' + (await call('dbg_buddyxp')));
 
-  // relaunch: Escape is NOT a way out (Nov 14, Daniel — trapped
-  // means trapped). Only the key opens any door, Escape included.
+  // relaunch: v1.22 (Daniel, Nov 17) — the exit was never meant to
+  // be key-gated. Escape leaves the castle with NO key at all; the
+  // key gates only the courtyard gate (the win, covered above).
   await call('dbg_tp', 0, -11898); await sleep(200);
   await key('KeyE', 250);
   await key('Space', 300);
   T('CASTLE relaunched', (await poll('dbg_bwmode', v => v === 6, 4000)) === 6, await call('dbg_bwmode'));
-  await key('Escape', 400); await sleep(400);
-  T('Escape does NOT leave without the key', (await call('dbg_bwmode')) === 6, await call('dbg_bwmode'));
+  await key('Escape', 400);
+  T('v1.22: Escape leaves WITHOUT the key', (await poll('dbg_bwmode', v => v === -1, 4000)) === -1, await call('dbg_bwmode'));
+  T('v1.22: ...and lands back in the arcade', (await call('dbg_inarcade')) === 1, await call('dbg_inarcade'));
+  // and with the key in hand, Escape still leaves, as it always did
+  await call('dbg_tp', 0, -11898); await sleep(200);
+  await key('KeyE', 250);
+  await key('Space', 300);
+  T('CASTLE relaunched again', (await poll('dbg_bwmode', v => v === 6, 4000)) === 6, await call('dbg_bwmode'));
   await call('dbg_casgive', 2);
   await key('Escape', 400);
   T('with the key in hand, Escape leaves', (await poll('dbg_bwmode', v => v === -1, 4000)) === -1, await call('dbg_bwmode'));

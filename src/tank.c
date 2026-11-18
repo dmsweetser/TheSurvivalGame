@@ -645,6 +645,7 @@ static void tank_render(int pi){
     for (int i=0;i<6;i++) if (S->tank_boom_t[i]>0){
         int x=SX(S->tank_boom_x[i]), y=SY(S->tank_boom_y[i]);
         int rr = (int)((0.3f - S->tank_boom_t[i]) * 260.0f) + 8;
+        glow_ellipse(x, y, rr, rr*2/3, COL(255,170,80), 110);   // v1.22: a hot flash inside the shockwave rings
         circle_out(x, y, rr, COL(255,190,90)); circle_out(x, y, rr*2/3 + 2, COL(255,130,60));
         disc_fill(x, y, rr/3 + 2, COL(255,220,150));
     }

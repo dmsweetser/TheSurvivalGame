@@ -896,7 +896,7 @@ static void bw_enter_mode(int pi, int mode){
     else if (mode==3){ char *q=S->note; q=sappend(q, "LEVEL "); q=sapp_int(q, S->plat_lvl); q=sappend(q, " - "); q=sappend(q, REGION_NAME[S->plat_region]); q=sappend(q, ". "); q=sappend(q, lbl_fire()); q=sappend(q, " JUMPS. STOMP BUGS!"); *q=0; }
     else if (mode==4){ char *q=S->note; q=sappend(q, "BUDDY CRAFT. "); q=sappend(q, lbl_int()); q=sappend(q, " GATHERS + RESTS. "); q=sappend(q, lbl_fire()); q=sappend(q, " SWINGS. "); q=sappend(q, lbl_wall()); q=sappend(q, " CRAFTS."); *q=0; }
     else if (mode==5){ char *q=S->note; q=sappend(q, "TANK RESCUE. "); q=sappend(q, lbl_fire()); q=sappend(q, " FIRES THE CANNON. FREE CAPTIVES, DROP AT PADS."); *q=0; }
-    else if (mode==6){ char *q=S->note; q=sappend(q, "CASTLE. TRAPPED! RUN INTO THINGS TO TAKE OR FIGHT. FIND THE KEY, ESCAPE!"); *q=0; }
+    else if (mode==6){ char *q=S->note; q=sappend(q, "CASTLE! RUN INTO THINGS TO TAKE OR FIGHT. FIND THE KEY, ESCAPE!"); *q=0; }
     else if (mode==7){ char *q=S->note; q=sappend(q, "THE WAITING ROOM. PICK YOUR COLOUR!"); *q=0; }
     else if (mode==8){ char *q=S->note; q=sappend(q, "WAR! TAP A REGION TO INVADE IT. CONQUER ALL EIGHT!"); *q=0; }
     else if (mode==1 && b->story_bits==(1<<0)) scpy(S->note, "STORY MODE. PATCH VILLAGE LIES NORTH-WEST.", 72);
@@ -981,7 +981,7 @@ static void arc_gate_draw(int pi, int vx, int vy, int vw2, int vh2){
         "A SIDE-SCROLLING RUN. STOMP BUGS. PLANT THE FLAG.",
         "AN ENDLESS WILD. CHOP, MINE, CRAFT, BUILD.",
         "DRIVE THE TANK. FREE THE CAPTIVES. BREAK THE BOSS.",
-        "TRAPPED IN A CASTLE! 13 TREASURES, ONE KEY, ONE GATE.",
+        "A CASTLE TO PLUNDER! 13 TREASURES, ONE KEY, ONE GATE.",
         "GRAND PRIX! 4 RACES, 8 REGIONS, 2 CUPS. RANK BY POINTS.",
         "A TAP-FIRST RTS. HARVEST BITS, RAISE BUDDIES, CONQUER 8 REGIONS." };
     for (int r=0;r<2;r++){
