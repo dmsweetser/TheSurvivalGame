@@ -489,6 +489,7 @@ typedef struct {
     int war_seedforce;           // test-only (dbg_warseed): when nonzero, war_build_battle uses it as war_bseed, so wartest's layout-sensitive checks run on one fixed field; shipped play never sets it
     float war_camx, war_camy, war_t, war_wavet, war_endt, war_grace;
     int war_selstruct, war_place;
+    int war_demoarm;             // v1.21: the struct index whose DEMOLISH is ARMED (two-step sell-back), -1 = none; lives only while that building stays selected
     float war_ltap_t; int war_ltap_x, war_ltap_y, war_ltap_unit, war_ltap_n;
     float war_ordx, war_ordy, war_ordt;
     int war_drag_id, war_dragx, war_dragy;
@@ -546,6 +547,13 @@ typedef struct {
     int war_utype[80], war_umaxhp[80], war_ustate[80], war_utarget[80], war_ucarry[80], war_usel[80];
     float war_sx[28], war_sy[28], war_shp[28], war_scd[28], war_qt[28];
     int war_stype[28], war_sside[28], war_smaxhp[28];
+    int war_hbits[28];           // v1.21: each HIVE's own bit purse — the hive harvests the same nodes and pays for every bug it sends (rides the snapshot as the wh key)
+    // v1.21 cosmetic pass: purely visual state — hit-flash timers
+    // and a small particle ring (0 poof / 1 harvest sparkle / 2
+    // structure poof). Written by the hurt/harvest hooks, read ONLY
+    // by the draw code, never saved, never fed back into the sim.
+    float war_uflash[80], war_sflash[28];
+    float war_fx[24], war_fy[24], war_ft[24]; int war_fk[24];
     // v1.17 addendum 2: production is a QUEUE of up to 9 per building,
     // C&C-style — paid in full when queued, mixed types allowed, the
     // front item trains on war_qt and the rest roll out in order.

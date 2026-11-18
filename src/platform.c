@@ -417,6 +417,7 @@ __attribute__((export_name("dbg_warskirmish"))) int exp_dbg_warskirmish(void){ i
 __attribute__((export_name("dbg_warbits"))) int exp_dbg_warbits(void){ int id = G.my_id>=0? G.my_id : 0; return BWS[id].war_bits; }
 __attribute__((export_name("dbg_warconq"))) int exp_dbg_warconq(void){ int id = G.my_id>=0? G.my_id : 0; return G.bud[id].war_prog; }
 __attribute__((export_name("dbg_warhives"))) int exp_dbg_warhives(void){ int id = G.my_id>=0? G.my_id : 0; return war_hives_alive(&BWS[id]); }
+__attribute__((export_name("dbg_warhbits"))) int exp_dbg_warhbits(void){ int id = G.my_id>=0? G.my_id : 0; BwSim *S = &BWS[id]; for (int s=0;s<28;s++) if (S->war_shp[s]>0 && S->war_stype[s]==WAR_S_HIVE) return S->war_hbits[s]; return -1; }   // v1.21: the first living hive's purse (-1 = no hive)
 __attribute__((export_name("dbg_warunits"))) int exp_dbg_warunits(int side, int type){ int id = G.my_id>=0? G.my_id : 0; BwSim *S = &BWS[id]; int n=0;
     for (int i=0;i<WAR_MAXU;i++){ if (S->war_uhp[i]<=0) continue; if (side>=0 && war_u_side(S->war_utype[i])!=side) continue; if (type>=0 && S->war_utype[i]!=type) continue; n++; } return n; }
 __attribute__((export_name("dbg_warstructs"))) int exp_dbg_warstructs(int type){ int id = G.my_id>=0? G.my_id : 0; BwSim *S = &BWS[id]; int n=0;

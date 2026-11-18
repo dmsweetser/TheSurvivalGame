@@ -40,6 +40,14 @@
 // v1.17 wall/gate/rally/snapshot checks) stops racing the roll.
 // Check 22 (novelty) releases the pin for its two battles and the
 // pin is re-applied right after it.
+// v1.21 (Nov 17) adds dbg_warhbits (the first living hive's purse,
+// -1 = no hive) and unit type 8, the BUG HARVESTER: the hive now
+// runs a real economy — a per-hive purse (150 on campaign), two
+// bug harvesters working the same nodes, waves BOUGHT at the tick
+// (crawler 20 / spitter 35, harvester replacements at 40 first,
+// guard refills only from surplus). Check 33 soaks it; check 34
+// covers the same version's DEMOLISH sell-back (half the build
+// cost, floored, two-step arm + confirm; never on the Core).
 const { chromium } = require('playwright-core');
 const EXE = process.env.HOME + '/.cache/ms-playwright/chromium-1248/chrome-linux64/chrome';
 const URL = 'http://localhost:8903/the-survival-game.html';
@@ -1762,6 +1770,117 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   const cur32b = await call('dbg_warcur');
   ok(cur32a >= 0 && cur32b > cur32a, 'v1.20 check 32: the stick flies the field cursor again after capture', cur32a + ' -> ' + cur32b);
   await padAxes(0, 0, 0, 0);
+
+  // ================= v1.21 (Nov 17): the hive has an ECONOMY =====
+  // Daniel: "make it so that the economics are relatively balanced
+  // between the player and the hive" — decided by skill and
+  // strategy, not a structural edge. Check 33 soaks the economy.
+  // Battle A is left completely alone: the purse must RISE while
+  // the hive's two bug harvesters work the same nodes yours does
+  // (a), at a total rate at least matching your single harvester.
+  // Battle B starves the hive: both bug harvesters die at once,
+  // and with the purse frozen the wave ticks become exact
+  // arithmetic — replacements first, then the wave (b) — and once
+  // the purse drops under a crawler's price the waves shrink and
+  // stop dead (c).
+  ok((await call('dbg_warenter', 0)) === 1, 'v1.21 check 33: fresh battle for the economy soak');
+  await sleep(500);
+  ok((await call('dbg_warhbits')) === 150, 'v1.21 check 33: the hive opens with a 150-bit purse', await call('dbg_warhbits'));
+  ok((await call('dbg_warunits', 1, 8)) === 2, 'v1.21 check 33: two bug harvesters work for the hive');
+  const tA33 = Date.now();
+  ok((await poll('dbg_warhbits', [], v => v > 150, 60000, 500)) > 150,
+     'v1.21 check 33 (a): the hive purse RISES while its harvesters work', 'stuck at ' + (await call('dbg_warhbits')));
+  while (Date.now() - tA33 < 38000) await sleep(500);   // still ahead of the 45s first wave: everything read here is pure income
+  const hiveEarned33 = (await call('dbg_warhbits')) - 150;
+  const playerEarned33 = (await call('dbg_warbits')) - 300;
+  ok(hiveEarned33 >= playerEarned33 && playerEarned33 > 0,
+     'v1.21 check 33: balance — the hive\'s two workers together earn at least what your one harvester does (no structural edge either way)',
+     'hive earned ' + hiveEarned33 + ' (2 workers), player earned ' + playerEarned33 + ' (1 worker)');
+  // battle B: starvation
+  ok((await call('dbg_warenter', 0)) === 1, 'v1.21 check 33: fresh battle for the starvation run');
+  await sleep(500);
+  for (let k = 0; k < 2; k++) { const bi = await call('dbg_warfind', 8); if (bi >= 0) await call('dbg_warhurt', 0, bi, 99999); }
+  await call('dbg_warhurt', 0, await call('dbg_warfind', 0), 99999);   // your harvester too: no income on either side, both purses frozen
+  ok((await call('dbg_warunits', 1, 8)) === 0, 'v1.21 check 33: both bug harvesters are dead');
+  await sleep(19000);
+  ok((await call('dbg_warhbits')) === 150, 'v1.21 check 33: no harvesters, no income — the purse is still exactly 150', await call('dbg_warhbits'));
+  ok((await poll('dbg_warhbits', [], v => v === 30, 40000, 250)) === 30,
+     'v1.21 check 33 (b): the 45s tick bought replacements first (2 x 40) then the wave (2 x 20): 150 -> 30', 'hbits=' + (await call('dbg_warhbits')));
+  ok((await call('dbg_warunits', 1, 8)) === 2, 'v1.21 check 33 (b): the workforce was replaced before the wave was bought');
+  ok((await call('dbg_warunits', 1, 3)) === 4, 'v1.21 check 33 (b): two garrison crawlers + the two the wave bought', await call('dbg_warunits', 1, 3));
+  for (let k = 0; k < 2; k++) { const bi = await call('dbg_warfind', 8); if (bi >= 0) await call('dbg_warhurt', 0, bi, 99999); }
+  ok((await call('dbg_warunits', 1, 8)) === 0, 'v1.21 check 33: the replacements are dead too — the hive is starving');
+  ok((await poll('dbg_warhbits', [], v => v === 10, 45000, 250)) === 10,
+     'v1.21 check 33 (c): at 30 bits the next tick buys NO replacement (40) and a wave of ONE crawler (20): 30 -> 10', 'hbits=' + (await call('dbg_warhbits')));
+  ok((await call('dbg_warunits', 1, 8)) === 0, 'v1.21 check 33 (c): still no workforce — 10 bits buys nothing that harvests');
+  await sleep(33000);   // past the following tick (105s)
+  ok((await call('dbg_warhbits')) === 10, 'v1.21 check 33 (c): and the tick after that buys NOTHING — a starved hive sends no wave', await call('dbg_warhbits'));
+
+  // check 34: DEMOLISH (v1.21 addendum) — a selected building can
+  // be sold back for half its build cost, floored, through a
+  // two-step arm + confirm in its command-bar options (the v1.20
+  // pad capture reaches it too). The Compiler Core is never
+  // offered it, and B cancels an armed demolition harmlessly.
+  ok((await call('dbg_warenter', 0)) === 1, 'v1.21 check 34: fresh battle for the demolish flow');
+  await sleep(500);
+  await call('dbg_warhurt', 0, await call('dbg_warfind', 0), 99999);   // economy isolation: the purse moves only when this check moves it
+  await call('dbg_waraddbits', 1000);
+  const zp34 = await call('dbg_warbuildat', 2);
+  ok(zp34 > 0 && (await call('dbg_warstructs', 2)) === 1, 'v1.21 check 34: Zapper built', 'idx=' + zp34);
+  const [zx34, zy34] = unxy(await call('dbg_warstructxy', zp34));
+  const bits34 = await call('dbg_warbits');
+  await call('dbg_warcam', zx34, zy34); await sleep(250);
+  await tap(320, 157);
+  ok((await poll('dbg_warselstruct', [], v => v === zp34, 4000)) === zp34, 'v1.21 check 34: Zapper selected');
+  await tap(48, 337);   // the Zapper has no categories: its whole bar is [DEMOLISH]
+  ok((await call('dbg_warstructs', 2)) === 1 && (await call('dbg_warbits')) === bits34,
+     'v1.21 check 34: the first DEMOLISH tap only ARMS — building standing, purse untouched');
+  await tap(48, 337);   // CONFIRM?
+  ok((await poll('dbg_warstructs', [2], v => v === 0, 4000)) === 0, 'v1.21 check 34: the second tap DEMOLISHES');
+  ok((await call('dbg_warbits')) === bits34 + 50, 'v1.21 check 34: the refund is exactly half the 100-bit build cost: +50', bits34 + ' -> ' + (await call('dbg_warbits')));
+  const zp34b = await call('dbg_warbuildxy', 2, zx34, zy34);
+  ok(zp34b >= 0, 'v1.21 check 34: the footprint is free — a new Zapper builds on the same spot', 'idx=' + zp34b);
+  const bits34b = await call('dbg_warbits');
+  // the Core shows NO demolish option: with TRAIN open, strip
+  // slot 1 (DEMOLISH's seat in a Patch Bay's row) is empty air,
+  // and so is bar-row slot 3 past its three categories — poking
+  // each twice (arm + confirm, if anything hid there) is a no-op
+  await call('dbg_warcam', 280, 600); await sleep(250);
+  await tap(320, 157);
+  ok((await poll('dbg_warselstruct', [], v => v === 0, 4000)) === 0, 'v1.21 check 34: Core selected');
+  await tap(48, 337);   // TRAIN category
+  await tap(138, 291); await tap(138, 291);   // strip slot 1, twice
+  await tap(318, 337); await tap(318, 337);   // bar-row slot 3, twice
+  ok((await call('dbg_warstructs', 0)) === 1 && (await call('dbg_warbits')) === bits34b && (await call('dbg_warstate')) === 1,
+     'v1.21 check 34: the Core has no DEMOLISH — it stands, the purse is untouched, the battle goes on');
+  // arming then cancelling with B leaves the building standing:
+  // the rebuilt Zapper, driven through the pad capture
+  if ((await call('dbg_warcur')) >= 0) { await tap(630, 10); await poll('dbg_warcur', [], v => v === -1, 4000); }
+  await call('dbg_warcam', zx34, zy34); await sleep(250);
+  await padTap(0);
+  ok((await poll('dbg_warcur', [], v => v >= 0, 4000)) >= 0, 'v1.21 check 34: A woke the pad cursor at the Zapper');
+  // the cursor wakes at the camera centre, which rides WAR_BAR_H/2
+  // below the view centre — a hair outside a small building's tap
+  // disc (the Zapper's is 22u; the wake offset is 23u). A player
+  // nudges the stick up onto the building; do exactly that.
+  for (let n34 = 0; n34 < 4; n34++) {
+    const [cx34, cy34] = unxy(await call('dbg_warcur'));
+    if (Math.abs(cy34 - zy34) <= 8 && Math.abs(cx34 - zx34) <= 8) break;
+    await padAxes(0, cy34 > zy34 ? -1 : 1, 0, 0); await sleep(45); await padAxes(0, 0, 0, 0); await sleep(120);
+  }
+  await padTap(0);
+  ok((await poll('dbg_warselstruct', [], v => v === zp34b, 4000)) === zp34b, 'v1.21 check 34: A selected the Zapper');
+  ok((await poll('dbg_warbarcap', [], v => v === 1, 4000)) === 1, 'v1.21 check 34: the [DEMOLISH] bar CAPTURED the pad (the v1.20 capture, a new menu)');
+  ok((await poll('dbg_warbarhl', [], v => v === 0, 4000)) === 0, 'v1.21 check 34: the highlight sits on DEMOLISH');
+  const bits34c = await call('dbg_warbits');
+  await padTap(0);   // A on DEMOLISH: arm only
+  ok((await call('dbg_warstructs', 2)) === 1 && (await call('dbg_warbits')) === bits34c,
+     'v1.21 check 34: A armed DEMOLISH — the Zapper still stands');
+  await padTap(1);   // B: cancel out of the selection — and disarm
+  ok((await poll('dbg_warbarcap', [], v => v === 0, 4000)) === 0, 'v1.21 check 34: B ended the capture');
+  ok((await poll('dbg_warselstruct', [], v => v === -1, 4000)) === -1, 'v1.21 check 34: B cleared the selection');
+  ok((await call('dbg_warstructs', 2)) === 1 && (await call('dbg_warbits')) === bits34c,
+     'v1.21 check 34: arming then cancelling with B leaves the building standing, purse untouched');
 
   console.log(`\nwartest: ${pass} passed, ${fail} failed`);
   await browser.close();
