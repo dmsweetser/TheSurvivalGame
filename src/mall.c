@@ -697,6 +697,13 @@ static void draw_bowling(void){
     int x0=G.view_x0, vw=G.view_w, compact=G.ui_compact;
     int cx = x0 + vw/2;
     rect_fill(x0, G.view_y0, vw, G.view_h>0? G.view_h : VH, COL(16,14,28));
+    // v1.24 backdrop: hash speckle on the alley wall, so the lane
+    // stops floating in a flat void (view-relative: split-safe)
+    { int vh9 = G.view_h>0? G.view_h : VH;
+      for (int gy=8; gy<vh9-8; gy+=26) for (int gx=10; gx<vw-8; gx+=26){
+          int hx = x0+gx + (int)(hash_f(gx, gy, 31)*14), hy = G.view_y0+gy + (int)(hash_f(gx, gy, 47)*12);
+          pset_blend(hx, hy, COL(120,110,170), 26 + (int)(hash_f(gx, gy, 59)*30));
+      } }
     // header
     rect_fill(x0+4, 22, vw-8, 30, COL(50,70,120)); rect_line(x0+4, 22, vw-8, 30, OUTLINE);
     draw_text_center(cx, 26, "BUG BOWL", 2, COL(255,230,170));
@@ -741,6 +748,15 @@ static void draw_bowling(void){
     for (int a=0;a<5;a++){ int ax = cx + (int)((a-2)*15*KX), ay = foul - (int)(150*KY) - (a==2? 10:0);
         tri_fill(ax, ay-6, ax-3, ay+4, ax+3, ay+4, COL(196,164,108)); }
     rect_fill(cx-(int)(60*KX), foul, (int)(120*KX), 3, COL(200,60,50));                    // foul line
+    // v1.24 lane grounding: gutter shadow where lane meets the
+    // surround, warm light pooled on the deck, and a wooden approach
+    // under the bowler's feet
+    rect_fill(cx-(int)(62*KX), lane_top, 2, foul-lane_top+8, COL(60,48,38));
+    rect_fill(cx+(int)(60*KX), lane_top, 2, foul-lane_top+8, COL(60,48,38));
+    glow_ellipse(cx, lane_top+14, (int)(86*KX), 30, COL(255,190,90), 30);
+    rect_fill(cx-(int)(76*KX), foul+8, (int)(152*KX), VH-foul-28, COL(110,88,62));
+    for (int px2=1; px2<6; px2++) rect_fill(cx-(int)(76*KX)+px2*(int)(152*KX)/6, foul+8, 1, VH-foul-28, COL(94,74,52));
+    rect_fill(cx-(int)(76*KX), foul+8, (int)(152*KX), 2, COL(140,114,80));
     // pins, far row first
     for (int i=9;i>=0;i--){
         if (bw->standing[i]) draw_pin_shape(cx + (int)(PIN_X[i]*KX), foul - (int)(PIN_Y[i]*KY), 0);
@@ -1222,6 +1238,7 @@ static void move_key_str(char *b){
 }
 static void render_help(void){
     rect_fill(0,0,VW,VH,COL(24,22,38));
+    ui_panel(10, 8, VW-20, VH-16);   // v1.24: the shared panel chrome behind the pages
     draw_text_center(VW/2, 18, help_page? "THE MALL + MORE" : "HOW TO PLAY", 3, COL(255,214,64));
     if (help_page){
         const char *lines2[] = {
@@ -1362,6 +1379,7 @@ static void settings_input(void){
 }
 static void render_settings(void){
     rect_fill(0,0,VW,VH,COL(24,22,38));
+    ui_panel(104, 8, 432, 310);   // v1.24: the shared panel chrome behind the bindings
     draw_text_center(VW/2, 14, "SETTINGS", 3, COL(255,214,64));
     draw_text_center(VW/2, 44, "KEY BINDINGS - ARROWS CHOOSE, SPACE REBINDS", 1, COL(160,230,255));
     for (int i=0;i<SET_ROWS;i++){
@@ -1860,8 +1878,28 @@ static void coop_render(float dt){
     }
     clip_x0=0; clip_x1=VW; clip_y0=0; clip_y1=VH;
     G.view_x0=0; G.view_w=VW; G.view_y0=0; G.view_h=VH;
-    if (vorient) rect_fill(seam-1, 0, 2, VH, COL(10,9,18));   // the seam
-    else rect_fill(0, seam-1, VW, 2, COL(10,9,18));
+    // the seam (v1.24 chrome): a dark groove with a gold heart-line,
+    // and a P1 / P2 chip in each player's hoodie colour at the end of
+    // the seam their view sits on, so the halves are labelled
+    { int p1v = vp1first? 0 : 1;   // which view index is P1's
+      u32 c1 = HOODIE[G.p[G.my_id].color&3], c2 = HOODIE[G.p[G.p2_slot].color&3];
+      if (vorient){
+          rect_fill(seam-2, 0, 5, VH, COL(8,7,14));
+          rect_fill(seam, 0, 1, VH, COL(198,164,84));
+          int lx = p1v==0? seam-32 : seam+7, rx2 = p1v==0? seam+7 : seam-32;
+          rect_fill(lx, 8, 25, 13, c1); rect_line(lx, 8, 25, 13, OUTLINE);
+          draw_text_center(lx+12, 11, "P1", 1, COL(16,14,24));
+          rect_fill(rx2, 8, 25, 13, c2); rect_line(rx2, 8, 25, 13, OUTLINE);
+          draw_text_center(rx2+12, 11, "P2", 1, COL(16,14,24));
+      } else {
+          rect_fill(0, seam-2, VW, 5, COL(8,7,14));
+          rect_fill(0, seam, VW, 1, COL(198,164,84));
+          int ty1 = p1v==0? seam-21 : seam+8, ty2 = p1v==0? seam+8 : seam-21;
+          rect_fill(8, ty1, 25, 13, c1); rect_line(8, ty1, 25, 13, OUTLINE);
+          draw_text_center(20, ty1+3, "P1", 1, COL(16,14,24));
+          rect_fill(8, ty2, 25, 13, c2); rect_line(8, ty2, 25, 13, OUTLINE);
+          draw_text_center(20, ty2+3, "P2", 1, COL(16,14,24));
+      } }
 }
 static void coop_frame(float dt){
     Player *me=&G.p[G.my_id];
@@ -2301,6 +2339,24 @@ void frame(void){
         }
         break;
     }
+    // v1.24: MODE-TRANSITION FADE — a purely cosmetic veil at the
+    // render tail. When the SCENE changes (menu <-> run, entering or
+    // leaving the mall / arcade, a Banzai World mode switch), a dark
+    // veil lifts over ~0.22s so the cut feels like a transition. It
+    // only READS state and draws one blended rect: no input, no sim,
+    // no saves are touched, so it cannot desync anything. Pause maps
+    // onto the play scene so pausing never triggers it.
+    { static int fade_sig = -1; static float fade_t = 0;
+      int mi = G.my_id>=0? G.my_id : 0;
+      Player *fme = &G.p[mi];
+      int fst = G.state==GS_PAUSE? GS_PLAY : G.state;
+      int fsig = fst*256 + (fme->in_mall? 64:0) + (fme->in_arcade? 128:0)
+               + (G.bud[mi].in_bw? (G.bud[mi].bw_mode&15)+16 : 0);
+      if (fade_sig>=0 && fsig!=fade_sig) fade_t = 0.22f;
+      fade_sig = fsig;
+      if (fade_t>0){ fade_t -= dt; if (fade_t<0) fade_t=0;
+          int fa = (int)(165.0f*fade_t/0.22f);
+          if (fa>0) blend_rect(0, 0, VW, VH, COL(6,5,12), fa); } }
     // clear one-frame input edges
     IN.act2_edges=0;   // pad-2 edges live exactly one frame, like P1's
     IN.mclicked=0; IN.rclicked=0; IN.wall_pressed=0; IN.interact_pressed=0;

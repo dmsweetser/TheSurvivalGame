@@ -114,7 +114,9 @@ async function rig(browser, npads) {
       if (wrapped) { for (let i = 0; i < bottom - 1; i++) await key('ArrowDown', 160); }
       else { await key('ArrowUp', 160); } }
     await key('Space', 300);
-    for (let i = 0; i < 6; i++) await key('ArrowUp', 160);   // back to START
+    // back to START by the LIVE selection: a fixed count of Ups wraps
+    // past row 0 onto the NAME field on the pad-flavoured menu
+    for (let i = 0; i < 10 && (await call('dbg_menusel')) !== 0; i++) await key('ArrowUp', 160);
     await key('Space', 500);
     if ((await call('dbg_state')) !== 1) { await key('Enter', 500); }
     ok((await call('dbg_state')) === 1, 'co-op run started');

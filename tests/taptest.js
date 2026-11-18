@@ -70,18 +70,18 @@ const CY = -6000;
   await stageBankSelection();
   T('gate panel open (phase 2)', await toGatePanel());
   const bankBeforeTap = await call('dbg_bank');
-  await tap(320, 132);                                             // the STORY MODE row, centre panel (panel grew to 6 rows, h=210)
+  await tap(320, 162);                                             // the STORY MODE row (panel is 3 rows since Nov 10, h=150: rows at y 157/177/197)
   T('a tap on STORY MODE enters Banzai World', (await poll('dbg_bwstate', v => v === 1, 3000)) === 1, await call('dbg_bwstate'));
   T('bank untouched by the tap', (await call('dbg_bank')) === bankBeforeTap, await call('dbg_bank'));
   if ((await call('dbg_bwstate')) === 1) { await key('Escape', 300); await sleep(400); }
 
   // ---- phase 3: tap FREE PLAY, then tap LEAVE --------------------------
   T('gate panel open (phase 3)', await toGatePanel());
-  await tap(320, 152);                                             // the FREE PLAY row
+  await tap(320, 182);                                             // the FREE PLAY row
   T('a tap on FREE PLAY enters Banzai World', (await poll('dbg_bwstate', v => v === 1, 3000)) === 1, await call('dbg_bwstate'));
   await key('Escape', 300); await sleep(400);
   T('gate panel open (phase 4)', await toGatePanel());
-  await tap(320, 232);                                             // the LEAVE row (row 5 now)
+  await tap(320, 202);                                             // the LEAVE row (row 2 now)
   T('a tap on LEAVE closes the panel', (await poll('dbg_gate', v => v === 0, 3000)) === 0, await call('dbg_gate'));
   T('and does not enter Banzai World', (await call('dbg_bwstate')) === 0, await call('dbg_bwstate'));
 

@@ -25,6 +25,9 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   }, bnVal);
   const saveQuitContinue = async () => {
     await key('KeyP', 500);
+    // pause menu is 3 rows since Nov 6 (Daniel): CONTINUE / CONTROLS /
+    // SAVE + QUIT TO TITLE — two Downs reach the quit row.
+    await key('ArrowDown', 250);
     await key('ArrowDown', 250);
     await key('Space', 700);
     await key('Space', 600);

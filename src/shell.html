@@ -219,7 +219,7 @@ function pk_from_event(e){
   }
   return -1;
 }
-const pkDown = {}, pkTimers = {};
+const pkDown = {}, pkTimers = {}, pkPhys = {};
 addEventListener('keydown', (e)=>{
   audio_init(); if (AC && AC.state==='suspended') AC.resume();
   if (!EX) return;
@@ -227,7 +227,18 @@ addEventListener('keydown', (e)=>{
   // characters and Backspace itself (through its input event below) —
   // forwarding them here too would type everything twice. Menu keys
   // (arrows, Enter, Escape) still flow through the normal path.
-  if (document.activeElement===KB && e.key && (e.key.length===1 || e.key==='Backspace')) return;
+  if (document.activeElement===KB && e.key && (e.key.length===1 || e.key==='Backspace')){
+    // the deletion EDGE still comes from the field's input event, but
+    // the held STATE is this backend's to report: IN.raw is how the
+    // game sees a physically held key (hold-to-delete in code entry
+    // keys off it). Swallowing the keydown whole made a held
+    // Backspace indistinguishable from a tap on web.
+    if (e.key==='Backspace'){
+      if (pkTimers[44]){ clearTimeout(pkTimers[44]); pkTimers[44] = 0; }
+      pkPhys[44] = true; pkDown[44] = true; pk_set(44, true); send_raw();
+    }
+    return;
+  }
   // printable characters are typed text: the menu's name field reads them
   // when selected; gameplay ignores them entirely.
   if (e.key && e.key.length===1 && e.code!=='Space') EX.evt_char(e.key.charCodeAt(0));
@@ -262,7 +273,10 @@ function kb_backspace(){
   EX.press(44);
   if (pkTimers[44]){ clearTimeout(pkTimers[44]); pkTimers[44] = 0; }
   pkDown[44] = true; pk_set(44, true); send_raw();
-  pkTimers[44] = setTimeout(()=>{ pk_set(44, false); pkDown[44] = false; pkTimers[44] = 0; send_raw(); }, 120);
+  // the pulse releases itself after ~120ms — unless a physical key is
+  // genuinely holding Backspace down, in which case the keyup latch
+  // owns the release.
+  pkTimers[44] = setTimeout(()=>{ pkTimers[44] = 0; if (!pkPhys[44]){ pk_set(44, false); pkDown[44] = false; send_raw(); } }, 120);
 }
 let kbVal = '';
 let kbLive = 0;   // the text_mode() of the live keyboard session, 0 = none
@@ -301,6 +315,7 @@ addEventListener('keyup', (e)=>{
   if (!EX) return;
   const pk = pk_from_event(e);
   if (pk>=0){
+    pkPhys[pk] = false;
     // latch the release ~120ms so a fast tap still registers as held on
     // at least one game frame, even at low fps
     if (pkTimers[pk]) clearTimeout(pkTimers[pk]);

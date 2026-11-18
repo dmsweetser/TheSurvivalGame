@@ -57,7 +57,10 @@ const T = (name, ok, info) => { console.log((ok ? 'PASS' : 'FAIL') + ' | ' + nam
     else { await key('ArrowUp', 160); } }
   await key('Space', 300);
   T('co-op toggled on', (await call('dbg_coop')) === 1, await call('dbg_coop'));
-  for (let i = 0; i < 6; i++) await key('ArrowUp', 160);
+  // back to START by the LIVE selection: a fixed count of Ups wraps
+  // past row 0 onto the NAME field whenever the pad-flavoured menu
+  // (one row shorter) is the one latched — the splittest lesson
+  for (let i = 0; i < 10 && (await call('dbg_menusel')) !== 0; i++) await key('ArrowUp', 160);
   await key('Space', 500);
   if ((await call('dbg_state')) !== 1) await key('Enter', 500);
   T('co-op run started', (await call('dbg_state')) === 1);

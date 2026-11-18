@@ -2612,9 +2612,21 @@ static void draw_mall(void){
     // WALK OF FAME marquee: flashes through the confetti colours while
     // the viewed player is mid-crawl under a heavy hat
     { Player *vp=&G.p[G.view_pi>=0? G.view_pi : 0];
-      if (vp->wof>0)
-          draw_text_center((clip_x0+clip_x1)/2, clip_y0+150, "WALK OF FAME", 3,
-                           WOF_COL[(int)(G.anim_t*8)%6]); }
+      if (vp->wof>0){
+          // v1.24: the marquee gets its bulbs — a chasing row of
+          // confetti-coloured lamps over a soft glow, so the parade
+          // moment reads as a marquee and not a caption
+          int mcx = (clip_x0+clip_x1)/2, myy = clip_y0+150;
+          glow_ellipse(mcx, myy+12, 170, 30, COL(255,190,80), 40);
+          for (int i=0;i<9;i++){
+              int bx = mcx-128+i*32, by = myy-13;
+              u32 bc = WOF_COL[((int)(G.anim_t*8)+i)%6];
+              disc_fill(bx, by, 5, COL(10,9,18));
+              disc_fill(bx, by, 4, bc);
+              pset(bx-1, by-1, COL(255,255,255));
+          }
+          draw_text_center(mcx, myy, "WALK OF FAME", 3,
+                           WOF_COL[(int)(G.anim_t*8)%6]); } }
 }
 // THE ARCADE room (Nov 10): dark carpet, neon trim, and four cabinets
 // against the north wall — one per game. West wall leads back to the mall.
@@ -3022,6 +3034,24 @@ static void render_world(void){
         float ix=(1-t)*(1-t)*f->x0 + 2*(1-t)*t*mx + t*t*f->x1;
         float iy=(1-t)*(1-t)*f->y0 + 2*(1-t)*t*my + t*t*f->y1;
         draw_carcass(SX(ix), SY(iy), 5, (int)f->w%4, t*5);
+    }
+    // v1.24 ambient life: drifting motes in the daylight — world-
+    // anchored hash specks bobbing on anim_t, so the meadow air
+    // itself feels alive. Pure draw (no state, no particles, a few
+    // dozen blended points), outdoors only.
+    if ((G.state==GS_PLAY || G.state==GS_STORE) && !G.p[G.view_pi>=0? G.view_pi:0].in_mall){
+        int cx0 = (int)(G.camx/110)-8, cy0 = (int)(G.camy/110)-5;
+        for (int gy=cy0; gy<cy0+10; gy++) for (int gx=cx0; gx<cx0+16; gx++){
+            for (int k=0;k<2;k++){
+                float h1 = hash_f(gx*3+k, gy*5+k, 71), h2 = hash_f(gx*7+k, gy*3+k, 97);
+                float mx = gx*110 + h1*104 + fsin(G.anim_t*0.6f + h2*9.0f)*6;
+                float my = gy*110 + h2*104 + fcos(G.anim_t*0.45f + h1*7.0f)*5;
+                int sx = SX(mx), sy = SY(my);
+                if (sx<clip_x0 || sx>=clip_x1 || sy<clip_y0 || sy>=clip_y1) continue;
+                int al = 24 + (int)(h1*36) + (int)(fsin(G.anim_t*1.3f + h2*12.0f)*10);
+                pset_blend(sx, sy, COL(255,246,205), al<8? 8 : al);
+            }
+        }
     }
     ui_vignette(clip_x0, clip_y0, clip_x1-clip_x0, clip_y1-clip_y0);
     // particles + floaters

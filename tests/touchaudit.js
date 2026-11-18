@@ -96,15 +96,17 @@ function T(name, cond, extra) {
     // (WOODEN AXE, needs 3 wood)
     await call('dbg_craftsetm', 60 + 60 * 1000 + 60 * 1000000);
     const gear0 = await call('dbg_craftgear');
-    // menu panel: w=380 centred (x=130), h=40+7*20+16+24=220, y=70;
-    // rows at y+30 + r*20: TOOLS header ry=100, AXE ry=120, PICK ry=140
-    await call('evt_tap', 320, 100); await sleep(300);
+    // menu panel: w=380 centred (x=130); since the Nov 14 search row
+    // the panel is h=40+7*20+16+24+22=242, y=59, with a search strip
+    // at [y+28,y+50) and list rows at y+52 + r*20: TOOLS header
+    // ry=111, AXE ry=131, PICK ry=151
+    await call('evt_tap', 320, 116); await sleep(300);
     T('tap on a segment header hops to its first row', (await call('dbg_craftsel')) === 1, await call('dbg_craftsel'));
-    await call('evt_tap', 320, 140); await sleep(300);
+    await call('evt_tap', 320, 156); await sleep(300);
     T('tap selects a row', (await call('dbg_craftsel')) === 2, await call('dbg_craftsel'));
-    await call('evt_tap', 320, 120); await sleep(300);
+    await call('evt_tap', 320, 136); await sleep(300);
     T('tap selects the axe row', (await call('dbg_craftsel')) === 1, await call('dbg_craftsel'));
-    await call('evt_tap', 320, 120); await sleep(400);
+    await call('evt_tap', 320, 136); await sleep(400);
     T('tapping the selected row crafts it', ((await call('dbg_craftgear')) & 1) === 1 && ((gear0 & 1) === 0), await call('dbg_craftgear'));
     await call('evt_tap', 20, 20); await sleep(300);   // outside the panel
     T('tapping outside closes the menu', (await call('dbg_craftmenu')) === 0, await call('dbg_craftmenu'));

@@ -48,6 +48,9 @@ function T(name, cond, extra) {
   async function saveQuitContinue(tag) {
     await key('Escape', 350);                     // pause
     T(tag + ': paused', (await call('dbg_state')) === 5, await call('dbg_state'));
+    // pause menu is 3 rows since Nov 6 (Daniel): CONTINUE / CONTROLS /
+    // SAVE + QUIT TO TITLE — two Downs reach the quit row.
+    await key('ArrowDown', 150);
     await key('ArrowDown', 150);
     await key('Space', 500);                      // SAVE + QUIT TO TITLE
     T(tag + ': back at title', (await poll('dbg_state', v => v === 0)) === 0, await call('dbg_state'));

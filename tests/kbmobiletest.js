@@ -49,15 +49,31 @@ function T(name, cond, extra) {
     }
     return null;
   });
+  // locate the START row from live geometry: the NAME field's top sits
+  // at 108 + n*22 + 8 in game coords (n = dbg_menucount), rows are 22
+  // apart, and START is row 0. (A hardcoded y went stale on Nov 14
+  // when Daniel shortened the title band and the stack moved up; the
+  // selection's yellow bar can't be scanned for here because the
+  // field tap just before leaves the selection ON the field.)
+  const startRowY = async () => {
+    const p = lastFieldPos;
+    if (!p) return null;
+    const n = await call('dbg_menucount');
+    const fy = p.gy - 6;                 // fieldPos reports field top + 6
+    return fy - n * 22 - 8 + 5;          // row 0's tap centre
+  };
   const tapGame = async (gx, gy) => {
     const box = await page.locator('#cv').boundingBox();
     await page.touchscreen.tap(box.x + gx / 640 * box.width, box.y + gy / 360 * box.height);
     await sleep(350);
   };
+  let lastFieldPos = null;   // the field's fill changes colour once
+                             // selected, so later scans reuse this
   const selectFieldByTap = async () => {
     const p = await fieldPos();
     T('name field found in framebuffer', !!p, p && JSON.stringify(p));
     if (!p) return false;
+    lastFieldPos = p;
     await tapGame(p.gx, p.gy);
     let tm = 0; for (let i = 0; i < 10 && tm !== 1; i++) { tm = await call('text_mode'); if (tm !== 1) await sleep(150); }
     T('tap selects the name field (text_mode 1)', tm === 1, tm);
@@ -108,7 +124,9 @@ function T(name, cond, extra) {
   // ---- bug 2: field selected, then start a run by taps ----
   await fresh();
   if (await selectFieldByTap()) {
-    await tapGame(320, 168);            // START row -> slots screen
+    const sy = await startRowY();
+    T('START row found in framebuffer', !!sy, sy);
+    await tapGame(320, sy || 168);      // START row -> slots screen
     let st = -1; for (let i = 0; i < 10 && st !== 7; i++) { st = await call('dbg_state'); if (st !== 7) await sleep(150); }
     T('slots screen reached', st === 7, st);
     await tapGame(320, 138);            // slot 1 -> new run

@@ -58,6 +58,9 @@ const T = (name, ok, info) => { console.log((ok ? 'PASS' : 'FAIL') + ' | ' + nam
   // PAUSE -> SAVE + QUIT TO TITLE
   await key('KeyP', 300);
   T('paused', (await call('dbg_state')) === 5, await call('dbg_state'));   // GS_PAUSE is 5 (3 is GS_OVER)
+  // pause menu is 3 rows since Nov 6 (Daniel): CONTINUE / CONTROLS /
+  // SAVE + QUIT TO TITLE — two Downs reach the quit row.
+  await key('ArrowDown', 150);
   await key('ArrowDown', 150);
   await key('Space', 500);
   T('back at title', (await call('dbg_state')) === 0, await call('dbg_state'));

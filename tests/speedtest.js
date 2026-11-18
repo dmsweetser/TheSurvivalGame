@@ -2,6 +2,10 @@
 // upgrade should matter MORE the heavier the hat is. Bare speed may
 // only creep up; the load curve is what flattens. Level 0 must feel
 // exactly like the classic game at every weight.
+// Two later Daniel-directed changes supersede the Nov 2 numbers
+// below the hat: the Endless-levels rework raised the shrug to
+// 50%/level (bare bonus capped at +40%), and the Nov 14 floor pins
+// any crawl to 40 px/s. Expectations here assert THAT design.
 const { chromium } = require('playwright-core');
 const EXE = process.env.HOME + '/.cache/ms-playwright/chromium-1248/chrome-linux64/chrome';
 const URL = 'http://localhost:8903/the-survival-game.html';
@@ -45,16 +49,20 @@ const near = (v, want, tol) => Math.abs(v - want) <= tol;
   ok((await call('dbg_carried')) === 2400, 'hat holds 240 kg', await call('dbg_carried'));
 
   const heavy0 = await call('dbg_speed');
-  ok(near(heavy0, 276, 30), 'L0 at 240 kg: classic crawl 27.6 (curve unchanged)', heavy0);
+  ok(near(heavy0, 400, 30), 'L0 at 240 kg: curve is still 27.6, pinned to the 40 floor (Nov 14)', heavy0);
   await call('dbg_setupg', 4, 3);
   const heavy3 = await call('dbg_speed');
-  ok(near(heavy3, 530, 50), 'L3 at 240 kg: 53.0 — nearly double L0', heavy3);
+  ok(near(heavy3, 603, 50), 'L3 at 240 kg: 60.3 with the 50%/level shrug', heavy3);
   await call('dbg_setupg', 4, 5);
   const heavy5 = await call('dbg_speed');
-  ok(near(heavy5, 687, 60), 'L5 at 240 kg: 68.7 — about 2.5x L0', heavy5);
+  ok(near(heavy5, 790, 60), 'L5 at 240 kg: 79.0 — about 2x the floored crawl', heavy5);
 
   const r0 = heavy0 / bare0, r5 = heavy5 / bare5;
-  ok(r5 > r0 * 1.8, 'the heavier payoff grows with levels: L5 keeps ' +
+  // the floor inflates L0's kept share (27% measured, 19% on the raw
+  // curve), so the growth multiplier is asserted against the floored
+  // baseline: 1.6 still fails if the shrug drops back to 35% (0.387)
+  // or vanishes (0.225), and passes for the designed 50% (0.445).
+  ok(r5 > r0 * 1.6, 'the heavier payoff grows with levels: L5 keeps ' +
      Math.round(r5 * 100) + '% of bare speed vs L0 keeping ' + Math.round(r0 * 100) + '%', r0 + ' -> ' + r5);
 
   console.log(`${pass} passed, ${fail} failed`);

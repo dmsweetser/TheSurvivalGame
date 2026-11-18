@@ -523,7 +523,18 @@ static void plat_draw_enemy(PlatEn *e, int bob, int strain){
         disc_fill(x-3, hy-4, 2, COL(255,190,195));
         return;
     }
-    if (e->kind==0 || e->kind==1){   // crawlers: a bug with a dome (green for the shell-bug;
+    if ((e->kind==0 || e->kind==1) && G.eddie){   // EDDIE MODE (v1.24): the crawler is a puffball here
+                                     // too — same footprint, orange fuzz, big red nose
+        ellipse_fill(x-5+(bob?1:0), y-1, 4, 2, OUTLINE);
+        ellipse_fill(x+5-(bob?1:0), y-1, 4, 2, OUTLINE);
+        for (int fz=0; fz<5; fz++) circle_fill(x-8+fz*4, y-12+(fz%2), 3, COL(243,146,44));
+        ellipse_fill(x, y-7, 11, 8, OUTLINE);
+        ellipse_shade(x, y-7, 10, 7, COL(243,146,44));
+        ellipse_shade(x, y-4, 6, 3, COL(255,224,168));
+        disc_fill(x-4, y-9, 2, COL(255,255,255)); disc_fill(x+4, y-9, 2, COL(255,255,255));
+        disc_fill(x-4, y-9, 1, OUTLINE); disc_fill(x+4, y-9, 1, OUTLINE);
+        circle_fill(x, y-6, 4, COL(228,54,46)); pset(x-1, y-7, COL(255,255,255));
+    } else if (e->kind==0 || e->kind==1){   // crawlers: a bug with a dome (green for the shell-bug;
                                      // the region's dominant strain colours the plain crawler)
         ellipse_fill(x, y-7, 10, 7, e->kind==1? COL(64,150,70) : (strain>=0? BUG_COL[strain] : COL(96,74,140)));
         if (e->kind==1){ rect_fill(x-10, y-9, 20, 3, COL(50,120,56)); }
