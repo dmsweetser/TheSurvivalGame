@@ -3,7 +3,9 @@
 // home at high THREAT. Three fresh runs: (1) baseline sizes far out
 // at THREAT x1, (2) sizes near home at high THREAT — the old code
 // rolled doorstep bugs like far-out giants — (3) spawn fill rate far
-// out at high THREAT.
+// out at high THREAT. Run 2's numbers were recalibrated Nov 18, 2026
+// (Daniel's call) for his Nov 5 directive that size scales with
+// THREAT indefinitely; the derivation is written out at run 2.
 const { chromium } = require('playwright-core');
 const EXE = process.env.HOME + '/.cache/ms-playwright/chromium-1248/chrome-linux64/chrome';
 const URL = 'http://localhost:8903/the-survival-game.html';
@@ -43,7 +45,31 @@ async function freshRun() {
     await browser.close();
   }
 
-  // run 2: high THREAT, bugs spawned near home (700 from the epicenter)
+  // run 2: high THREAT, bugs spawned near home (700 from the epicenter).
+  // RECALIBRATED Nov 18, 2026 at Daniel's direction: the original
+  // bounds (avg <= 400, giants <= 9) encoded his Nov 2 doorstep
+  // calibration, but his Nov 5 directive — SIZE scales with THREAT,
+  // indefinitely (buddies.c: "w *= 1.0f + (G.threat-1.0f)*0.30f") —
+  // superseded it, and on Nov 18 Daniel confirmed the scaling stands
+  // and this test moves. New bounds derived from the code, not fitted
+  // to a run (spawn_bug / bug_max_weight in buddies.c, THREAT 4.4,
+  // d = 700, EASY so d_w() = 1):
+  //   de   = 700 + (4.4-1)*650 = 2910
+  //   maxW = bug_max_weight(2910)
+  //        = 2 + 133 * 0.97^2 * (0.35 + 0.65*0.97) ~= 124.7 kg
+  //          (the threat cap, 150*(1+3.4*0.35) = 328.5, does not bind)
+  //   w    = (0.6 + r^4 * maxW) * (1 + (4.4-1)*0.30),  E[r^4] = 1/5
+  //   pre-scaling mean = 0.6 + 124.7/5 ~= 25.5 kg — exactly the Nov 2
+  //   doorstep calibration; the Nov 5 multiplier is 1 + 3.4*0.30
+  //   = 2.02, so the expected mean is 25.5 * 2.02 ~= 51.6 kg (516 in
+  //   dbg_bugavgw's x10 units). The original average bound kept x1.6
+  //   headroom over its expectation (25 -> <=40); same philosophy:
+  //   516 * 1.6 ~= 825.
+  //   Giants: P(w > 60) = P(r^4 > (60/2.02 - 0.6)/124.7 = 0.233)
+  //   = 1 - 0.233^(1/4) ~= 0.305, so ~9 of 30 are giants now — under
+  //   threat scaling a third of the doorstep swarm IS giant, by
+  //   design. Original giant bound was ~x1.8 over its ~5 expectation;
+  //   <= 15 keeps ~x1.6 over the new ~9.2 expectation.
   {
     const { browser, call } = await freshRun();
     ok((await call('dbg_state')) === 1, 'run 2 started');
@@ -53,8 +79,8 @@ async function freshRun() {
     await call('dbg_tp', 0, 300); await sleep(200);
     for (let i = 0; i < 30; i++) await call('dbg_spawnbug', 700, (i % 7) * 30 - 90);
     const avg = await call('dbg_bugavgw'), big = await call('dbg_bugbig');
-    ok(avg <= 400, 'run 2: doorstep bugs at high THREAT average ~25 kg, not ~68', avg);
-    ok(big <= 9, 'run 2: giants (>60 kg) are the exception near home, not a third of the swarm', big);
+    ok(avg <= 825, 'run 2: doorstep bugs at high THREAT average ~52 kg (Nov 5 scaling of the ~25 kg doorstep), not double-scaled ~104', avg);
+    ok(big <= 15, 'run 2: giants (>60 kg) near home at high THREAT run ~9 of 30 by design (Nov 5 threat scaling)', big);
     await browser.close();
   }
 

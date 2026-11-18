@@ -15,7 +15,9 @@
 //          the interact button; drag runs + jumps in the platformer.
 //   THE BACKFIRE BEAN: key 6 far from home -> the ride plays
 //          (bean_t), you land on the plaza (0,70), the bean is spent;
-//          at home the bean refuses politely and is NOT spent.
+//          at home (inside the epicenter) the bean is spent as the
+//          JETPACK instead (Nov 10; Daniel confirmed Nov 18): free
+//          flight until you FIRE or take one hit.
 //   WHALES ONLY: with the selection on the last row, the scrolled
 //          window's tap math still lands on ENTER UNLOCK CODE.
 const { chromium } = require('playwright-core');
@@ -171,9 +173,21 @@ function T(name, cond, extra) {
   const px = await call('dbg_px'), py = await call('dbg_py');
   T('the bean lands you on the plaza', Math.abs(px) < 30 && Math.abs(py - 70) < 30, px + ',' + py);
   T('the bean is spent', (await call('dbg_beans', -1)) === 0, await call('dbg_beans', -1));
+  // at home = inside the epicenter: the bean is the JETPACK (Nov 10,
+  // Daniel confirmed Nov 18) — spent on launch, free flight, and FIRE
+  // drops you where you are. The pre-Nov-10 "refuses at home" rule this
+  // spot used to assert was superseded by that directive; the checks
+  // below mirror beanjettest's, at the same strength.
   await call('dbg_beans', 1);
   await key('Digit6', 120, 400);
-  T('at home the bean refuses (not spent)', (await call('dbg_beans', -1)) === 1, await call('dbg_beans', -1));
+  T('at home the bean is spent', (await call('dbg_beans', -1)) === 0, await call('dbg_beans', -1));
+  T('at home the bean launches the jetpack', (await poll('dbg_jet', v => v === 1, 3000)) === 1, await call('dbg_jet'));
+  { const hx = await call('dbg_px');
+    await page.keyboard.down('ArrowRight'); await sleep(2000); await page.keyboard.up('ArrowRight'); await sleep(150);
+    const jx = await call('dbg_px');
+    T('the jetpack flies (400+ px east in 2 s)', jx - hx > 400, hx + ' -> ' + jx);
+    await key('Space', 120, 300);
+    T('firing drops the jetpack where you are', (await poll('dbg_jet', v => v !== 1, 3000)) !== 1, await call('dbg_jet')); }
 
   // ================= WHALES ONLY: scrolled taps =================
   { await call('dbg_tp', 0, 80); await sleep(200);
