@@ -1,6 +1,6 @@
 {
-  "versionCode": 21,
-  "versionName": "1.21",
-  "apkUrl": "https://github.com/dmsweetser/TheSurvivalGame/releases/download/v1.21/TheSurvivalGame.apk",
-  "notes": "A FAIR FIGHT: the hives run a real economy now - bug harvesters haul bits from the same nodes you use, every wave is paid for, and a starved hive goes quiet. Plus DEMOLISH (sell any building back for half cost), a field-medic Patcher, and a full WAR! visual overhaul."
+  "versionCode": 22,
+  "versionName": "1.22",
+  "apkUrl": "https://github.com/dmsweetser/TheSurvivalGame/releases/download/v1.22/TheSurvivalGame.apk",
+  "notes": "SUNDAY BEST: a whole-game glow-up - CASTLE torches and shadows, gold-chrome title and HUD panels, Bug Mall lantern light, SUPER BUDDY RUN ground shadows, TANK RESCUE explosion flashes. CASTLE's exit is open again (the key guards the treasure gate, not the door), and the WAR! gamepad cursor wakes up dead centre so a wake-tap A lands."
 }
