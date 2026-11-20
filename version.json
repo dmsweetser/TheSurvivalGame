@@ -1,6 +1,6 @@
 {
-  "versionCode": 24,
-  "versionName": "1.24",
-  "apkUrl": "https://github.com/dmsweetser/TheSurvivalGame/releases/download/v1.24/TheSurvivalGame.apk",
-  "notes": "POLISHED SEAMS: a whole-game polish pass - stepping between worlds now fades like an eyelid blink, split-screen co-op gets a gold-hearted seam with P1/P2 chips in each player's hoodie colour, the Walk of Fame marquee lights up in confetti colours, Bug Bowl gets its speckled alley wall and warm light pooled on the pin deck, motes drift in the meadow air, and Eddie Mode reaches the crawlers in Super Buddy Run. Plus a real fix: holding Backspace in the Whales Only code box now chews through the code on web the way it always did in the native apps."
+  "versionCode": 25,
+  "versionName": "1.25",
+  "apkUrl": "https://github.com/dmsweetser/TheSurvivalGame/releases/download/v1.25/TheSurvivalGame.apk",
+  "notes": "FIRST SHIFT: the big one - a guided first day for new saves, Comfort Settings, Medal Times, a Trophy Case and earnable Hat Toppers in a bigger nine-stop Bug Mall, a Weekly Challenge board, Castle Shuffle, Named Elites with a Bounty Board, a Hat Portrait Booth, the Bug Bowl League, Entrances Chapter 2 'Deeper Doors', day/night skies with regional weather, two-commander local co-op in WAR!, a post-game story chapter 'The Rebuilding', and music that breathes with the danger."
 }
