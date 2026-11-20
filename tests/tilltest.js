@@ -30,7 +30,7 @@ function T(name, cond, extra) { if (cond) { pass++; } else { fail++; console.log
   await call('dbg_tp', 0, 80); await sleep(250);
   await key('KeyE', 300);
   T('in the mall', (await poll('dbg_mall', v => v === 1)) === 1, await call('dbg_mall'));
-  await call('dbg_tp', -225, -6108); await sleep(250);
+  await call('dbg_tp', -315, -6148); await sleep(250);
   for (let i = 0; i < 5 && (await call('dbg_state')) !== 2; i++) await key('KeyE', 250);
   T('bounty panel open (GS_STORE)', (await call('dbg_state')) === 2, await call('dbg_state'));
 

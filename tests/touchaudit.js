@@ -162,7 +162,7 @@ function T(name, cond, extra) {
 
   // ================= THE BACKFIRE BEAN =================
   await call('dbg_bwexit'); await sleep(300);
-  T('walked to the mall exit mat', await walkTo(0, -5850, 10));
+  T('walked to the mall exit mat', await walkTo(0, -5810, 10));
   await key('KeyE', 300); await sleep(300);
   T('left the mall (the bean only flies outdoors)', (await call('dbg_mall')) === 0, await call('dbg_mall'));
   await call('dbg_tp', 3000, 3000); await sleep(300);
@@ -193,7 +193,7 @@ function T(name, cond, extra) {
   { await call('dbg_tp', 0, 80); await sleep(200);
     await key('KeyE', 300); await sleep(300);              // into the mall
     T('in the mall', (await call('dbg_mall')) === 1, await call('dbg_mall'));
-    T('walked to the Whales Only counter', await walkTo(-75, -6108, 14));
+    T('walked to the Whales Only counter', await walkTo(-105, -6148, 14));
     await key('KeyE', 350); await sleep(400);
     T('Whales Only panel open', (await call('dbg_station')) === 1, await call('dbg_station'));
     if ((await call('dbg_station')) === 1) {

@@ -35,7 +35,7 @@ const T = (name, ok, info) => { console.log((ok ? 'PASS' : 'FAIL') + ' | ' + nam
   await call('dbg_tp', 0, 80); await sleep(150);
   await key('KeyE', 300);
   T('entered the mall', (await call('dbg_mall')) === 1);
-  T('walked to the Whales Only counter', await walkTo(-75, -6108, 14));
+  T('walked to the Whales Only counter', await walkTo(-105, -6148, 14));
   await key('KeyE', 350);
   T('whales panel open', (await call('dbg_station')) === 1);
   for (let i = 0; i < 15; i++) await key('ArrowDown', 110);

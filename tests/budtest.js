@@ -50,7 +50,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   await call('dbg_tp', 0, 80); await sleep(150);
   await key('KeyE', 300);
   ok((await call('dbg_mall')) === 1, 'entered the mall');
-  ok(await walkTo(225, -6108, 14), 'walked to the buddies counter');
+  ok(await walkTo(315, -6148, 14), 'walked to the buddies counter');
   for (let i = 0; i < 6; i++) await call('dbg_feed');   // 60 kg: exactly a rock's price
 
   await key('KeyE', 350);
@@ -74,7 +74,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   // the buddy follows through the door, both ways (the retired
   // robot clones used to fill this role — the buddies own it now)
   ok((await call('dbg_budy')) < -5700, 'buddy beside owner inside the mall', await call('dbg_budy'));
-  ok(await walkTo(0, -5850, 10), 'walked to the exit mat');
+  ok(await walkTo(0, -5810, 10), 'walked to the exit mat');
   await key('KeyE', 300);
   ok((await call('dbg_mall')) === 0, 'left the mall');
   const yOut = await poll('dbg_budy', v => v > -1000, 5000);
@@ -85,7 +85,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   ok(yIn < -5700, 'buddy followed back IN', yIn);
 
   // rename + recolor the rock at the counter
-  ok(await walkTo(225, -6108, 14), 'back at the buddies counter');
+  ok(await walkTo(315, -6148, 14), 'back at the buddies counter');
   await key('KeyE', 350);
   for (let i = 0; i < 9; i++) await key('ArrowDown', 120);   // row 9: COLOR
   await key('Space', 350);
@@ -127,7 +127,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   await key('Escape', 300);
 
   // XP: the rock earns from its own kills (doubled rate)
-  ok(await walkTo(0, -5850, 10), 'walked to the exit mat again');
+  ok(await walkTo(0, -5810, 10), 'walked to the exit mat again');
   await key('KeyE', 300);
   await call('dbg_tp', 0, 300); await sleep(300);
   await call('dbg_spawnbug', 20, 290);

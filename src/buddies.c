@@ -99,6 +99,7 @@ typedef struct {
     float banked;                     // kg stored at the Bug Bank (safe, not a record)
     int hatstand;                     // owns the Psychic Hat Stand
     int whale_own, whale_on;          // Whales Only: owned / switched-on vanity bits
+    int top_worn;                     // HAT TOPPERS (feat 5): runtime mirror of Buddy.top_worn, the only thing draw_hat reads (0 = none)
     int weapon;                       // current
     int owned[NWEAP];
     int upg[NUPG];
@@ -134,6 +135,7 @@ typedef struct {
     float chew_t;
     float stuck_t, grease_t; int grease_s;   // anti-stuck grease (Nov 10): slide around props
     u32 seed;
+    int elite;                        // v1.25 feat 8: 0 = ordinary; else the bounty's name index + 1
 } Bug;
 
 typedef struct {
@@ -181,6 +183,7 @@ typedef struct {
     int story_bits2;                  // quests 6-9 state + their flags (Nov 4 story expansion); saved as sq2, defaults 0 on old saves
     int ent_best, ent_done;           // ENTRANCES records (Nov 5): deepest room reached, runs finished; saved packed as er
     int ent_sub_best;                 // SUBFLOOR record: deepest B-room reached; saved as sb
+    int ent2_best, ent2_done;         // DEEPER DOORS records (v1.25 feat 11): deepest Chapter 2 room, Deeper completions; saved packed as e2
     int plat_done;                    // SUPER BUDDY RUN record: levels completed; saved as pd
     float craft_x, craft_y;           // BUDDY CRAFT: this buddy's standing spot in the endless wild; saved as cx/cy
     int craft_wood, craft_stone, craft_fiber, craft_car, craft_pies, craft_gear;   // BUDDY CRAFT pack; saved as cm/cn/cg
@@ -197,13 +200,47 @@ typedef struct {
     float stuck_t, grease_t; int grease_s;   // anti-stuck grease (Nov 10): slide around props
     int tank_done;                    // TANK RESCUE record: deepest level cleared; saved as td
     int cas_best;                     // CASTLE record: best escape score; saved as cb
+    int cas_shufn;                    // CASTLE SHUFFLE (v1.25 feat 7): shuffle runs dealt so far; the run seed, saved as cs
     int crt_best_pos, crt_best_time;  // SUPER BUDDY CART records: best finish (0 = none) as cp, best race time in deciseconds as cq
     int crt_cupbest;                  // best Grand Prix rank per cup, packed: home + far*8 (0 = unranked), as cr
+    int crt_tbest[8];                 // MEDAL TIMES (v1.25 feat 3): best race time per track in deciseconds (0 = none), as mc; medals DERIVE from these
+    int plat_tbest[16];               // MEDAL TIMES: best clear time per Run level 1..16 in deciseconds (0 = none), as mr
     int war_prog;                     // WAR! record: regions conquered (0..8); the world map unlocks region war_prog next, as wr
+    int top_earned, top_worn;         // HAT TOPPERS (v1.25 feat 5): earned bitmask (bit id-1), worn topper id 0..8; saved as tp/tw
     float roll;                       // the pet rock's rolling angle
     float steady_t;                   // pet rock's ROCK STEADY: unhurtable while > 0
     float tx, ty;                     // render interpolation target (client)
 } Buddy;
+
+// MEDAL TIMES (v1.25 feat 3): a medal is DERIVED from a stored best time
+// against a {gold, silver, bronze} decisecond threshold row — never
+// stored itself — so thresholds can be retuned without migrating saves.
+// Tier: 0 = none, 1 = bronze, 2 = silver, 3 = gold.
+static int medal_tier(int best_ds, const int thr[3]){
+    if (best_ds<=0) return 0;
+    if (best_ds<=thr[0]) return 3;
+    if (best_ds<=thr[1]) return 2;
+    if (best_ds<=thr[2]) return 1;
+    return 0;
+}
+static const char *medal_name(int tier){
+    return tier>=3? "GOLD" : tier==2? "SILVER" : tier==1? "BRONZE" : "NONE";
+}
+static u32 medal_col(int tier){
+    return tier>=3? COL(250,200,50) : tier==2? COL(205,212,220) : tier==1? COL(198,124,64) : COL(140,140,148);
+}
+
+// HAT TOPPERS (v1.25 feat 5): cabinet trophies worn on top of the
+// carcass hat. Ids 1..8 (0 = none); the earned set is a bitmask on
+// Buddy (bit id-1), derived from the same records the Trophy Case
+// reads — see topper_refresh in world.c and the feat-5 spec. Pure
+// vanity: no weight, not a carcass, never spendable or bankable.
+enum { TOP_CROWN=1, TOP_CAP, TOP_FLAG, TOP_MEDAL, TOP_PIN, TOP_GOLD, TOP_ANVIL, TOP_HARDHAT, TOP_N=8 };
+#define TOP_BIT(id) (1<<((id)-1))
+#define TOP_ALL ((1<<TOP_N)-1)
+#define TOP_ANVIL_KG 160.0f   // the weight where a hat's tier name becomes THE LEGACY SYSTEM
+static const char *TOP_NAME[TOP_N+1] = { "NONE", "CROWN", "GENERAL CAP", "CHECKER FLAG",
+                                         "STORY MEDAL", "BOWL PIN", "GOLD STAR", "ANVIL", "HARD HAT" };
 
 // BUG BOWL: one player's bowling game at the mall lanes. Lane space:
 // x across (-60..60 is the lane, beyond is gutter), y down-lane from
@@ -218,12 +255,29 @@ typedef struct {
     float power; int power_dir;
     float bx, by, bvx, bvy; int bl_live, bl_gutter, bl_kind;
     int pins_before;
+    int strikes;                      // strikes this game (10 on a full rack), counted in bowl_record
     float settle_t, msg_t;
     char msg[40];
     int act;                          // queued FIRE edge from station_input
     int standing[10];
     float pfx[10], pfy[10], pfvx[10], pfvy[10], pft[10];   // toppling pins
 } Bowl;
+
+// BUG BOWL LEAGUE (v1.25 feat 10): one player's league book at the
+// lanes — a career line plus a six-night season against three house
+// rivals whose scores are a pure hash2 function of (season, night,
+// rival), so only the PLAYER's side ever needs saving. The core
+// (calibration, finalize) lives in mall.c beside bowl_record; the
+// persistence is one pl-line tail token (bl=) in save.c. See
+// v125-feat10-spec.md.
+typedef struct {
+    int games, best, pins, strikes;      // career: games, best game, total pins, total strikes
+    int season, night, spins;            // season >= 1 once started; night = nights completed
+                                         // this season (0..5 between games); spins = your pins
+    int trophies;                        // championships won
+    int last_score, last_place, last_night, last_season;  // last night's result (place 1..4)
+    int fin_place, fin_season;           // last CLOSED season's place + its number (0 = none)
+} BowlLeague;
 
 typedef struct { int alive; float x,y,vx,vy,life,maxlife; int size; u32 col; } Particle;
 typedef struct { int alive; float x,y,life; char text[24]; u32 col; } Floater;
@@ -260,6 +314,7 @@ typedef struct {
     int store_station;                // mall station of the open panel (0 = the shop)
     Buddy bud[MAXP];                  // one Banzai Buddy per player slot
     Bowl bowl[MAXP];                  // one Bug Bowl game per player slot
+    BowlLeague blg[MAXP];             // BUG BOWL LEAGUE (feat 10): one league book per player slot
     int coop_pref;                    // 2P local co-op wanted (persisted)
     int p2_slot;                      // player index of the local P2, -1 none
     int view_x0, view_w, view_pi;     // split-screen: current render view
@@ -276,6 +331,12 @@ typedef struct {
     int whale_own, whale_on;          // WHALES ONLY: this user's unlocks (persisted globally)
     int difficulty, diff_run;         // 0 EASY (= the game as it was) 1 MEDIUM 2 HARD 3 BUGAGGEDON
     int set_sel, set_capture;         // settings screen: row, awaiting a key
+    // COMFORT (v1.25 feature 2): persisted audio/shake preferences,
+    // edited on the settings screen above the key bindings and saved
+    // in the global blob beside them. Volumes are 0..10 (10 = the
+    // mix exactly as shipped); mute_all silences both audio buses;
+    // shake_on gates the screen-shake effect game-wide.
+    int vol_music, vol_sfx, mute_all, shake_on;
     // records (persisted across runs)
     char rec_name[13]; float rec_hat; int rec_kills; float rec_time; int rec_bowl;
     int has_save;
@@ -286,6 +347,58 @@ typedef struct {
     int slots_mode, slots_sel, slots_confirm;   // slot picker UI state
     int pause_sel;                              // pause menu selection
     int pause_ctl;                              // pause menu: the CONTROLS panel is open
+    // FIRST SHIFT (v1.25): the guided first-session chain. Per-slot
+    // state (it rides the run's slot blob): 0 = off (a save from
+    // before the chain existed, or a run that never armed it),
+    // 1 = active, 2 = done, 3 = skipped. fs_fp0 is the purchase
+    // fingerprint captured when the chain armed. fs_pool holds a
+    // player's step XP until they adopt a buddy — the award door
+    // pays buddies only, and the reward must not evaporate for a
+    // player who hasn't adopted one yet.
+    int fs_state, fs_step, fs_fp0;
+    int fs_pool[MAXP];
+    // WEEKLY CHALLENGE (v1.25 feature 6): one goal a week, a pure
+    // function of the week id, tracked per slot. wk_week is the week
+    // this slot's challenge belongs to (0 = never initialized: a
+    // pre-feature save before its first rollover, or a LAN client —
+    // the host owns the week). wk_done_week is the week of the most
+    // recent completion ("done this week" is derived: done_week ==
+    // wk_week); wk_total counts completions all-time (no streaks —
+    // misses are never stored as anything but the prev row's fact).
+    // wk_prev_week/wk_prev_done remember the outgoing week at the
+    // last rollover for the board's PREVIOUS row. wk_base[] holds
+    // the week's opening snapshot of the seven delta sources.
+    int wk_week, wk_done_week, wk_total, wk_prev_week, wk_prev_done;
+    int wk_base[7];
+    // NAMED ELITES + BOUNTY BOARD (v1.25 feature 8): one posted
+    // bounty per slot, naming one elite. bn_serial is the contract
+    // counter — the elite's name and kind are a pure function of it
+    // (hash2, in buddies.c below), so the save needs nothing else.
+    // bn_done counts claims all-time (the board's ledger). bn_cool
+    // is the post-claim cooldown in seconds of play: while it runs,
+    // the next name is posted but its bug cannot crawl out yet.
+    // The bn_claim_* fields are the hand-off from kill_bug (which
+    // runs deep inside combat) to bn_update (save.c), which settles
+    // the claim on the frame tail. bn_live / bn_live_reg /
+    // bn_last_reg are runtime tracking for the board's LAST SEEN
+    // row and the pause line — never saved (the board honestly
+    // forgets where the elite was across a load).
+    int bn_serial, bn_done;
+    float bn_cool;
+    int bn_claim_pending, bn_claim_pi, bn_claim_name;
+    float bn_claim_w;
+    int bn_live, bn_live_reg, bn_last_reg;
+    // HAT PORTRAIT BOOTH (v1.25 feature 9): the shell hand-off for
+    // the PNG. station_action freezes the portrait and arms the
+    // booth draw; the draw — the one actually showing the pose, in
+    // whichever view drew it — fills these stage-coordinate fields
+    // and bumps port_req_serial; the shell polls portrait_info and
+    // crops exactly this rectangle out of its frame. Written only
+    // by the booth draw, so the rect is honest in every layout.
+    int port_req_serial;
+    int port_req_x, port_req_y, port_req_w, port_req_h;
+    char port_req_name[16];
+    int port_req_kg;
     // menu text fields, filled by the platform (name / join IP)
     char my_name[13];
     char join_ip[48];
@@ -352,9 +465,11 @@ typedef struct {
     u32 act_held, act_edges;          // gamepad actions, in ACT_* space
     u32 act2_held, act2_edges;        // second gamepad (local co-op P2)
     float pad_ax[4];                  // pad 1's analog sticks, raw -1..1 in web-axes order (LX, LY, RX, RY; +Y is DOWN) — WAR!'s cursor flies on these (v1.16)
+    float pad2_ax[4];                 // pad 2's analog sticks, same order/convention (v1.25 feat 13: WAR! co-op's second cursor flies on these)
     u32 pad_edges;                    // this frame's act_edges, snapshotted by derive_input before it clears them (WAR!'s pad buttons read here)
+    u32 pad2_edges;                   // the same snapshot for act2_edges (pad 2)
     int pad_count;                    // controllers the platform can see
-    float dev_t, pad_last, key_last;  // last-device stamps: which input the player is actually USING (drives hint labels)
+    float dev_t, pad_last, key_last, touch_last;  // last-device stamps: which input the player is actually USING (drives hint labels)
     int weapon_cycle;                 // derived: -1/0/+1 from gamepad bumpers
     int keys;                         // bits below
     float mx, my;                     // mouse in screen coords
@@ -413,19 +528,94 @@ static int menu_pad_mode(void){
     if (!G.menu_pad) G.menu_pad = pad_mode()? 2 : 1;
     return G.menu_pad==2;
 }
-// the one true label for an action, for the device in hand. Pad map
-// (standard): A fire/confirm, B interact, X wall, START pause/menu,
-// BACK back. Keyboard labels honour the player's own bindings.
-static const char *lbl_fire(void){ return pad_mode()? "A" : (mobile_ui()? "TAP" : key_name(G.bind[ACT_FIRE])); }
-static const char *lbl_int(void){ return pad_mode()? "B" : (mobile_ui()? "TAP" : key_name(G.bind[ACT_INTERACT])); }
-static const char *lbl_wall(void){ return pad_mode()? "X" : (mobile_ui()? "TAP" : key_name(G.bind[ACT_WALL])); }
-static const char *lbl_bean(void){ return pad_mode()? "Y" : (mobile_ui()? "TAP BEAN" : "6"); }
+// ---- contextual HUD controls (v1.25): one device model, one label
+// helper. Three device classes; a player's ACTIVE device is the one
+// that last produced input from that player. P1's race runs on the
+// stamps above (pad buttons/sticks, physical keys AND the mouse,
+// touch entry points each stamp their own clock in derive_input /
+// platform). The local P2 is structurally pad 2 — act2 is the only
+// input P2 has — so P2's device is DEV_PAD whenever P2 exists. Net
+// guests render their own screens, so nothing here needs theirs.
+enum { DEV_KB=0, DEV_PAD=1, DEV_TOUCH=2 };
+static int dev_local(void){
+    if (IN.touch_last>0 && IN.touch_last>=IN.pad_last && IN.touch_last>=IN.key_last) return DEV_TOUCH;
+    if (pad_mode()) return DEV_PAD;
+    if (mobile_ui() && IN.pad_last<=0 && IN.key_last<=0) return DEV_TOUCH;   // touch-first boot, nothing touched yet
+    return DEV_KB;
+}
+static int dev_of(int pi){
+    if (pi>=0 && G.p2_slot>=0 && pi==G.p2_slot && pi!=G.my_id) return DEV_PAD;
+    return dev_local();
+}
+// the device of the view/sim being drawn or updated right now; the
+// render and update entry points set it per view/owner (bw_render,
+// bw_update, bw_enter_mode, the split passes, render_store) and
+// frame() resets it to the local device, so labels composed or drawn
+// for P2 name P2's controls with no call-site changes.
+static int g_dev_ctx = -1;
+static int hint_dev(void){ return g_dev_ctx>=0? g_dev_ctx : dev_local(); }
+// the action set the game actually prompts for
+enum { H_FIRE, H_INT, H_WALL, H_BEAN, H_CONFIRM, H_BACK, H_PAUSE,
+       H_MOVE, H_POINT };
+// the one true label for an action on a given device. Pad map
+// (standard): A fire/confirm, B interact/back, X wall, Y bean,
+// START pause. Keyboard labels honour the player's own bindings.
+// Touch: the prompts ARE the on-screen buttons, so stick-scheme
+// hints name the deck buttons (FIRE / USE / WALL — the exact words
+// drawn on them); in the drag scheme the finger is the control
+// (TAP / DRAG); in menus the row itself is the button (TAP).
+static const char *lbl2(int dev, int act){
+    if (dev==DEV_PAD){
+        switch (act){
+            case H_FIRE: case H_CONFIRM: case H_POINT: return "A";
+            case H_INT: case H_BACK: return "B";
+            case H_WALL: return "X";
+            case H_BEAN: return "Y";
+            case H_PAUSE: return "START";
+            case H_MOVE: return "STICK/DPAD";
+        }
+    } else if (dev==DEV_TOUCH){
+        switch (act){
+            case H_FIRE: return G.touch_ctl? "FIRE" : "TAP";
+            case H_INT:  return G.touch_ctl? "USE" : "TAP";
+            case H_WALL: return "WALL";
+            case H_BEAN: return "TAP BEAN";
+            case H_MOVE: return G.touch_ctl? "STICK" : "DRAG";
+            default:     return "TAP";   // CONFIRM / BACK / PAUSE / POINT
+        }
+    }
+    switch (act){
+        case H_FIRE: case H_CONFIRM: return key_name(G.bind[ACT_FIRE]);
+        case H_INT:  return key_name(G.bind[ACT_INTERACT]);
+        case H_WALL: return key_name(G.bind[ACT_WALL]);
+        case H_BEAN: return "6";
+        case H_BACK: return "ESC";
+        case H_PAUSE: return key_name(G.bind[ACT_PAUSE]);
+        case H_MOVE: return "ARROWS";
+        case H_POINT: return "CLICK";
+    }
+    return "?";
+}
+static const char *lbla(int act){ return lbl2(hint_dev(), act); }
+// the steering phrase for the driving/running hints, per device
+static const char *lbl_steer(void){
+    int d = hint_dev();
+    if (d==DEV_KB) return "STEER WITH THE ARROWS";
+    if (d==DEV_TOUCH && !G.touch_ctl) return "STEER BY DRAGGING";
+    return "STEER WITH THE STICK";
+}
+// the one true label for an action, for the device in hand (the
+// wrappers every existing call site already speaks).
+static const char *lbl_fire(void){ return lbla(H_FIRE); }
+static const char *lbl_int(void){ return lbla(H_INT); }
+static const char *lbl_wall(void){ return lbla(H_WALL); }
+static const char *lbl_bean(void){ return lbla(H_BEAN); }
 // a contextual key prompt: "<KEY> - <VERB>", composed on the spot
 // (key_name's buffer is shared, so never store its pointer)
 static const char *key_prompt(char *buf, const char *key, const char *verb){
     char *q=buf; q=sappend(q, key); q=sappend(q, " - "); q=sappend(q, verb); *q=0; return buf;
 }
-static const char *lbl_exit(void){ return pad_mode()? "START" : "ESC"; }
+static const char *lbl_exit(void){ int d=hint_dev(); return d==DEV_PAD? "START" : (d==DEV_TOUCH? "TAP" : "ESC"); }
 
 enum {
     K_UP=1<<0, K_DOWN=1<<1, K_LEFT=1<<2, K_RIGHT=1<<3,
@@ -724,6 +914,29 @@ static u32 bud_coat(Buddy *b, u32 natural){
 }
 // adoption draft state: species -> name -> color, then the till runs
 static int bud_stage[MAXP];        // 0 panel, 1 name (adopt), 2 color (adopt), 3 name (rename), 4 color (recolor)
+static int booth_stage[MAXP];      // PHOTO BOOTH (feat 9; its own station since the v1.25 MALL ENLARGEMENT): 0 the booth's rows, 1 the gallery
+// HAT PORTRAIT BOOTH (v1.25 feature 9): the frozen pose, per player.
+// A portrait is a PHOTO, not a mirror: at snap time the pose is
+// copied here whole — backdrop, whether the stack was worn, the
+// stack itself (one drawn-kind digit per carcass: draw_hat reads
+// the stack only as (int)stack[i] % 4 plus the count, so a digit
+// per carcass re-renders pixel-identically), the lettered weight,
+// the topper, and the crew as they looked that day (buddy species /
+// coat / name, the DEV's colour and whale dressing). It rides the
+// pl-line as the pt= token (save.c). port_bd is the booth's
+// backdrop dial (persisted with the token); port_hat is the pose
+// dial — wear the stack for the photo, or bare — runtime only.
+typedef struct {
+    int has, backdrop, hat_on, top_worn, kg, stack_n;
+    int species, bud_color, name_idx, pcolor, whale_on;
+    unsigned char kinds[MAXSTACK];
+} Portrait;
+static Portrait portrait[MAXP];
+static int port_bd[MAXP];
+static int port_hat[MAXP];
+#define PORT_BD_N 6
+static const char *PORT_BD_NAME[PORT_BD_N] = { "PLAZA DAWN", "FROZEN CACHE", "KERNEL BADLANDS",
+                                               "CABLE JUNGLE", "THE BUG MALL", "WALK OF FAME" };
 static int bud_page[MAXP];         // name-list page while picking
 static int bud_dsp[MAXP];          // drafted species for an adoption
 static int bud_dname[MAXP];        // drafted name for an adoption
@@ -744,6 +957,66 @@ static float buddy_dmg(Buddy *b){ return BUD_DMG0[b->species%BUDN] * (1.0f + 0.2
 static void buddy_award_xp(int pi, int amt){
     if (amt > 0 && G.bud[pi].active) G.bud[pi].xp += amt;
 }
+// FIRST SHIFT (v1.25) shared data — the objective table, the XP
+// table, and the step-done banner state. Defined here, with the
+// design data, because the chain core (save.c), the HUD prompt
+// (world.c) and the pause menu (mall.c) all read them. The chain
+// itself lives in save.c; see v125-spec.md.
+static const char *FS_TEXT[6] = {
+    "SQUASH YOUR FIRST BUG",
+    "WEAR A 10 KG HAT",
+    "BUILD A CARCASS WALL",
+    "BUY SOMETHING AT THE COUNTER",
+    "BANK CARCASSES AT THE BUG BANK",
+    "STEP INTO BANZAI WORLD, OR ANY CABINET"
+};
+static const int FS_XP[6] = { 5, 5, 10, 10, 15, 20 };
+static float fs_flash_t = 0;      // step-done banner timer (play time only)
+static int   fs_flash_amt = 0;    // the XP the banner is celebrating
+static int   fs_flash_fin = 0;    // the banner is the finale
+// WEEKLY CHALLENGE (v1.25 feature 6): the completion / new-week
+// banner state, twin of the First Shift flash. wk_flash_kind:
+// 0 none, 1 challenge complete, 2 a new week rolled in mid-play.
+// The challenge core lives in save.c; the banner draws in world.c.
+static float wk_flash_t = 0;
+static int   wk_flash_kind = 0;
+// NAMED ELITES (v1.25 feature 8): the claim banner state, third in
+// the flash stack. bn_flash_name is the claimed elite's name index
+// (the banner names the fallen). The bounty core lives in save.c;
+// the banner and the tracker draw in world.c; the tables live here
+// with the bug machinery they describe.
+static float bn_flash_t = 0;
+static int   bn_flash_name = -1;
+#define BN_XP 25          // one expedition-sized hunt: Castle pays 50, the Weekly 50 for a week
+#define BN_COOLDOWN 150.0f   // seconds of play between a claim and the next crawl-out
+#define BN_WCAP 500.0f    // the huntable ceiling on elite weight (kg)
+static const int ELITE_N = 12;
+static const char *ELITE_NAME[12] = {
+    "NULLPOINTER", "SEGFAULT", "HEISENBUG", "OFFBYONE", "DEADLOCK", "MEMORY LEAK",
+    "RACE CONDITION", "INFINITE LOOP", "SPAGHETTI CODE", "BLUE SCREEN", "KERNEL PANIC", "HOTFIX"
+};
+static const char *ELITE_TITLE[12] = {
+    "DEVOURER OF STACKS", "THE UNHANDLED EXCEPTION", "GONE WHEN YOU LOOK AT IT",
+    "ONE MORE THAN YOU COUNTED", "FIRST TO BITE, LAST TO LET GO",
+    "BIGGER EVERY TIME YOU LOOK AWAY", "ALREADY BEHIND YOU",
+    "IT COMES BACK. IT COMES BACK.", "A KNOT WITH LEGS",
+    "THE ONE THAT ENDS THE DAY", "EVEN THE KERNEL RAN AWAY",
+    "SHIPPED ON A FRIDAY. STILL HERE."
+};
+static const char *ELITE_KINDNAME[4] = { "ROACH", "BEETLE", "SPIDER", "MOTH" };
+// the bounty's identity is a pure function of the serial — hash2,
+// never the gameplay RNG — so every install posts the same sequence
+// of names and a save needs nothing but the counter.
+static int bn_name_idx(int serial){ return (int)(hash2(serial, 31337, 0xB0B1E5u) % 12u); }
+static int bn_kind_of(int serial){ return (int)(hash2(serial, 271828, 0x5EED5u) % 4u); }
+// set by the spawner's bounty roll (and by dbg_bnforce): the next
+// bug spawn_bug brings into the world is the bounty's elite,
+// subject to the elevation gate in spawn_bug itself.
+static int bn_force = 0;
+static int bn_any_live(void){
+    for (int i=0;i<MAXBUGS;i++) if (G.bugs[i].alive && G.bugs[i].elite) return i;
+    return -1;
+}
 static void buddy_adopt(int pi, int species){
     Buddy *b=&G.bud[pi];
     smemset(b, 0, sizeof(*b));
@@ -751,6 +1024,10 @@ static void buddy_adopt(int pi, int species){
     b->name_idx = bud_dname[pi]; b->color = bud_color_draft[pi];
     buddy_refresh(pi);
     b->hp = b->maxhp;
+    if (G.fs_pool[pi] > 0){   // v1.25: First Shift tuition lands
+        buddy_award_xp(pi, G.fs_pool[pi]);
+        G.fs_pool[pi] = 0;
+    }
     b->energy = BUD_ENERGY_MAX;
     b->x = G.p[pi].x + 26; b->y = G.p[pi].y + 12;
     b->aim = -PI/2;
@@ -1014,7 +1291,7 @@ static float d_w(void){ return DIFF_W[G.diff_run&3]; }
 static float bug_max_weight(float d){
     float t = d/3000.0f; if (t>1.3f) t=1.3f;
     float m = 2.0f + 133.0f * t*t*(0.35f + 0.65f*t);
-    float cap = 150.0f * (1.0f + (G.threat-1.0f)*0.35f);   // threat lifts the ceiling (0.6 -> 0.35, Nov 2)
+    float cap = 150.0f * (1.0f + (G.threat-1.0f)*(0.35f/3.0f));   // threat lifts the ceiling (0.6 -> 0.35, Nov 2; slope /3, Nov 18 size stretch)
     return m>cap? cap : m;
 }
 static void spawn_bug(float x, float y){
@@ -1035,7 +1312,12 @@ static void spawn_bug(float x, float y){
         // you get, the bigger everything that crawls out gets — weight,
         // radius, HP and bite all ride on w, and there is no ceiling.
         // The camera gives ground in steps to compensate (zoom_target_of).
-        w *= 1.0f + (G.threat-1.0f)*0.30f;
+        // Nov 18 (Daniel): SIZE takes the scenic route — this slope is
+        // the Nov 5 slope /3 (0.30 -> 0.10; the bug_max_weight ceiling
+        // lift is /3 to match), so the giants still arrive, just three
+        // times later. Still linear, still no cap; every other scaling
+        // term (population, spawn rate, distance teeth) is untouched.
+        w *= 1.0f + (G.threat-1.0f)*0.10f;
         b->alive=1; b->kind=(int)(rng_f()*4); b->aggro=-1; b->target_wall=-1; b->btarget=-1;
         // regional strains (Nov 9): each far country has a dominant
         // kind — rustbacks in the Badlands, frostbites in the Cache
@@ -1066,6 +1348,32 @@ static void spawn_bug(float x, float y){
             b->maxhp = b->hp = (4.0f + b->w*2.4f) * d_hp();
             b->dmg = (1.5f + b->w*0.10f) * d_dmg();
             b->speed *= 0.30f;
+        }
+        // NAMED ELITE (v1.25 feat 8): if the bounty roll (or the test
+        // seam) marked this spawn, it crawls out as the posted
+        // bounty's elite. The elevation gate lives here so the
+        // spawner and the seam obey one rule: never for a LAN client
+        // (the host's bugs are the only real ones), never during the
+        // post-claim cooldown, never while another elite lives (one
+        // name at a time). It lands AFTER every flavour above — the
+        // distance curve, the threat multiplier on Daniel's /3 size
+        // stretch, the Depths ancients, Zen's x8 — and multiplies
+        // what they produced, so it composes with all of them and
+        // bypasses none. HP and bite are recomputed from the final
+        // weight by the standard formulas: an elite is exactly a bug
+        // of its weight in every system that reads weight.
+        if (bn_force){
+            bn_force = 0;
+            if (G.net_mode!=NET_CLIENT && G.bn_cool<=0 && bn_any_live()<0){
+                b->elite = bn_name_idx(G.bn_serial) + 1;
+                b->kind = bn_kind_of(G.bn_serial);
+                b->w *= 3.0f;
+                if (b->w > BN_WCAP) b->w = BN_WCAP;   // a fight, not a wall
+                b->maxhp = b->hp = (4.0f + b->w*2.4f) * d_hp();
+                b->dmg = (1.5f + b->w*0.10f) * d_dmg();
+                b->speed *= 0.8f;                     // it is heavy; it lumbers
+                sfx(24);   // feat 15: THE BOUNTY STIRS — the elite announces itself, off-screen and all
+            }
         }
         b->leg_ph = rng_f()*TAU; b->wobble = rng_f()*TAU;
         b->hit_t=0; b->bp_t=0; b->target_wall=-1; b->chew_t=0;
@@ -1103,6 +1411,17 @@ static void spawner(float dt){
     for (int i=0;i<MAXP;i++) if (G.p[i].connected && !G.p[i].in_mall) pi=i;
     if (pi<0) return;
     pi = (int)(rng_f()*(pi+1)); if (!G.p[pi].connected) pi=0;
+    // NAMED ELITE roll (v1.25 feat 8): the posted bounty's bug crawls
+    // out through the ordinary spawner — one roll per tick, only
+    // while no elite is live, the cooldown has run out, and the run
+    // is 90 seconds old (a brand-new player never meets a named bug
+    // before their first hat). More likely far from home: the board
+    // rewards expeditions. A won roll just marks the next spawn;
+    // spawn_bug's gate has the final say.
+    if (G.net_mode!=NET_CLIENT && G.bn_cool<=0 && G.time>=90.0f && bn_any_live()<0){
+        float ch = far<600.0f? 0.01f : far<2600.0f? 0.02f : 0.04f;
+        if (rng_f()<ch) bn_force = 1;
+    }
     while (tries<6){
         tries++;
         float a = rng_f()*TAU, rad = rng_range(620.0f, 860.0f);
@@ -1147,6 +1466,18 @@ static void kill_bug(int bi, int owner){
     Bug *b=&G.bugs[bi];
     b->alive=0;
     G.total_kills++;
+    // NAMED ELITE (v1.25 feat 8): the bounty's bug is down. Record
+    // the claim for bn_update (save.c) to settle on the frame tail —
+    // the carcass below still flies to the killer's hat exactly like
+    // any kill; the bonus (weight again in the killer's bank, crew
+    // XP) is the board's business, not combat's.
+    if (b->elite){
+        G.bn_claim_pending = 1;
+        G.bn_claim_pi = owner;
+        G.bn_claim_w = b->w;
+        G.bn_claim_name = b->elite - 1;
+        b->elite = 0;
+    }
     // assist XP: a buddy that had bitten this bug learns from its fall
     if (b->btarget>=0 && b->btarget!=owner && G.bud[b->btarget].active && !G.bud[b->btarget].fainted)
         G.bud[b->btarget].xp += 2 + (int)(b->w*0.3f);

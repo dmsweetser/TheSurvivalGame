@@ -69,7 +69,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   ok((await call('dbg_wof')) === 0, 'parade ends when you stop moving');
 
   // leave the mall, keep the hat: crawling outside is just crawling
-  await call('dbg_tp', 0, -5850);
+  await call('dbg_tp', 0, -5810);
   await sleep(150);
   await key('KeyE', 300);
   ok((await call('dbg_mall')) === 0, 'left the mall');

@@ -51,7 +51,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   await call('dbg_tp', 0, 80); await sleep(150);
   await key('KeyE', 300);
   ok((await call('dbg_mall')) === 1, 'entered the mall');
-  ok(await walkTo(75, -6108, 14), 'walked to the bank counter');
+  ok(await walkTo(105, -6148, 14), 'walked to the bank counter');
 
   for (let i = 0; i < 4; i++) await call('dbg_feed');   // 4 x 10 kg = 40 kg
   ok((await carried()) === 400, 'carrying 40 kg', await carried());

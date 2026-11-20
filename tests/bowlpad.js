@@ -79,7 +79,7 @@ async function rig(browser, npads) {
     await call('dbg_tp', 0, 80); await sleep(150);
     await key('KeyE', 300);
     ok((await call('dbg_mall')) === 1, 'entered the mall');
-    ok(await walkTo(-170, -5908, 14), 'walked to the bowl counter');
+    ok(await walkTo(-180, -5868, 14), 'walked to the bowl counter');
     await key('KeyE', 300);
     ok((await call('dbg_station')) === 4, 'bowling view open');
     ok((await call('dbg_bowl_ph', 0)) === -1, 'lanes at attract (no game yet)');

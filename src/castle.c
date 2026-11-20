@@ -54,11 +54,11 @@ static const float CAS_MSPD[4] = { 96.0f, 72.0f, 50.0f, 60.0f };
 static const int CAS_MDMG[4] = { 4, 6, 10, 14 };
 // spots a room's things can sit at (room-local)
 static const short CAS_SPOT[6][2] = { {170,140}, {470,140}, {320,150}, {170,262}, {470,262}, {320,268} };
-static void cas_item_pos(int id, float *x, float *y){
-    int room = CAS_ITEM_ROOM[id], k = 0;
-    for (int i=0;i<id;i++) if (CAS_ITEM_ROOM[i]==room) k++;
-    *x = CAS_OX + CAS_SPOT[(room + k) % 6][0];
-    *y = CAS_OY + CAS_SPOT[(room + k) % 6][1];
+// an item's position THIS run: cas_enter deals every item a room
+// and a spot (the classic tables, or a shuffle) into the sim state
+static void cas_item_pos(int pi, int id, float *x, float *y){
+    BwSim *S = &BWS[pi];
+    *x = S->cas_ix[id]; *y = S->cas_iy[id];
 }
 static int cas_in_gap_ns(float lx){ return lx>=288 && lx<=352; }
 static int cas_in_gap_ew(float ly){ return ly>=162 && ly<=226; }
@@ -75,19 +75,121 @@ static int cas_solid(int pi, float x, float y){
     return 0;
 }
 static void cas_note(BwSim *S, const char *t, float dur){ scpy(S->note, t, 72); S->note_t = dur; }
+// ---------------------------------------------------------------------------
+// CASTLE SHUFFLE (v1.25 feat 7): after a first clear, the CASTLE
+// cabinet offers SHUFFLE — the same twenty rooms, doors and stone,
+// with the CONTENTS re-dealt from a seed: every item's room and
+// spot, every monster's room and spot. The geometry never moves,
+// so the fixed door graph keeps every room reachable from the
+// courtyard; the deal only has to respect three placement rules
+// (the spec carries the full invariant argument):
+//   - nothing is dealt into the courtyard (17): the start stays
+//     safe and empty, exactly as in the classic deal;
+//   - the key and the sword take the deal order's first two rooms,
+//     so they never share a room and never sit in the courtyard;
+//   - every thing sits on a FREE SPOT — one of the room's six
+//     spots that is not inside the room's stone block (rect + 6) —
+//     so a pickup can always be touched and a monster can always
+//     move. A room that runs out of free spots passes its remaining
+//     things along the deal order to the next room with a spot
+//     left; with 32 things and 95+ free spots, nothing is dropped.
+// ---------------------------------------------------------------------------
+int g_cas_seed_override = -1;   // dbg_cassetseed: deal THIS seed at the next shuffle entry (one-shot)
+static u32 cas_rng_s;
+static u32 cas_rng(void){ cas_rng_s ^= cas_rng_s<<13; cas_rng_s ^= cas_rng_s>>17; cas_rng_s ^= cas_rng_s<<5; return cas_rng_s; }
+static int cas_free_spots(int room, int out[6]){
+    const short *P = CAS_PIL[room]; int n = 0;
+    for (int s=0;s<6;s++){
+        int x = CAS_SPOT[s][0], y = CAS_SPOT[s][1];
+        if (P[2]>0 && x>=P[0]-6 && x<P[0]+P[2]+6 && y>=P[1]-6 && y<P[1]+P[3]+6) continue;
+        out[n++] = s;
+    }
+    return n;
+}
+// the classic deal, filled with the original formulas, so a
+// classic run is the shipped castle bit for bit
+static void cas_deal_classic(BwSim *S){
+    for (int id=0; id<17; id++){
+        int room = CAS_ITEM_ROOM[id], k = 0;
+        for (int i=0;i<id;i++) if (CAS_ITEM_ROOM[i]==room) k++;
+        S->cas_iroom[id] = (unsigned char)room;
+        S->cas_ix[id] = CAS_OX + CAS_SPOT[(room + k) % 6][0];
+        S->cas_iy[id] = CAS_OY + CAS_SPOT[(room + k) % 6][1];
+    }
+    for (int i=0;i<15;i++){
+        int room = CAS_MON[i][0], k = 0;
+        for (int j=0;j<i;j++) if (CAS_MON[j][0]==room) k++;
+        S->cas_mroom[i] = room; S->cas_mtype[i] = CAS_MON[i][1];
+        S->cas_mx[i] = CAS_OX + CAS_SPOT[(room + 2 + k) % 6][0];
+        S->cas_my[i] = CAS_OY + CAS_SPOT[(room + 2 + k) % 6][1];
+    }
+}
+static void cas_deal_shuffle(BwSim *S, int seed){
+    cas_rng_s = hash2(seed, 0xCA57, 0x5EEDu) | 1u;
+    // the 19 rooms that may hold things, in deal order
+    int rooms[19], rn = 0;
+    for (int r=0;r<20;r++) if (r!=17) rooms[rn++] = r;
+    for (int i=rn-1;i>0;i--){ int j = (int)(cas_rng() % (u32)(i+1)); int t = rooms[i]; rooms[i] = rooms[j]; rooms[j] = t; }
+    // the key and the sword take the first two rooms of the deal
+    S->cas_iroom[14] = (unsigned char)rooms[0];
+    S->cas_iroom[13] = (unsigned char)rooms[1];
+    for (int id=0; id<17; id++){
+        if (id==13 || id==14) continue;
+        S->cas_iroom[id] = (unsigned char)rooms[cas_rng() % 19u];
+    }
+    for (int i=0;i<15;i++){
+        S->cas_mroom[i] = rooms[cas_rng() % 19u];
+        S->cas_mtype[i] = CAS_MON[i][1];   // a monster keeps its kind: the 1550 game is unchanged
+    }
+    // spots: each room's free spots, shuffled; things claim them
+    // items first (ascending id), then monsters (ascending index)
+    int free_sp[20][6], free_n[20], free_i[20];
+    for (int r=0;r<20;r++){
+        free_n[r] = (r==17)? 0 : cas_free_spots(r, free_sp[r]);
+        free_i[r] = 0;
+        for (int i=free_n[r]-1;i>0;i--){ int j = (int)(cas_rng() % (u32)(i+1)); int t = free_sp[r][i]; free_sp[r][i] = free_sp[r][j]; free_sp[r][j] = t; }
+    }
+    int placed[32];
+    for (int t2=0;t2<32;t2++) placed[t2] = 0;
+    for (int pass=0; pass<2; pass++){
+        for (int t2=0; t2<32; t2++){
+            if (placed[t2]) continue;
+            int is_mon = t2>=17, idx = is_mon? t2-17 : t2;
+            int want = is_mon? S->cas_mroom[idx] : S->cas_iroom[idx];
+            int room = -1, spot = -1;
+            if (pass==0){
+                if (free_i[want] < free_n[want]){ room = want; spot = free_sp[want][free_i[want]++]; }
+            } else {
+                for (int q=0;q<19 && room<0;q++){
+                    int r2 = rooms[q];
+                    if (free_i[r2] < free_n[r2]){ room = r2; spot = free_sp[r2][free_i[r2]++]; }
+                }
+            }
+            if (room<0) continue;
+            placed[t2] = 1;
+            if (is_mon){ S->cas_mroom[idx] = room; S->cas_mx[idx] = CAS_OX + CAS_SPOT[spot][0]; S->cas_my[idx] = CAS_OY + CAS_SPOT[spot][1]; }
+            else { S->cas_iroom[idx] = (unsigned char)room; S->cas_ix[idx] = CAS_OX + CAS_SPOT[spot][0]; S->cas_iy[idx] = CAS_OY + CAS_SPOT[spot][1]; }
+        }
+    }
+}
 static void cas_enter(int pi){
     BwSim *S = &BWS[pi]; Buddy *b = &G.bud[pi];
     S->cas_room = 17; S->cas_score = 0; S->cas_treasures = 0;
     S->cas_sword = 0; S->cas_key = 0; S->cas_won = 0;
     S->cas_hitcd = 0; S->cas_notecd = 0; S->cas_wont = 0;
     for (int i=0;i<20;i++) S->cas_taken[i] = 0;
+    // the deal: a shuffle entry deals the buddy's next seed (or the
+    // debug override); anything else deals the classic castle
+    S->cas_seed = 0;
+    if (S->cas_shuffle){
+        int seed;
+        if (g_cas_seed_override >= 0){ seed = g_cas_seed_override; g_cas_seed_override = -1; }
+        else { b->cas_shufn++; seed = b->cas_shufn; }
+        S->cas_seed = seed;
+        cas_deal_shuffle(S, seed);
+    } else cas_deal_classic(S);
     for (int i=0;i<15;i++){
-        int room = CAS_MON[i][0], type = CAS_MON[i][1], k = 0;
-        for (int j=0;j<i;j++) if (CAS_MON[j][0]==room) k++;
-        S->cas_mroom[i] = room; S->cas_mtype[i] = type;
-        S->cas_mhp[i] = CAS_MHP[type]; S->cas_malive[i] = 1;
-        S->cas_mx[i] = CAS_OX + CAS_SPOT[(room + 2 + k) % 6][0];
-        S->cas_my[i] = CAS_OY + CAS_SPOT[(room + 2 + k) % 6][1];
+        S->cas_mhp[i] = CAS_MHP[S->cas_mtype[i]]; S->cas_malive[i] = 1;
         S->cas_mwt[i] = (float)(i % 5) * 0.7f;
     }
     b->x = CAS_OX + 320; b->y = CAS_OY + 252;
@@ -166,8 +268,8 @@ static void cas_update(int pi, float dt, const BwIn *in){
     }
     // pickups: run into a thing to take it, like the original
     for (int id=0; id<17; id++){
-        if (S->cas_taken[id] || CAS_ITEM_ROOM[id] != room) continue;
-        float ix, iy; cas_item_pos(id, &ix, &iy);
+        if (S->cas_taken[id] || S->cas_iroom[id] != room) continue;
+        float ix, iy; cas_item_pos(pi, id, &ix, &iy);
         float dx = b->x - ix, dy = b->y - iy;
         if (dx*dx + dy*dy < 24*24){
             S->cas_taken[id] = 1;
@@ -306,8 +408,8 @@ static void cas_render(int pi){
       if (P[2] > 0){ rect_fill(CRX(P[0]), CRY(P[1]), CRS(P[2]), CRS(P[3]), COL(64, 76, 64)); rect_line(CRX(P[0]), CRY(P[1]), CRS(P[2]), CRS(P[3]), COL(96, 110, 96)); } }
     // items
     for (int id = 0; id < 17; id++){
-        if (S->cas_taken[id] || CAS_ITEM_ROOM[id] != room) continue;
-        float fx, fy; cas_item_pos(id, &fx, &fy);
+        if (S->cas_taken[id] || S->cas_iroom[id] != room) continue;
+        float fx, fy; cas_item_pos(pi, id, &fx, &fy);
         int cx = CRX(fx - CAS_OX), cy = CRY(fy - CAS_OY);
         int bob = (int)(fsin(G.anim_t * 3.0f + (float)id * 1.7f) * 2.0f);
         cy += CRS(bob);
@@ -384,7 +486,7 @@ static void cas_render(int pi){
     }
     // HUD, written on the top wall
     { char buf[80]; char *q;
-      draw_text(CRX(40), CRY(10), "CASTLE", 1, COL(255, 205, 40));
+      draw_text(CRX(40), CRY(10), S->cas_shuffle? "CASTLE - SHUFFLE" : "CASTLE", 1, COL(255, 205, 40));
       draw_text_center(CRX(320), CRY(10), CAS_NAMES[room], 1, COL(190, 235, 190));
       q = buf; q = sappend(q, "SCORE "); q = sapp_int(q, S->cas_score); *q = 0;
       draw_text(CRX(600) - (int)(slen(buf) * 8 * cs), CRY(10), buf, 1, COL(235, 238, 245));

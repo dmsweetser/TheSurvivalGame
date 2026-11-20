@@ -37,6 +37,41 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   await call('dbg_tp', 150, -5950); await sleep(300);
   await saveQuitContinue();
   T('mall-corner save resumes at the mall centre', await atMallCentre());
+
+  // scenario 3 (v1.25 E2E regression): the pause-menu held-key race.
+  // A single deliberate 250ms ArrowDown hold must step the selection
+  // EXACTLY once. The web shell's old fixed 120ms keyup latch used to
+  // stretch the perceived hold past the menu auto-repeat delay, and
+  // the repeat stepped a second time up to ~200ms after the keyup —
+  // intermittently overshooting SAVE + QUIT in saveQuitContinue above
+  // (this suite and nametest reded on it; proven against shipped
+  // v1.24, so the game was never the regression — the input seam was).
+  // The fix releases keys on the frame boundary in the shell and sets
+  // the menu repeat delay to 0.50s in derive_input. A genuine long
+  // hold must still auto-repeat: fast navigation is a feature.
+  const countSteps = async (holdMs) => {
+    await key('KeyP', 300);
+    let last = await call('dbg_pausesel'), steps = 0;
+    const watch = async (until) => {
+      while (Date.now() < until) {
+        const s = await call('dbg_pausesel');
+        if (s !== last) { steps++; last = s; }
+        await sleep(25);
+      }
+    };
+    await page.keyboard.down('ArrowDown');
+    await watch(Date.now() + holdMs);
+    await page.keyboard.up('ArrowDown');
+    await watch(Date.now() + 450);   // a phantom repeat lands in this tail if it exists
+    await key('Escape', 200);
+    return steps;
+  };
+  for (let i = 0; i < 3; i++) {
+    const n = await countSteps(250);
+    T('250ms pause-menu hold #' + (i + 1) + ' steps exactly once', n === 1, 'steps=' + n);
+  }
+  const rep = await countSteps(1300);
+  T('a 1.3s pause-menu hold still auto-repeats', rep >= 3, 'steps=' + rep);
   console.log(fails.length ? 'LOADTEST FAILURES: ' + fails.join(', ') : 'LOADTEST ALL PASS');
   await browser.close(); process.exit(fails.length ? 1 : 0);
 })().catch(e => { console.error('ERR', e.message); process.exit(1); });

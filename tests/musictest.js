@@ -71,7 +71,7 @@ function T(name, cond, extra) {
 
   // the gate's FREE PLAY: inside Banzai World but in no cabinet —
   // the plaza keeps Sheep (bw_piece returns 4 for bw_mode < 2)
-  await call('dbg_tp', 185, -5866); await sleep(250);
+  await call('dbg_tp', 215, -5868); await sleep(250);   // the Banzai gate disc (BW_SX 215, MALL_CY+132 — v1.25 MALL ENLARGEMENT)
   await key('KeyE', 250);
   await key('ArrowDown', 200);
   await key('Space', 300);
@@ -82,7 +82,7 @@ function T(name, cond, extra) {
     'piece=' + (await call('dbg_piece')));
 
   // through the east door into THE ARCADE
-  await call('dbg_tp', 230, -5976); await sleep(200);
+  await call('dbg_tp', 350, -5976); await sleep(200);
   await key('KeyE', 250);
   T('entered the arcade', (await poll('dbg_inarcade', v => v === 1, 4000)) === 1, await call('dbg_inarcade'));
 

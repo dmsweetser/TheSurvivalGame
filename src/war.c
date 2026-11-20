@@ -151,6 +151,8 @@ static int war_sel_count(BwSim *S){
     return n;
 }
 static void war_note(BwSim *S, const char *txt){ scpy(S->war_msg, txt, 72); S->war_msgt = 2.8f; }
+// v1.25: the placement verb for the field hints, per device
+static const char *war_place_verb(void){ return hint_dev()==DEV_PAD? "A ON GROUND" : (hint_dev()==DEV_TOUCH? "TAP GROUND" : "CLICK GROUND"); }
 static void war_blend_disc(int cx, int cy, int r, u32 c, int alpha);   // defined with the renderers; declared here for the draw helpers above it
 // v1.21 cosmetic pass: spawn a purely visual particle (0 poof /
 // 1 harvest sparkle / 2 structure poof). The ring is write-only
@@ -184,6 +186,114 @@ static void war_clear_field(BwSim *S){
     S->war_skirmish=0; S->war_aw=WAR_AW; S->war_ah=WAR_AH;
     S->war_gw=WAR_FOG_W; S->war_gh=WAR_FOG_H; S->war_lines=0;
 }
+// --- WAR! LOCAL CO-OP COMMAND (v1.25 feat 13) -----------------------
+// One battle, one army, one purse, two commanders. The battle lives
+// in the OWNER's BwSim (whoever launched it); the other local player
+// is the GUEST, with full command over the shared army. What is
+// per-player is only the command VIEW — camera, pad cursor,
+// selection, bar capture — and the view lives in each player's own
+// BwSim fields. For the guest's command turn and render, the view
+// set is EXCHANGED with the owner's sim, so the whole command layer
+// (tap path, bar, pad) runs untouched against the battle; the
+// exchange is swapped back at the end of the turn. war_msg and
+// war_grace are NOT view state: the message line and the input
+// grace belong to the battle, shared by both commanders.
+typedef struct {
+    float camx, camy, curx, cury; int curon;
+    int barhl, barhl_s, barcap, barhl_row, capnx, capny;
+    int selstruct, place, bcat, demoarm;
+    int drag_id, dragx, dragy; float drag_cx, drag_cy;
+    float ltap_t; int ltap_x, ltap_y, ltap_unit, ltap_n;
+    float ordx, ordy, ordt;
+    int usel[WAR_MAXU];
+} WarView;
+static void war_view_save(BwSim *S, WarView *v){
+    v->camx=S->war_camx; v->camy=S->war_camy; v->curx=S->war_curx; v->cury=S->war_cury; v->curon=S->war_curon;
+    v->barhl=S->war_barhl; v->barhl_s=S->war_barhl_s; v->barcap=S->war_barcap; v->barhl_row=S->war_barhl_row;
+    v->capnx=S->war_capnx; v->capny=S->war_capny;
+    v->selstruct=S->war_selstruct; v->place=S->war_place; v->bcat=S->war_bcat; v->demoarm=S->war_demoarm;
+    v->drag_id=S->war_drag_id; v->dragx=S->war_dragx; v->dragy=S->war_dragy; v->drag_cx=S->war_drag_cx; v->drag_cy=S->war_drag_cy;
+    v->ltap_t=S->war_ltap_t; v->ltap_x=S->war_ltap_x; v->ltap_y=S->war_ltap_y; v->ltap_unit=S->war_ltap_unit; v->ltap_n=S->war_ltap_n;
+    v->ordx=S->war_ordx; v->ordy=S->war_ordy; v->ordt=S->war_ordt;
+    for (int i=0;i<WAR_MAXU;i++) v->usel[i]=S->war_usel[i];
+}
+static void war_view_load(BwSim *S, const WarView *v){
+    S->war_camx=v->camx; S->war_camy=v->camy; S->war_curx=v->curx; S->war_cury=v->cury; S->war_curon=v->curon;
+    S->war_barhl=v->barhl; S->war_barhl_s=v->barhl_s; S->war_barcap=v->barcap; S->war_barhl_row=v->barhl_row;
+    S->war_capnx=v->capnx; S->war_capny=v->capny;
+    S->war_selstruct=v->selstruct; S->war_place=v->place; S->war_bcat=v->bcat; S->war_demoarm=v->demoarm;
+    S->war_drag_id=v->drag_id; S->war_dragx=v->dragx; S->war_dragy=v->dragy; S->war_drag_cx=v->drag_cx; S->war_drag_cy=v->drag_cy;
+    S->war_ltap_t=v->ltap_t; S->war_ltap_x=v->ltap_x; S->war_ltap_y=v->ltap_y; S->war_ltap_unit=v->ltap_unit; S->war_ltap_n=v->ltap_n;
+    S->war_ordx=v->ordx; S->war_ordy=v->ordy; S->war_ordt=v->ordt;
+    for (int i=0;i<WAR_MAXU;i++) S->war_usel[i]=v->usel[i];
+}
+static void war_view_exchange(BwSim *A, BwSim *B){
+    WarView t; war_view_save(A, &t); WarView u; war_view_save(B, &u);
+    war_view_load(A, &u); war_view_load(B, &t);
+}
+// the battle sim a player commands: their own, or the owner's when
+// they are its guest. The command layer addresses the battle
+// through this, never through &BWS[pi] directly.
+static BwSim *war_bs(int pi){
+    BwSim *S = &BWS[pi];
+    return S->war_guest? &BWS[S->war_guest-1] : S;
+}
+static int war_other_local(int pi){
+    if (pi==G.my_id) return G.p2_slot;
+    if (pi==G.p2_slot) return G.my_id;
+    return -1;
+}
+static int war_net_ok(void){   // Cart's link condition, verbatim in spirit: local couch only
+    return G.net_mode==NET_OFF || (G.net_mode==NET_HOST && !any_remote_connected());
+}
+// a joining guest starts with a clean view standing on the owner's
+// camera — the war_clear_field defaults for every view field
+static void war_view_fresh(BwSim *GS, BwSim *HS){
+    GS->war_camx=HS->war_camx; GS->war_camy=HS->war_camy;
+    GS->war_curx=HS->war_camx; GS->war_cury=HS->war_camy; GS->war_curon=0;
+    GS->war_barhl=-1; GS->war_barhl_s=-1; GS->war_barcap=0; GS->war_barhl_row=0; GS->war_capnx=0; GS->war_capny=0;
+    GS->war_selstruct=-1; GS->war_place=-1; GS->war_bcat=-1; GS->war_demoarm=-1;
+    GS->war_drag_id=-1; GS->war_dragx=0; GS->war_dragy=0; GS->war_drag_cx=0; GS->war_drag_cy=0;
+    GS->war_ltap_t=-10.0f; GS->war_ltap_x=0; GS->war_ltap_y=0; GS->war_ltap_unit=-1; GS->war_ltap_n=0;
+    GS->war_ordx=0; GS->war_ordy=0; GS->war_ordt=0;
+    for (int i=0;i<WAR_MAXU;i++) GS->war_usel[i]=0;
+}
+static void war_link_form(int owner, int guest){
+    BwSim *HS = &BWS[owner], *GS = &BWS[guest];
+    HS->war_duo = guest; GS->war_guest = owner + 1;
+    GS->war_state = HS->war_state;
+    war_view_fresh(GS, HS);
+    war_note(HS, guest==G.p2_slot? "P2 JOINED THE COMMAND!" : "P1 JOINED THE COMMAND!");
+    sfx(19);
+}
+static void war_link_break(int owner){
+    BwSim *HS = &BWS[owner];
+    int g = HS->war_duo;
+    if (g>=0 && g<MAXP){
+        BwSim *GS = &BWS[g];
+        if (GS->war_guest==owner+1) GS->war_guest = 0;
+    }
+    HS->war_duo = -1;
+}
+// a battle launch pulls the other local commander in, if they are
+// standing at their own WAR! front door (map or setup panel)
+static void war_link_pull(int pi){
+    if (!war_net_ok()) return;
+    int o = war_other_local(pi);
+    if (o<0) return;
+    BwSim *OS = &BWS[o];
+    if (!G.bud[o].active || !G.bud[o].in_bw || G.bud[o].bw_mode!=8) return;
+    if (OS->war_guest || OS->war_duo==pi) return;
+    if (OS->war_state!=0 && OS->war_state!=4) return;
+    war_link_form(pi, o);
+}
+// the acting player's pad sources: pad 1's globals for P1, the new
+// pad-2 channels for P2 (feat 13's plumbing)
+static void war_pad_src(int pi, const float **ax, u32 *pe, u32 *held){
+    if (pi==G.my_id){ *ax = IN.pad_ax; *pe = IN.pad_edges; *held = IN.act_held; }
+    else { *ax = IN.pad2_ax; *pe = IN.pad2_edges; *held = IN.act2_held; }
+}
+static int war_pad_live(int pi){ return pi==G.my_id? pad_mode() : (IN.pad_count>=2); }
 // --- fog of war ------------------------------------------------------
 // Cells are 40u over the 1600x1200 arena. Explored is sticky: a cell
 // that has ever been visible stays explored for the whole battle.
@@ -389,6 +499,7 @@ static void war_win(int pi){
         static const int SKXP[4] = { 0, 30, 50, 80 };   // by war_diff: EASY / NORMAL / HARD
         int amt = SKXP[S->war_diff>=1 && S->war_diff<=3? S->war_diff : 2];
         buddy_award_xp(pi, amt);
+        if (S->war_duo>=0) buddy_award_xp(S->war_duo, amt);   // feat 13: a co-commander fought it too — the XP pays both (progress stays the owner's)
         do_save();
         if (b->active){ char buf[72]; char *q=buf; q=sappend(q, "SKIRMISH WON! +"); q=sapp_int(q, amt); q=sappend(q, " BUDDY XP"); *q=0; war_note(S, buf); }
         else war_note(S, "SKIRMISH WON!");
@@ -399,6 +510,7 @@ static void war_win(int pi){
         int first = (S->war_region == b->war_prog);
         int amt = first? 60 + 10*S->war_region : 25;
         buddy_award_xp(pi, amt);
+        if (S->war_duo>=0) buddy_award_xp(S->war_duo, amt);   // feat 13: a co-commander fought it too — the XP pays both (war_prog stays the owner's)
         if (first && b->war_prog < 8) b->war_prog++;
         do_save();   // the award (and any advance) persists with the battle's own save
         if (b->active){ char buf[72]; char *q=buf; q=sappend(q, "REGION CONQUERED! +"); q=sapp_int(q, amt); q=sappend(q, " BUDDY XP"); *q=0; war_note(S, buf); }
@@ -1087,6 +1199,7 @@ static void war_start_battle(int pi, int region){
     war_place_nodes(S, WAR_ND, WAR_NA, 11, 1.0f, 1.0f);
     int nh = 1 + (region>=3? 1:0) + (region>=6? 1:0);
     war_build_battle(pi, region, 300, nh);   // v1.19: 300 starting bits (was 250)
+    war_link_pull(pi);   // feat 13: a launch pulls the other local commander in
 }
 // v1.19: a SKIRMISH — an ad-hoc battle on the player's picked
 // size and difficulty. It never touches war_prog, is never
@@ -1130,6 +1243,7 @@ static void war_start_skirmish(int pi){
     int nh = diff;              // EASY 1 / NORMAL 2 / HARD 3 hives
     if (size==1 && nh>2) nh=2;  // a SMALL field caps at 2
     war_build_battle(pi, region, bits, nh);
+    war_link_pull(pi);   // feat 13: a launch pulls the other local commander in
 }
 static float war_axis(float a);   // defined with the pad code below; the pause menu's pad handler needs it early
 // --- battle snapshots (v1.17, Daniel: leaving must SAVE the battle
@@ -1230,7 +1344,10 @@ static const char *war_snap_for_save(int pi){   // the save writer's door: refre
     // v1.19: a live SKIRMISH is never serialized at all — it is
     // ad-hoc by definition; whatever campaign battle is parked
     // (if any) is returned untouched.
-    if (BWS[pi].war_state==1 && !BWS[pi].war_skirmish && !(war_snap_on[pi] && war_snap_reg[pi]!=BWS[pi].war_region)) war_snap_serialize(pi);
+    // feat 13: a GUEST's war_state mirrors the owner's battle for
+    // rendering, but their sim holds no battle — serializing it
+    // would park an empty field over the guest's own saved battle.
+    if (BWS[pi].war_state==1 && !BWS[pi].war_guest && !BWS[pi].war_skirmish && !(war_snap_on[pi] && war_snap_reg[pi]!=BWS[pi].war_region)) war_snap_serialize(pi);
     return war_snap_on[pi]? war_snap[pi] : 0;
 }
 static const char *war_snap_val(const char *snap, const char *key){
@@ -1375,6 +1492,7 @@ static void war_pause_rects(int vx, int vy, int vw2, int vh2, int *px, int *py, 
 }
 static int war_pause_btn_y(int py, int n){ return py + 56 + n*44; }   // three 36px buttons, 8px apart
 static void war_pause_pick(int pi, int n){
+    if (BWS[pi].war_guest) pi = BWS[pi].war_guest-1;   // feat 13: a guest pauser's picks act on the battle (the owner's sim)
     BwSim *S = &BWS[pi];
     if (n==0){ S->war_pause=0; S->war_grace=0.3f; sfx(6); }   // RESUME (the grace keeps the closing press from leaking an order)
     else if (S->war_skirmish && n==1){   // v1.19: RESTART a skirmish — re-roll the same size/difficulty; NO snapshot clear (a campaign park is never this fight's to discard)
@@ -1386,6 +1504,7 @@ static void war_pause_pick(int pi, int n){
         war_clear_field(S);
         S->war_state=0; S->war_grace=0.3f;
         war_note(S, "SKIRMISH ABANDONED.");
+        if (S->war_duo>=0){ int g=S->war_duo; war_link_break(pi); BWS[g].war_state=0; BWS[g].war_grace=0.3f; war_note(&BWS[g], "THE COMMANDER LEFT THE BATTLE."); }   // feat 13: the guest goes back to their own map too
         sfx(6);
     }
     else if (n==1){   // RESTART BATTLE: this region, fresh, and no snapshot of the old fight survives — unless the park belongs to another region (v1.18 scoping, as in war_win/war_lose)
@@ -1399,11 +1518,12 @@ static void war_pause_pick(int pi, int n){
         war_clear_field(S);
         S->war_state=0; S->war_grace=0.3f;
         war_note(S, "BATTLE SAVED. IT WILL WAIT FOR YOU.");
+        if (S->war_duo>=0){ int g=S->war_duo; war_link_break(pi); BWS[g].war_state=0; BWS[g].war_grace=0.3f; war_note(&BWS[g], "THE COMMANDER SAVED THE BATTLE."); }   // feat 13: the guest goes back to their own map too
         sfx(19);
     }
 }
 static void war_pause_tap(int pi, int sx, int sy){
-    int vx, vy, vw2, vh2; p1_view_rect(&vx, &vy, &vw2, &vh2);
+    int vx, vy, vw2, vh2; pi_view_rect(pi, &vx, &vy, &vw2, &vh2);
     int px, py, pw, ph; war_pause_rects(vx, vy, vw2, vh2, &px, &py, &pw, &ph);
     for (int n=0;n<3;n++){
         int by = war_pause_btn_y(py, n);
@@ -1414,16 +1534,14 @@ static void war_pause_tap(int pi, int sx, int sy){
 // the pad in the pause menu: the cursor flies the frozen field, A
 // presses through war_pause_tap, B resumes — war_pad_update's peel
 // logic stays out of it
-static void war_pad_pause(int pi, float dt){
-    BwSim *S = &BWS[pi];
-    if (pi!=G.my_id) return;
-    int vx, vy, vw2, vh2; p1_view_rect(&vx, &vy, &vw2, &vh2);
-    float lx = war_axis(IN.pad_ax[0]), ly = war_axis(IN.pad_ax[1]);
-    int stick = (IN.pad_ax[0]>0.18f || IN.pad_ax[0]<-0.18f || IN.pad_ax[1]>0.18f || IN.pad_ax[1]<-0.18f);
-    u32 pe = IN.pad_edges;
+static void war_pad_pause(int pi, const float *ax, u32 pe, float dt){
+    BwSim *S = war_bs(pi);   // feat 13: either commander can drive the pause with their own pad
+    int vx, vy, vw2, vh2; pi_view_rect(pi, &vx, &vy, &vw2, &vh2);
+    float lx = war_axis(ax[0]), ly = war_axis(ax[1]);
+    int stick = (ax[0]>0.18f || ax[0]<-0.18f || ax[1]>0.18f || ax[1]<-0.18f);
     u32 btns = (1u<<ACT_FIRE)|(1u<<ACT_INTERACT);
     if (!S->war_curon){
-        if (!pad_mode() || !(stick || (pe & btns))) return;
+        if (!war_pad_live(pi) || !(stick || (pe & btns))) return;
         S->war_curon = 1;
         S->war_curx = S->war_camx; S->war_cury = S->war_camy + WAR_BAR_H*0.5f;   // wake at the camera's centre, under the panel
         if (!stick) return;   // a button wake spends the press on waking
@@ -1452,9 +1570,25 @@ static void war_enter(int pi){
     BwSim *S = &BWS[pi]; Buddy *b = &G.bud[pi];
     if (S->war_size<1 || S->war_size>3) S->war_size = 2;   // v1.19: the skirmish setup defaults — STANDARD / NORMAL, kept per player from then on
     if (S->war_diff<1 || S->war_diff>3) S->war_diff = 2;
+    // feat 13: if the other local commander already owns a live
+    // battle, join IT as guest co-commander instead of opening a
+    // separate front door (your own parked battle stays parked)
+    if (!S->war_guest && war_net_ok()){
+        int o = war_other_local(pi);
+        if (o>=0 && o!=pi){
+            BwSim *OS = &BWS[o];
+            if (!OS->war_guest && OS->war_state==1 && G.bud[o].active && G.bud[o].in_bw && G.bud[o].bw_mode==8){
+                war_link_form(o, pi);
+                b->x = WAR_OX+800; b->y = WAR_OY+600;   // parked mid-arena; this mode never draws him
+                b->bw_x = b->x; b->bw_y = b->y;
+                return;
+            }
+        }
+    }
     if (war_snap_on[pi]){   // v1.17: a parked battle resumes instead of the bare map
         war_snap_restore(pi);
         war_snap_clear(pi);   // consumed — the live BwSim is authoritative now; later saves re-serialize from it
+        war_link_pull(pi);   // feat 13: a resumed battle pulls a waiting commander in
         b->x = WAR_OX+800; b->y = WAR_OY+600;   // parked mid-arena; this mode never draws him
         b->bw_x = b->x; b->bw_y = b->y;
         return;
@@ -1545,7 +1679,7 @@ static int war_bar_list(BwSim *S, int acts[5], int costs[5], const char *names[5
     return n;
 }
 static void war_bar_activate(int pi, int slot){
-    BwSim *S = &BWS[pi];
+    BwSim *S = war_bs(pi);   // feat 13: a guest activates the OWNER's bar — shared bits, shared queues
     int acts[5], costs[5]; const char *names[5];
     int n = war_bar_list(S, acts, costs, names);
     if (slot<0 || slot>=n) return;
@@ -1587,11 +1721,12 @@ static void war_bar_activate(int pi, int slot){
         sfx(6); return;   // the category stays open: queue the next one
     }
     if (S->war_bits < cost){ sfx(16); war_note(S, "NOT ENOUGH BITS! SEND THE HARVESTER OUT."); return; }
-    if (act==10){ S->war_place = WAR_S_ASM; S->war_bcat=-1; sfx(6); war_note(S, "TAP GROUND TO PLACE THE ASSEMBLY PLANT."); return; }
+    if (act==10){ S->war_place = WAR_S_ASM; S->war_bcat=-1; sfx(6); { char nb[96]; char *q=nb; q=sappend(q, war_place_verb()); q=sappend(q, " TO PLACE THE ASSEMBLY PLANT."); *q=0; war_note(S, nb); } return; }
     S->war_place = act==11? WAR_S_GATE : act;   // acts 1..3 are the struct kinds 1..3; act 11 arms the gate
     S->war_bcat=-1;   // arming a placement hands the bar to [CANCEL]
     sfx(6);
-    war_note(S, act==1? "TAP GROUND TO PLACE THE PATCH BAY." : act==2? "TAP GROUND TO PLACE THE ZAPPER TOWER." : act==11? "TAP GROUND TO PLACE THE GATE - YOUR UNITS PASS THROUGH IT. BUGS DON'T." : "TAP GROUND TO PLACE THE FIREWALL.");
+    { char nb[128]; char *q=nb; q=sappend(q, war_place_verb());
+      q=sappend(q, act==1? " TO PLACE THE PATCH BAY." : act==2? " TO PLACE THE ZAPPER TOWER." : act==11? " TO PLACE THE GATE - UNITS PASS THROUGH IT. BUGS DON'T." : " TO PLACE THE FIREWALL."); *q=0; war_note(S, nb); }
 }
 // the property rule (Daniel, Nov 16): you build on your own land.
 // Every friendly structure radiates a property zone — its radius + 76
@@ -1716,7 +1851,7 @@ static void war_order_attack(BwSim *S, int eref){
 }
 // the heart of every tap: a point on the battlefield (world coords)
 static void war_tap_world(int pi, float wx, float wy){
-    BwSim *S = &BWS[pi];
+    BwSim *S = war_bs(pi);   // feat 13: orders land on the shared army, whoever gives them
     if (S->war_place>=0){ war_try_place(pi, wx, wy); return; }
     int bu=-1; float bd=20.0f*20.0f;
     for (int i=0;i<WAR_MAXU;i++){
@@ -1818,9 +1953,9 @@ static void war_tap_world(int pi, float wx, float wy){
     }
 }
 static void war_handle_tap(int pi, int sx, int sy){
-    BwSim *S = &BWS[pi];
+    BwSim *S = war_bs(pi);   // feat 13: the tap acts on the shared battle, in the TAPPER's view
     if (S->war_pause){ war_pause_tap(pi, sx, sy); return; }   // v1.17: the pause menu is modal — the tap never reaches the field
-    int vx, vy, vw2, vh2; p1_view_rect(&vx, &vy, &vw2, &vh2);
+    int vx, vy, vw2, vh2; pi_view_rect(pi, &vx, &vy, &vw2, &vh2);
     if (S->war_bcat>=0 && sy >= vy+vh2-WAR_BAR_H-WAR_SUB_H && sy < vy+vh2-WAR_BAR_H){
         // the options strip (addendum 1): it holds the row war_bar_list
         // describes. WAR_BAR_H is untouched — the world view never
@@ -1865,7 +2000,7 @@ static void war_handle_tap(int pi, int sx, int sy){
 // Returns 1 while a pan drag owns the field (the caller then skips
 // the key/stick camera pan, so the two never fight).
 static int war_drag_pan(int pi){
-    BwSim *S = &BWS[pi];
+    BwSim *S = war_bs(pi);   // feat 13: under the guest swap this is the battle, wearing the guest's view
     int found=-1;
     for (int i=0;i<6;i++){
         if (!IN.tp[i].active) continue;
@@ -1874,8 +2009,13 @@ static int war_drag_pan(int pi){
         found=i; break;
     }
     if (found<0){ S->war_drag_id=-1; return 0; }
-    int vx, vy, vw2, vh2; p1_view_rect(&vx, &vy, &vw2, &vh2);
+    int vx, vy, vw2, vh2; pi_view_rect(pi, &vx, &vy, &vw2, &vh2);
     if (IN.tp[found].y0 >= vy+vh2-WAR_BAR_H){ S->war_drag_id=-1; return 0; }   // drags off the bar don't pan
+    // v1.25: a drag is the finger/mouse taking the field back (last
+    // device wins, the same rule a tap follows) — it retires the pad
+    // cursor and any bar capture, so the pad's centred camera (see
+    // war_pad_update) never fights a drag for the view.
+    if (S->war_curon || S->war_barcap){ S->war_curon=0; S->war_barcap=0; S->war_barhl=-1; S->war_barhl_row=0; }
     if (S->war_drag_id != IN.tp[found].id){
         S->war_drag_id = IN.tp[found].id;
         S->war_drag_cx = S->war_camx; S->war_drag_cy = S->war_camy;
@@ -1902,6 +2042,7 @@ static void war_map_launch(int pi, int r){
     if (war_snap_on[pi] && war_snap_reg[pi]==r){
         war_snap_restore(pi);   // sets war_state=1 and posts the RESTORED note itself
         war_snap_clear(pi);     // consumed — the live BwSim is authoritative now
+        war_link_pull(pi);      // feat 13: a resumed battle pulls a waiting commander in
         return;
     }
     if (r <= b->war_prog){ war_start_battle(pi, r); }
@@ -1913,6 +2054,11 @@ static void war_skirmish_btn(int vx, int vy, int vw2, int vh2, int *bx, int *by)
     (void)vy;
     *bx = vx+vw2-140; *by = vy+vh2-68;
 }
+// v1.25 fix: open the skirmish setup panel — one body for every
+// door in ('S', the button tap, and the map selection's 9th stop).
+static void war_open_setup(BwSim *S, u32 keys){
+    S->war_state = 4; S->war_setup_sel = 0; S->war_setup_prevk = (int)keys; sfx(6);
+}
 static void war_map_update(int pi, float dt, const BwIn *in){
     BwSim *S = &BWS[pi];
     (void)dt;
@@ -1920,13 +2066,22 @@ static void war_map_update(int pi, float dt, const BwIn *in){
     if (S->war_grace > 0) return;
     if (pi==G.my_id){   // v1.19: S opens the skirmish setup panel
         for (int t=0;t<IN.typed_n;t++) if (IN.typed[t]=='s' || IN.typed[t]=='S'){
-            S->war_state = 4; S->war_setup_sel = 0; S->war_setup_prevk = in->keys; sfx(6);
+            war_open_setup(S, in->keys);
             return;
         }
     }
-    if ((in->keys&K_LEFT) || in->up) { S->war_map_sel = (S->war_map_sel+7)%8; sfx(6); }
-    if ((in->keys&K_RIGHT) || in->down) { S->war_map_sel = (S->war_map_sel+1)%8; sfx(6); }
+    // v1.25 fix: the selection walks NINE stops — the eight regions
+    // plus the SKIRMISH button as the last stop. Before this, the
+    // pad had no door into skirmish at all: the panel opened only
+    // on a typed 'S' or a tap, the pad cursor never runs on the
+    // map, and A/B here are the region launch — so a pad player
+    // could invade every region and never once skirmish. Now the
+    // stick/dpad/arrows land on the button like any other stop
+    // and A confirms it, the same verb as everywhere else.
+    if ((in->keys&K_LEFT) || in->up) { S->war_map_sel = (S->war_map_sel+8)%9; sfx(6); }
+    if ((in->keys&K_RIGHT) || in->down) { S->war_map_sel = (S->war_map_sel+1)%9; sfx(6); }
     if (in->sel || in->interact){
+        if (S->war_map_sel==8){ war_open_setup(S, in->keys); return; }
         war_map_launch(pi, S->war_map_sel);
         return;
     }
@@ -1935,7 +2090,7 @@ static void war_map_update(int pi, float dt, const BwIn *in){
         int vx, vy, vw2, vh2; p1_view_rect(&vx, &vy, &vw2, &vh2);
         { int bx, by; war_skirmish_btn(vx, vy, vw2, vh2, &bx, &by);
           if (IN.tap_x>=bx && IN.tap_x<bx+128 && IN.tap_y>=by && IN.tap_y<by+28){
-              S->war_state = 4; S->war_setup_sel = 0; S->war_setup_prevk = in->keys; sfx(6);
+              war_open_setup(S, in->keys);
               return;
           } }
         for (int r=0;r<8;r++){
@@ -1977,6 +2132,14 @@ static void war_setup_update(int pi, float dt, const BwIn *in){
     if (kd & K_LEFT){ if (S->war_setup_sel==0) S->war_size = (S->war_size+1)%3 + 1; else if (S->war_setup_sel==1) S->war_diff = (S->war_diff+1)%3 + 1; sfx(6); }
     if (kd & K_RIGHT){ if (S->war_setup_sel==0) S->war_size = S->war_size%3 + 1; else if (S->war_setup_sel==1) S->war_diff = S->war_diff%3 + 1; sfx(6); }
     S->war_setup_prevk = (int)in->keys;
+    // v1.25 fix: the pad's B backs out of this panel, exactly as
+    // its own hint line promises — but the same ACT_INTERACT edge
+    // also arrives as in->interact, and the row pick below spent
+    // it first, so B CONFIRMED the row (on LAUNCH, the opposite
+    // of backing out). Read the pad edge here, before the pick;
+    // the keyboard's interact key still picks, Esc still backs
+    // out — only the pad's B changes, to what the hint says.
+    if (pi==G.my_id && (IN.pad_edges & (1u<<ACT_INTERACT))){ S->war_state = 0; S->war_grace = 0.3f; sfx(6); return; }
     if (in->sel || in->interact){ war_setup_pick(pi, S->war_setup_sel); return; }
     if (pi==G.my_id){
         if (IN.tapped){
@@ -2005,7 +2168,8 @@ static void war_setup_update(int pi, float dt, const BwIn *in){
             sfx(6);
         }
         if (pe & (1u<<ACT_FIRE)){ war_setup_pick(pi, S->war_setup_sel); return; }
-        if (pe & (1u<<ACT_INTERACT)){ S->war_state = 0; S->war_grace = 0.3f; sfx(6); return; }
+        // (ACT_INTERACT is handled above, before the row pick —
+        // here it would be dead code: in->interact fires first.)
     }
 }
 static void war_render_setup(int pi, int vx, int vy, int vw2, int vh2){
@@ -2030,7 +2194,7 @@ static void war_render_setup(int pi, int vx, int vy, int vw2, int vh2){
         *q=0;
         draw_text_center(px+pw/2, ry+10, buf, 2, COL(240,244,250));
     }
-    draw_text_center(px+pw/2, py+ph-16, mobile_ui()? "TAP A ROW" : "ARROWS + SPACE - ESC BACKS OUT", 1, COL(150,160,185));
+    draw_text_center(px+pw/2, py+ph-16, hint_dev()==DEV_PAD? "STICK + A - B BACKS OUT" : (hint_dev()==DEV_TOUCH? "TAP A ROW" : "ARROWS + SPACE - ESC BACKS OUT"), 1, COL(150,160,185));
 }
 // --- WAR! on a gamepad (v1.16, Daniel) --------------------------------
 // The pad never had a tap channel, so every WAR! verb — select,
@@ -2040,34 +2204,41 @@ static void war_render_setup(int pi, int vx, int vy, int vw2, int vh2){
 // (so the double/triple-tap muster ladder falls out of the existing
 // streak code), B peels one layer back, LB/RB walk the command bar.
 // Last device wins, as everywhere in this game: a real tap retires
-// the cursor, and any pad input summons it again. P1 only — P2 keeps
-// its pan + centre-tap.
+// the cursor, and any pad input summons it again. Since v1.25 feat
+// 13 this path serves BOTH local commanders: it is parameterized by
+// the acting player's pad sources (war_pad_src), and P2's old
+// centre-tap is gone — the second pad has a real cursor now.
 static float war_axis(float a){   // deadzone 0.18, rescaled past it so a gentle push is a gentle fly
     float m = a<0? -a : a;
     if (m<=0.18f) return 0;
     float r = (m-0.18f)/0.82f; if (r>1.0f) r=1.0f;
     return a<0? -r : r;
 }
-static void war_pad_update(int pi, float dt){
-    BwSim *S = &BWS[pi];
-    if (pi!=G.my_id) return;
-    int vx, vy, vw2, vh2; p1_view_rect(&vx, &vy, &vw2, &vh2);
-    float lx = war_axis(IN.pad_ax[0]), ly = war_axis(IN.pad_ax[1]);
-    float rx = war_axis(IN.pad_ax[2]), ry = war_axis(IN.pad_ax[3]);
-    int stick = (IN.pad_ax[0]>0.18f || IN.pad_ax[0]<-0.18f || IN.pad_ax[1]>0.18f || IN.pad_ax[1]<-0.18f
-              || IN.pad_ax[2]>0.18f || IN.pad_ax[2]<-0.18f || IN.pad_ax[3]>0.18f || IN.pad_ax[3]<-0.18f);
-    u32 pe = IN.pad_edges;
+static void war_pad_update(int pi, const float *ax, u32 pe, u32 held, float dt){
+    BwSim *S = war_bs(pi);   // feat 13: the acting commander's battle (under the guest swap, wearing their view)
+    int vx, vy, vw2, vh2; pi_view_rect(pi, &vx, &vy, &vw2, &vh2);
+    float lx = war_axis(ax[0]), ly = war_axis(ax[1]);
+    float rx = war_axis(ax[2]), ry = war_axis(ax[3]);
+    int stick = (ax[0]>0.18f || ax[0]<-0.18f || ax[1]>0.18f || ax[1]<-0.18f
+              || ax[2]>0.18f || ax[2]<-0.18f || ax[3]>0.18f || ax[3]<-0.18f);
     u32 btns = (1u<<ACT_FIRE)|(1u<<ACT_INTERACT)|(1u<<ACT_WPREV)|(1u<<ACT_WNEXT);
+    // v1.25 fix (Daniel, Nov 19): the D-pad is a pad steering method
+    // too — the game's own hints name it ("STICK/DPAD") — but it only
+    // ever fed IN.keys (the camera pan), never the cursor: a D-pad
+    // player could wake the cursor and then not aim it anywhere.
+    // D-pad edges and holds now wake and fly it like the stick does.
+    u32 dirm = (1u<<ACT_UP)|(1u<<ACT_DOWN)|(1u<<ACT_LEFT)|(1u<<ACT_RIGHT);
+    int dirwake = (pe & dirm) || (held & dirm);
     if (!S->war_curon){
-        if (!pad_mode() || !(stick || (pe & btns))) return;
+        if (!war_pad_live(pi) || !(stick || dirwake || (pe & btns))) return;
         S->war_curon = 1;
         // spawn on the first selected unit, else at the camera's centre
         int si=-1;
         for (int i=0;i<WAR_MAXU;i++) if (S->war_uhp[i]>0 && S->war_usel[i]){ si=i; break; }
         if (si>=0){ S->war_curx = S->war_ux[si]; S->war_cury = S->war_uy[si]; }
         else { S->war_curx = S->war_camx; S->war_cury = S->war_camy; }   // v1.22 fix: wake AT the camera centre — the point dbg_warcam and P2's centre-tap already treat as centre. The old +WAR_BAR_H/2 spawn sat 23u below it, a hair outside a small building's tap disc (Zapper 22u), so a wake-press A missed until the stick was nudged
-        if (!stick) return;   // a button wake spends the press on waking; it does not also tap
-        pe = 0;               // a stick wake still flies this frame, but its buttons wait
+        if (!stick && !dirwake) return;   // a button wake spends the press on waking; it does not also tap
+        pe = 0;               // a stick/D-pad wake still flies this frame, but its buttons wait
     }
     // the bar highlight belongs to one structure's selection; any
     // change of selection — from any device — retires it
@@ -2088,13 +2259,23 @@ static void war_pad_update(int pi, float dt){
         int ca[5], cc[5]; const char *cn[5];
         // stick edges: a fresh deflection steps once — holding the
         // stick does not spin the highlight
-        int navx = (IN.pad_ax[0]>0.18f)? 1 : (IN.pad_ax[0]<-0.18f)? -1 : 0;
-        int navy = (IN.pad_ax[1]>0.18f)? 1 : (IN.pad_ax[1]<-0.18f)? -1 : 0;
+        int navx = (ax[0]>0.18f)? 1 : (ax[0]<-0.18f)? -1 : 0;
+        int navy = (ax[1]>0.18f)? 1 : (ax[1]<-0.18f)? -1 : 0;
         int ex = (navx!=0 && navx!=S->war_capnx)? navx : 0;
         int ey = (navy!=0 && navy!=S->war_capny)? navy : 0;
         S->war_capnx = navx; S->war_capny = navy;
         if ((pe & (1u<<ACT_WNEXT)) && !ex) ex = 1;   // the bumpers walk the same row
         if ((pe & (1u<<ACT_WPREV)) && !ex) ex = -1;
+        // v1.25 fix: D-pad edges walk the captured menu too (a D-pad
+        // player could not navigate it at all). The axis guards keep
+        // the shell's stick-to-digital fold from double-stepping: a
+        // stick push past 0.45 raises an ACT edge the same frame as
+        // its analog edge, so D-pad steps count only while the stick
+        // itself is centred on that axis.
+        if ((pe & (1u<<ACT_RIGHT)) && !ex && ax[0]<=0.18f) ex = 1;
+        if ((pe & (1u<<ACT_LEFT)) && !ex && ax[0]>=-0.18f) ex = -1;
+        if ((pe & (1u<<ACT_DOWN)) && !ey && ax[1]<=0.18f) ey = 1;
+        if ((pe & (1u<<ACT_UP)) && !ey && ax[1]>=-0.18f) ey = -1;
         if (ex){
             int n = S->war_barhl_row==1? war_bar_cats(S, ca, cc, cn) : war_bar_list(S, acts, costs, names);
             if (n>0){ S->war_barhl = S->war_barhl<0? (ex>0? 0 : n-1) : (S->war_barhl + ex + n) % n; sfx(6); }
@@ -2148,44 +2329,45 @@ static void war_pad_update(int pi, float dt){
         }
         return;   // captured: no cursor flight, no pan, no edge-follow this frame
     }
-    // left stick: the cursor flies (and retires the bar highlight —
-    // A goes back to pressing the field)
-    if (lx || ly){
-        S->war_curx += lx * 540.0f * dt;
-        S->war_cury += ly * 540.0f * dt;
+    // the sticks fly the cursor (and retire the bar highlight — A
+    // goes back to pressing the field). The D-pad flies it too, at
+    // full deflection, on any axis the analog stick leaves centred
+    // (v1.25 fix: the D-pad only ever panned the camera before, so
+    // it could not aim the cursor at all). The RIGHT stick flies it
+    // as well — its old job, panning the camera while the cursor
+    // kept its screen spot, is gone under the centred model below:
+    // both sticks move the cursor, the camera follows the cursor.
+    float fx = lx, fy = ly;
+    if (fx==0) fx = ((held>>ACT_RIGHT)&1)? 1.0f : ((held>>ACT_LEFT)&1)? -1.0f : 0;
+    if (fy==0) fy = ((held>>ACT_DOWN)&1)? 1.0f : ((held>>ACT_UP)&1)? -1.0f : 0;
+    fx += rx; fy += ry;
+    { float fm = fsqrt(fx*fx + fy*fy); if (fm>1.0f){ fx/=fm; fy/=fm; } }
+    if (fx || fy){
+        S->war_curx += fx * 540.0f * dt;
+        S->war_cury += fy * 540.0f * dt;
         S->war_barhl = -1;
     }
-    // right stick: pan the camera at key speed; the cursor keeps its
-    // SCREEN spot, so its world coords ride along with the pan
-    if (rx || ry){
-        float ox = S->war_camx, oy = S->war_camy;
-        S->war_camx += rx * 430.0f * dt;
-        S->war_camy += ry * 430.0f * dt;
-        war_clamp_cam(S);
-        S->war_curx += S->war_camx - ox;
-        S->war_cury += S->war_camy - oy;
-    }
-    // world clamp first; then the camera edge-follows a cursor that
-    // pushes to within 28u of the view's edge; then the cursor is
-    // clamped back onto the screen (a key/d-pad pan can strand it)
+    // v1.25 (Daniel, Nov 19): THE CURSOR IS THE CAMERA. The old model
+    // flew the cursor inside a clamped camera — and war_update's key
+    // pan, which the pad's own stick feeds through IN.keys, shoved
+    // the camera at 430 u/s while the cursor flew at 540, so the
+    // difference piled up as a screen offset; the edge-follow then
+    // pinned the cursor 28u inside the edge, the camera clamp at the
+    // map's rim stranded it there, and once it was offset it stayed
+    // offset in every direction. Now the pad cursor sits at the
+    // centre of the field view, always: the cursor clamps to the
+    // arena, the camera centres on it exactly, and at the rim the
+    // view simply scrolls off the map — war_render already draws the
+    // ground beyond the fence darker, so the off-map space reads as
+    // compensated void, not as a broken clamp. war_clamp_cam still
+    // governs every other camera driver (keys, drags, restores);
+    // while the pad cursor is on, this re-centring runs after them
+    // every frame, so no other pan can strand the cursor either.
     if (S->war_curx < WAR_OX) S->war_curx = WAR_OX;
     if (S->war_curx > WAR_OX+S->war_aw) S->war_curx = WAR_OX+S->war_aw;
     if (S->war_cury < WAR_OY) S->war_cury = WAR_OY;
     if (S->war_cury > WAR_OY+S->war_ah) S->war_cury = WAR_OY+S->war_ah;
-    { float csx = (float)vx + vw2/2 + (S->war_curx - S->war_camx);
-      float csy = (float)vy + vh2/2 + (S->war_cury - S->war_camy - WAR_BAR_H*0.5f);
-      if (csx < vx+28) S->war_camx -= (vx+28 - csx);
-      if (csx > vx+vw2-28) S->war_camx += (csx - (vx+vw2-28));
-      if (csy < vy+28) S->war_camy -= (vy+28 - csy);
-      if (csy > vy+vh2-28) S->war_camy += (csy - (vy+vh2-28));
-      war_clamp_cam(S);
-      csx = (float)vx + vw2/2 + (S->war_curx - S->war_camx);
-      csy = (float)vy + vh2/2 + (S->war_cury - S->war_camy - WAR_BAR_H*0.5f);
-      if (csx < vx) S->war_curx += (vx - csx);
-      if (csx > vx+vw2) S->war_curx -= (csx - (vx+vw2));
-      if (csy < vy) S->war_cury += (vy - csy);
-      if (csy > vy+vh2) S->war_cury -= (csy - (vy+vh2));
-    }
+    S->war_camx = S->war_curx; S->war_camy = S->war_cury;
     // LB / RB walk the selected structure's command bar
     if (S->war_selstruct>=0 && (pe & ((1u<<ACT_WPREV)|(1u<<ACT_WNEXT)))){
         int acts[5], costs[5]; const char *names[5];
@@ -2226,46 +2408,37 @@ static void war_pad_update(int pi, float dt){
                 int ta[5], tc[5]; const char *tn[5];
                 if (war_bar_list(S, ta, tc, tn)>0){
                     S->war_barcap = 1; S->war_barhl = 0; S->war_barhl_row = 0;
-                    S->war_barhl_s = S->war_selstruct; S->war_capnx = 0; S->war_capny = 0;
+                    S->war_barhl_s = S->war_selstruct;
+                    // v1.25 fix (Daniel, Nov 19): seed the captured
+                    // stick-edge state from the stick's CURRENT sign.
+                    // It used to reset to 0, so a player who pressed A
+                    // while still pushing the stick toward the building
+                    // — the natural way to select mid-flight — had the
+                    // still-held stick read as a FRESH deflection on
+                    // the next frame, and the highlight stepped once
+                    // for free: capture opened on the wrong button.
+                    S->war_capnx = (ax[0]>0.18f)? 1 : (ax[0]<-0.18f)? -1 : 0;
+                    S->war_capny = (ax[1]>0.18f)? 1 : (ax[1]<-0.18f)? -1 : 0;
                 }
             }
         }
     }
 }
-static void war_update(int pi, float dt, const BwIn *in){
-    BwSim *S = &BWS[pi]; Buddy *b = &G.bud[pi];
-    if (S->war_msgt > 0) S->war_msgt -= dt;
-    if (S->war_grace > 0) S->war_grace -= dt;
-    if (S->war_state==0){ war_map_update(pi, dt, in); return; }
-    if (S->war_state==4){ war_setup_update(pi, dt, in); return; }   // v1.19: the skirmish setup panel — the battle clock does not run here
-    if (S->war_state==2 || S->war_state==3){
-        S->war_endt -= dt;
-        if (pi==G.my_id && IN.tapped){ IN.tapped=0; if (S->war_endt > 0.4f) S->war_endt = 0.4f; }
-        if (S->war_endt <= 0){
-            war_clear_field(S);
-            S->war_state=0; S->war_map_sel = b->war_prog<8? b->war_prog : 7; S->war_grace=0.3f;
-        }
-        return;
+// the pause menu's input, for whoever opened it (feat 13: the
+// pauser drives the shared pause — owner or guest — with their own
+// devices; the other commander's inputs wait it out)
+static void war_pause_input(int pi, float dt){
+    if (pi==G.my_id){
+        if (IN.tapped){ IN.tapped=0; war_pause_tap(pi, IN.tap_x, IN.tap_y); }
+        if (IN.weapon_key>=1 && IN.weapon_key<=3){ int k=IN.weapon_key; IN.weapon_key=0; war_pause_pick(pi, k-1); }
     }
-    if (S->war_pause){   // v1.17: the battle holds its breath — only the pause menu's inputs run; war_t, waves, units and structures all stay frozen
-        if (in->exit_){ S->war_pause=0; S->war_grace=0.3f; sfx(6); return; }   // Esc again = RESUME
-        if (pi==G.my_id){
-            if (IN.tapped){ IN.tapped=0; war_pause_tap(pi, IN.tap_x, IN.tap_y); }
-            if (IN.weapon_key>=1 && IN.weapon_key<=3){ int k=IN.weapon_key; IN.weapon_key=0; war_pause_pick(pi, k-1); }
-        }
-        war_pad_pause(pi, dt);
-        return;
-    }
-    S->war_t += dt;
-    if (S->war_demoarm>=0 && S->war_demoarm != S->war_selstruct) S->war_demoarm=-1;   // v1.21: an armed DEMOLISH lives only while its building stays selected
-    for (int i=0;i<WAR_MAXU;i++) if (S->war_uflash[i]>0) S->war_uflash[i] -= dt;   // cosmetic timers (hit flashes + particles): they only ever feed the renderer
-    for (int s=0;s<WAR_MAXS;s++) if (S->war_sflash[s]>0) S->war_sflash[s] -= dt;
-    for (int i=0;i<24;i++) if (S->war_ft[i]>0) S->war_ft[i] -= dt;
-    for (int t=0;t<S->war_tn;t++) if (S->war_tdeadt[t] > 0) S->war_tdeadt[t] -= dt;   // scorch marks fade
-    if (in->exit_){   // Esc in a battle (v1.17): the pause menu — RESUME / RESTART / SAVE & QUIT — not an abandonment
-        S->war_pause=1; sfx(6);
-        return;
-    }
+    { const float *ax; u32 pe, held; war_pad_src(pi, &ax, &pe, &held); war_pad_pause(pi, ax, pe, dt); }
+}
+// the battle's command-input section, extracted verbatim from
+// war_update (feat 13): the owner runs it in place, exactly where
+// it always ran; a guest co-commander runs it under the view swap.
+static void war_command_input(int pi, float dt, const BwIn *in){
+    BwSim *S = war_bs(pi);
     int dragging = (pi==G.my_id)? war_drag_pan(pi) : 0;
     if (!dragging){   // a field drag owns the camera; keys/stick pan only when no drag does
         int kx=0, ky=0;
@@ -2278,9 +2451,93 @@ static void war_update(int pi, float dt, const BwIn *in){
         if (S->war_barcap){ S->war_barcap=0; S->war_barhl=-1; S->war_barhl_row=0; }   // v1.20: ...and it ends a bar capture the same way
         if (S->war_grace<=0){ IN.tapped=0; war_handle_tap(pi, IN.tap_x, IN.tap_y); }
     }
-    else if (pi!=G.my_id && in->interact && S->war_grace<=0) war_tap_world(pi, S->war_camx, S->war_camy);
+    // feat 13: the old P2 centre-tap (in->interact taps at the
+    // camera centre) is GONE — pad 2 has a real cursor now, and B
+    // on that pad is the pad path's peel verb; a centre-tap on the
+    // same edge would fight it. P2's WAR! verbs are P1's verbs.
     if (pi==G.my_id && IN.weapon_key>=1 && IN.weapon_key<=5){ war_bar_activate(pi, IN.weapon_key-1); IN.weapon_key=0; }
-    war_pad_update(pi, dt);
+    { const float *ax; u32 pe, held; war_pad_src(pi, &ax, &pe, &held); war_pad_update(pi, ax, pe, held, dt); }
+}
+// a guest co-commander's frame (feat 13): the battle NEVER advances
+// here — it validates the link, mirrors the state for rendering,
+// and runs only the command layer, under the view swap.
+static void war_guest_update(int pi, float dt, const BwIn *in){
+    BwSim *S = &BWS[pi]; Buddy *b = &G.bud[pi];
+    int owner = S->war_guest-1;
+    BwSim *HS = &BWS[owner];
+    int valid = owner==war_other_local(pi) && HS->war_duo==pi
+        && G.bud[owner].active && G.bud[owner].in_bw && G.bud[owner].bw_mode==8
+        && (HS->war_state==1 || HS->war_state==2 || HS->war_state==3);
+    if (!valid){
+        // the command is over (battle decided, commander saved &
+        // quit, or the link broke from the other side): back to
+        // your own map, with a fresh field's view defaults
+        S->war_guest = 0;
+        if (HS->war_duo==pi) HS->war_duo = -1;
+        war_view_fresh(S, S);
+        S->war_state = 0; S->war_map_sel = b->war_prog<8? b->war_prog : 7; S->war_grace = 0.3f;
+        return;
+    }
+    S->war_state = HS->war_state;   // mirror, for the renderer and the state readers
+    if (HS->war_state==2 || HS->war_state==3) return;   // the end screen runs on the owner's clock; the guest watches it
+    if (S->war_ordt > 0) S->war_ordt -= dt;
+    if (HS->war_pause){
+        if (HS->war_pause_by==pi){
+            if (in->exit_){ HS->war_pause=0; HS->war_grace=0.3f; sfx(6); return; }
+            war_view_exchange(HS, S);
+            war_pause_input(pi, dt);
+            war_view_exchange(HS, S);
+        }
+        return;
+    }
+    if (in->exit_){ HS->war_pause=1; HS->war_pause_by=pi; sfx(6); return; }
+    war_view_exchange(HS, S);
+    war_command_input(pi, dt, in);
+    war_view_exchange(HS, S);
+}
+static void war_update(int pi, float dt, const BwIn *in){
+    BwSim *S = &BWS[pi]; Buddy *b = &G.bud[pi];
+    if (S->war_msgt > 0) S->war_msgt -= dt;
+    if (S->war_grace > 0) S->war_grace -= dt;
+    if (S->war_guest){ war_guest_update(pi, dt, in); return; }   // feat 13: a guest commands the owner's battle, never their own
+    if (S->war_duo>=0){   // feat 13: link upkeep — a guest who left WAR! (any door) dissolves the link within a frame
+        int g = S->war_duo;
+        BwSim *GS = (g>=0 && g<MAXP)? &BWS[g] : 0;
+        if (!GS || g!=war_other_local(pi) || !G.bud[g].active || !G.bud[g].in_bw || G.bud[g].bw_mode!=8 || GS->war_guest!=pi+1){
+            if (S->war_pause && S->war_pause_by==g) S->war_pause_by = pi;   // a departed pauser hands the menu to the owner
+            war_link_break(pi);
+        }
+    }
+    if (S->war_state==0){ war_map_update(pi, dt, in); return; }
+    if (S->war_state==4){ war_setup_update(pi, dt, in); return; }   // v1.19: the skirmish setup panel — the battle clock does not run here
+    if (S->war_state==2 || S->war_state==3){
+        S->war_endt -= dt;
+        if (pi==G.my_id && IN.tapped){ IN.tapped=0; if (S->war_endt > 0.4f) S->war_endt = 0.4f; }
+        if (S->war_endt <= 0){
+            war_clear_field(S);
+            S->war_state=0; S->war_map_sel = b->war_prog<8? b->war_prog : 7; S->war_grace=0.3f;
+            if (S->war_duo>=0){ int g=S->war_duo; war_link_break(pi); BWS[g].war_state=0; BWS[g].war_grace=0.3f; }   // feat 13: a decided battle releases the guest to their own map
+        }
+        return;
+    }
+    if (S->war_pause){   // v1.17: the battle holds its breath — only the pause menu's inputs run; war_t, waves, units and structures all stay frozen
+        int linked = S->war_duo>=0;   // feat 13: shared pause — only the pauser resumes it or drives it; the other commander waits
+        if (in->exit_ && (!linked || S->war_pause_by==pi)){ S->war_pause=0; S->war_grace=0.3f; sfx(6); return; }   // Esc again = RESUME
+        if (!linked || S->war_pause_by==pi) war_pause_input(pi, dt);
+        else if (pi==G.my_id){ IN.tapped=0; IN.weapon_key=0; }   // feat 13: the waiting commander's taps/keys are eaten, not queued into the resume frame
+        return;
+    }
+    S->war_t += dt;
+    if (S->war_demoarm>=0 && S->war_demoarm != S->war_selstruct) S->war_demoarm=-1;   // v1.21: an armed DEMOLISH lives only while its building stays selected
+    for (int i=0;i<WAR_MAXU;i++) if (S->war_uflash[i]>0) S->war_uflash[i] -= dt;   // cosmetic timers (hit flashes + particles): they only ever feed the renderer
+    for (int s=0;s<WAR_MAXS;s++) if (S->war_sflash[s]>0) S->war_sflash[s] -= dt;
+    for (int i=0;i<24;i++) if (S->war_ft[i]>0) S->war_ft[i] -= dt;
+    for (int t=0;t<S->war_tn;t++) if (S->war_tdeadt[t] > 0) S->war_tdeadt[t] -= dt;   // scorch marks fade
+    if (in->exit_){   // Esc in a battle (v1.17): the pause menu — RESUME / RESTART / SAVE & QUIT — not an abandonment
+        S->war_pause=1; S->war_pause_by=pi; sfx(6);   // feat 13: the pauser is recorded — the pause is theirs to drive
+        return;
+    }
+    war_command_input(pi, dt, in);   // feat 13: the drag / key-pan / tap / weapon-key / pad section, extracted verbatim — see war_command_input above (the old P2 centre-tap line is gone there, deliberately)
     S->war_wavet -= dt;
     if (S->war_wavet <= 0){
         S->war_wavet = war_wave_dt(S->war_region);
@@ -2378,11 +2635,15 @@ static void war_render_map(int pi, int vx, int vy, int vw2, int vh2){
     { char buf[48]; char *q=buf; q=sappend(q, "REGIONS CONQUERED: "); q=sapp_int(q, b->war_prog); q=sappend(q, " / 8"); *q=0;
       draw_text_center(vx+vw2/2, vy+vh2-34, buf, 1, COL(255,220,120)); }
     { int bx, by; war_skirmish_btn(vx, vy, vw2, vh2, &bx, &by);   // v1.19: the skirmish door, bottom-right of the map
-      rect_fill(bx, by, 128, 28, COL(38,44,60));
-      rect_line(bx, by, 128, 28, COL(255,170,90));
+      int selb = (S->war_map_sel==8);   // v1.25: the selection's 9th stop lights the button like a picked node
+      rect_fill(bx, by, 128, 28, selb? COL(56,64,88) : COL(38,44,60));
+      rect_line(bx, by, 128, 28, selb? COL(255,220,120) : COL(255,170,90));
       draw_text_center(bx+64, by+9, "SKIRMISH", 2, COL(255,210,150)); }
-    if (b->war_prog>=8) draw_text_center(vx+vw2/2, vy+vh2-19, "ALL REGIONS CONQUERED! TAP ANY REGION TO FIGHT IT AGAIN.", 1, COL(200,230,200));
-    else draw_text_center(vx+vw2/2, vy+vh2-19, mobile_ui()? "TAP A REGION TO INVADE IT" : "TAP A REGION - OR ARROWS + SPACE", 1, COL(150,160,185));
+    if (b->war_prog>=8){ char b2[96]; char *q=b2; q=sappend(q, "ALL REGIONS CONQUERED! ");
+        q=sappend(q, hint_dev()==DEV_PAD? "A ON ANY REGION" : (hint_dev()==DEV_TOUCH? "TAP ANY REGION" : "CLICK ANY REGION"));
+        q=sappend(q, " TO FIGHT IT AGAIN."); *q=0;
+        draw_text_center(vx+vw2/2, vy+vh2-19, b2, 1, COL(200,230,200)); }
+    else draw_text_center(vx+vw2/2, vy+vh2-19, hint_dev()==DEV_PAD? "STICK + A - INVADE - LAST STOP IS SKIRMISH" : (hint_dev()==DEV_TOUCH? "TAP A REGION TO INVADE IT" : "CLICK A REGION - ARROWS + SPACE - S: SKIRMISH"), 1, COL(150,160,185));
     if (S->war_msgt>0) draw_text_center(vx+vw2/2, vy+58, S->war_msg, 1, COL(255,170,150));
 }
 static void war_draw_bar_btn(BwSim *S, int bx, int by, int act, int cost, const char *name, int hl){
@@ -2458,7 +2719,7 @@ static void war_render_bar(int pi, int vx, int vy, int vw2, int vh2){
     if (vw2 >= VW){   // the info zone only earns its keep at full width
         int ix = vx + 6 + n*90 + 10;
         rect_fill(ix-6, by+7, 1, WAR_BAR_H-14, COL(52,48,74));   // v1.21 cosmetic: a divider between the buttons and the readout
-        if (S->war_place>=0) draw_text(ix, by+17, "TAP GROUND TO PLACE IT", 1, COL(255,220,150));
+        if (S->war_place>=0) draw_text(ix, by+17, hint_dev()==DEV_PAD? "A PLACES IT WHERE THE CURSOR SITS" : (hint_dev()==DEV_TOUCH? "TAP GROUND TO PLACE IT" : "CLICK THE GROUND TO PLACE IT"), 1, COL(255,220,150));
         else if (S->war_selstruct>=0 && war_struct_alive(S, S->war_selstruct)){
             int s = S->war_selstruct;
             static const char *SN[7] = { "COMPILER CORE", "PATCH BAY", "ZAPPER TOWER", "FIREWALL", "BUG HIVE", "ASSEMBLY PLANT", "GATE" };
@@ -2469,10 +2730,11 @@ static void war_render_bar(int pi, int vx, int vy, int vw2, int vh2){
             draw_text(ix, by+17, buf, 1, COL(200,214,220));
         }
         else if (war_sel_count(S)>0){
-            char buf[48]; char *q=buf; q=sapp_int(q, war_sel_count(S)); q=sappend(q, " SELECTED - TAP GROUND: MOVE, TAP A BUG: ATTACK"); *q=0;
+            char buf[64]; char *q=buf; q=sapp_int(q, war_sel_count(S));
+            q=sappend(q, hint_dev()==DEV_PAD? " SELECTED - A ON GROUND: MOVE, A ON A BUG: ATTACK" : (hint_dev()==DEV_TOUCH? " SELECTED - TAP GROUND: MOVE, TAP A BUG: ATTACK" : " SELECTED - CLICK GROUND: MOVE, CLICK A BUG: ATTACK")); *q=0;
             draw_text(ix, by+17, buf, 1, COL(200,230,200));
         }
-        else draw_text(ix, by+17, "TAP A BUDDY OR A BUILDING", 1, COL(150,160,185));
+        else draw_text(ix, by+17, hint_dev()==DEV_PAD? "A ON A BUDDY OR A BUILDING" : (hint_dev()==DEV_TOUCH? "TAP A BUDDY OR A BUILDING" : "CLICK A BUDDY OR A BUILDING"), 1, COL(150,160,185));
     }
 }
 static void war_draw_struct(BwSim *S, int s){
@@ -2751,15 +3013,18 @@ static void war_ghost_at(BwSim *S, float wx, float wy){
 // cursor is a finger too (v1.16): while it is on and no touch point
 // is asking, the ghost hovers at the cursor instead, so a pad player
 // can judge a placement before pressing A.
+static int war_view_pi = -1;   // feat 13: the player whose VIEW war_render is drawing right now (-1 outside a render)
 static void war_render_ghost(int pi, int vx, int vy, int vw2, int vh2){
     BwSim *S = &BWS[pi];
-    if (pi!=G.my_id || S->war_place<0) return;   // the touch points belong to the local player
-    for (int i=0;i<6;i++){
-        if (!IN.tp[i].active || IN.tp[i].y >= vy+vh2-WAR_BAR_H) continue;
-        float wx = S->war_camx + (float)(IN.tp[i].x - vx - vw2/2);
-        float wy = S->war_camy + WAR_BAR_H*0.5f + (float)(IN.tp[i].y - vy - vh2/2);
-        war_ghost_at(S, wx, wy);
-        return;
+    if (S->war_place<0) return;
+    if (war_view_pi==G.my_id){   // the touch points belong to the local player — only their own view ghosts them (feat 13: the viewer, not the battle owner)
+        for (int i=0;i<6;i++){
+            if (!IN.tp[i].active || IN.tp[i].y >= vy+vh2-WAR_BAR_H) continue;
+            float wx = S->war_camx + (float)(IN.tp[i].x - vx - vw2/2);
+            float wy = S->war_camy + WAR_BAR_H*0.5f + (float)(IN.tp[i].y - vy - vh2/2);
+            war_ghost_at(S, wx, wy);
+            return;
+        }
     }
     if (S->war_curon) war_ghost_at(S, S->war_curx, S->war_cury);
 }
@@ -2896,7 +3161,7 @@ static void war_render(int pi){
         war_draw_unit(S, b, i);
     }
     war_render_ghost(pi, vx, vy, vw2, vh2);
-    if (pi==G.my_id && S->war_curon && S->war_state==1 && !S->war_barcap){   // the pad cursor rides above the fog, like the selected units do (v1.16). v1.20: while the command bar has captured pad control, the field cursor hides — the highlight is the pointer now
+    if (S->war_curon && S->war_state==1 && !S->war_barcap){   // the pad cursor rides above the fog, like the selected units do (v1.16). v1.20: while the command bar has captured pad control, the field cursor hides — the highlight is the pointer now. feat 13: no pi gate — war_render only ever runs for a local view (the owner's own, or a guest's by exchange), and the loaded view's curon is the VIEWER's cursor
         int csx = SX(S->war_curx), csy = SY(S->war_cury);
         int cr = 10 + (int)(fsin(G.anim_t*5.0f)*1.5f);
         circle_out(csx, csy, cr+3, COL(120,100,40));
@@ -2955,7 +3220,8 @@ static void war_render(int pi){
             draw_text_center(px+pw/2, py+44, S->war_skirmish? "SKIRMISH" : REGION_NAME[rg], 1, COL(240,244,250));
             draw_text_center(px+pw/2, py+62, S->war_skirmish? "THE FIELD KEEPS ITS SECRETS. TRY AGAIN!" : "THE REGION STAYS WILD. REBUILD AND TRY AGAIN!", 1, COL(220,200,200));
         }
-        draw_text_center(px+pw/2, py+ph-16, "TAP TO RETURN TO THE MAP", 1, COL(150,160,185));
+        { char b2[48]; char *q=b2; q=sappend(q, lbla(H_POINT)); q=sappend(q, " TO RETURN TO THE MAP"); *q=0;
+          draw_text_center(px+pw/2, py+ph-16, b2, 1, COL(150,160,185)); }
     }
     if (S->war_pause){   // the pause menu (v1.17): same rects the tap handler and pad use
         blend_rect(vx, vy, vw2, vh2, COL(8,8,14), 150);
@@ -2971,7 +3237,7 @@ static void war_render(int pi){
             rect_line(px+40, by, pw-80, 36, COL(198,164,84));
             draw_text_center(px+pw/2, by+12, PLBL[n], 2, COL(240,244,250));
         }
-        draw_text_center(px+pw/2, py+ph-16, mobile_ui()? "TAP A CHOICE" : "TAP - OR KEYS 1 / 2 / 3 - ESC RESUMES", 1, COL(150,160,185));
+        draw_text_center(px+pw/2, py+ph-16, hint_dev()==DEV_PAD? "A - PICK A CHOICE - B RESUMES" : (hint_dev()==DEV_TOUCH? "TAP A CHOICE" : "KEYS 1 / 2 / 3 - ESC RESUMES"), 1, COL(150,160,185));
     }
 }
 
@@ -2985,7 +3251,17 @@ static void bw_render_modes(int pi){
     if (b->bw_mode==5){ tank_render(pi); return; }
     if (b->bw_mode==6){ cas_render(pi); return; }
     if (b->bw_mode==7){ if (S->crt_guest) crt_render_view(S->crt_guest - 1, pi); else crt_render(pi); return; }
-    if (b->bw_mode==8){ war_render(pi); return; }
+    if (b->bw_mode==8){
+        if (S->war_guest){   // feat 13: a guest views the OWNER's battle wearing their own view (Cart's crt_render_view, by exchange)
+            BwSim *HS = &BWS[S->war_guest-1];
+            war_view_exchange(HS, S);
+            war_view_pi = pi;
+            war_render(S->war_guest-1);
+            war_view_exchange(HS, S);
+            war_view_pi = -1;
+        } else { war_view_pi = pi; war_render(pi); war_view_pi = -1; }
+        return;
+    }
     u32 seed=(u32)b->bw_seed;
     G.camx=b->x; G.camy=b->y;
     // the view: full screen solo, or this player's split half in co-op
@@ -3069,6 +3345,12 @@ static void bw_render_modes(int pi){
     draw_buddy(b);
     bw_draw_objects(pi, 1);
     ui_vignette(vx, vy, vw2, vh2);
+    // THE LIVING SKY (v1.25 feat 12): the same tint the overworld
+    // wears, laid over the meadow but under the buddy card, the
+    // prompt, the minimap and the note — BW's UI never sits under
+    // the sky. Only this outdoor fall-through reaches here: every
+    // cabinet and interior mode returned above, Entrances included.
+    tod_apply_tint();
     // the buddy card
     rect_fill(vx+8, vy+8, 168, 46, COL(20,26,20)); rect_line(vx+8, vy+8, 168, 46, COL(198,164,84));
     { char buf[64]; char *q=buf; q=sappend(q, BUD_ELF[b->name_idx%BUD_NAMES_N]); q=sappend(q, " THE "); q=sappend(q, BUD_NAME[b->species%BUDN]); *q=0;
@@ -3099,6 +3381,7 @@ static void bw_render_modes(int pi){
       draw_text_center(vx + vw2/2, vy + vh2-19, hint, 1, COL(240,248,240)); } }
     bw_draw_minimap(pi);
     bw_draw_note(pi);
+    bw_draw_ch2_hud(pi);   // THE REBUILDING (feat 14): the cider run's countdown, when a run is live
     if (S->log_open){
         static const char *QN[10] = { "MEET ELDER PATCHINA", "CLEAR THE SERVER FARM", "HOUSE CALL FOR A HERMIT", "ZERO-DAY FUNERAL", "MOP'S LOST TOOLS", "THE SUNKEN CACHE", "COLD STORAGE", "SPECIAL DELIVERY", "THE STRAY PROCESS", "READ THE SIGNS" };
         // a guiding line per quest (Nov 4, Daniel: "more detailed,
@@ -3152,7 +3435,8 @@ static void bw_render_modes(int pi){
             draw_text(x+w-12-text_w(cb, 1), ry, cb, 1, COL(255,210,130));
             ry += 13;
         }
-        draw_text_center(x+w/2, y+h-14, "SPACE / A - USE.  ITEMS ALSO WORK MID-BATTLE.", 1, COL(150,170,190));
+        { char b2[64]; char *q=b2; q=sappend(q, lbla(H_FIRE)); q=sappend(q, " - USE.  ITEMS ALSO WORK MID-BATTLE."); *q=0;
+          draw_text_center(x+w/2, y+h-14, b2, 1, COL(150,170,190)); }
     }
     if (pi==G.my_id && mobile_ui() && !pad_mode() && !S->log_open){
         const char *hint = G.touch_ctl? "STICK MOVE - TALK TALKS - PICK FOR BATTLES" : "DRAG TO MOVE - TAP TO TALK";
@@ -3232,6 +3516,7 @@ static void bw_draw_touch(int pi){
     }
 }
 static void bw_render(int pi){
+    g_dev_ctx = dev_of(pi);   // v1.25: this view's hints name this player's device
     bw_render_modes(pi);
     bw_draw_touch(pi);
     // the Start-menu and its CONTROLS panel, over this player's view

@@ -27,15 +27,15 @@ const CY = -6000;
   // walk (real keys, real collision) from wherever the player stands to
   // just south of the Banzai door inside the mall, then face it
   async function walkToDoor() {
-    await call('dbg_tp', 0, CY + 118);           // the mall entry mat
+    await call('dbg_tp', 0, CY + 158);           // the mall entry mat (spawn moved +40 with the south wall, v1.25 MALL ENLARGEMENT)
     await sleep(200);
-    await page.keyboard.down('KeyD');            // east toward x=185
+    await page.keyboard.down('KeyD');            // east toward the gate at x=215 (the walk slides around the gate box's NW corner, as before)
     const t0 = Date.now();
-    while (Date.now() - t0 < 6000) { if ((await call('dbg_px')) > 178) break; await sleep(120); }
+    while (Date.now() - t0 < 6000) { if ((await call('dbg_px')) > 208) break; await sleep(120); }
     await page.keyboard.up('KeyD');
-    await page.keyboard.down('KeyW');            // north to the door line (CY+92)
+    await page.keyboard.down('KeyW');            // north to the door line (CY+132)
     const t1 = Date.now();
-    while (Date.now() - t1 < 4000) { const y = await call('dbg_py'); if (y < CY + 104 && y > CY + 78) break; await sleep(120); }
+    while (Date.now() - t1 < 4000) { const y = await call('dbg_py'); if (y < CY + 144 && y > CY + 118) break; await sleep(120); }
     await page.keyboard.up('KeyW');
     await sleep(200);
   }
@@ -95,10 +95,10 @@ const CY = -6000;
   T('left Banzai World', (await poll('dbg_bwstate', v => v === 0)) === 0, await call('dbg_bwstate'));
 
   // ---- entry from the SOUTH, up the door column (the natural walk) ---
-  await call('dbg_tp', 185, CY + 175); await sleep(200);
+  await call('dbg_tp', 215, CY + 215); await sleep(200);   // south of the gate, in its disc (clamps to the south face, as the old spot did)
   await page.keyboard.down('KeyW');
   const t9 = Date.now();
-  while (Date.now() - t9 < 3000) { if ((await call('dbg_py')) < CY + 165) break; await sleep(120); }
+  while (Date.now() - t9 < 3000) { if ((await call('dbg_py')) < CY + 205) break; await sleep(120); }
   await page.keyboard.up('KeyW'); await sleep(200);
   await key('KeyE', 250); await sleep(400);
   T('panel opens from the south approach', (await call('dbg_gate')) === 1, await call('dbg_gate'));

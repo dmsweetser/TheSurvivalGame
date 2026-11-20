@@ -154,20 +154,256 @@ static void whale_poll(float dt){
 }
 
 
+// ---------------------------------------------------------------------------
+// TROPHY CASE (v1.25 feat 4, station 5): a pure VIEW over records the
+// game already keeps — per-buddy cabinet records on the pl-line, the
+// medal bests of feature #3, the Walk of Fame house records in the
+// global blob, the First Shift's slot state. It writes nothing and
+// adds no save state: a pre-feature save has nothing to tolerate.
+// One row model feeds the count, the name, the right-hand value, the
+// blurb and the earned test, so the panel can never disagree with
+// itself. Rows are shelves: headers, then the plaques on them.
+// ---------------------------------------------------------------------------
+enum { CR_HDR_CAB, CR_CASTLE, CR_STORY, CR_WAR, CR_CUPS, CR_TANK, CR_ENT, CR_SUB,
+       CR_HDR_MED, CR_CMED, CR_RMED, CR_HAT, CR_KILLS, CR_BOWL, CR_LONG,
+       CR_HDR_CREW, CR_FS, CR_BUDDY, CR_TRAIN };
+static int case_row_ids(Player *p, int *ids){
+    int n=0;
+    ids[n++]=CR_HDR_CAB;
+    ids[n++]=CR_CASTLE; ids[n++]=CR_STORY; ids[n++]=CR_WAR; ids[n++]=CR_CUPS;
+    ids[n++]=CR_TANK; ids[n++]=CR_ENT; ids[n++]=CR_SUB;
+    ids[n++]=CR_HDR_MED;
+    ids[n++]=CR_CMED; ids[n++]=CR_RMED; ids[n++]=CR_HAT; ids[n++]=CR_KILLS; ids[n++]=CR_BOWL; ids[n++]=CR_LONG;
+    ids[n++]=CR_HDR_CREW;
+    if (G.fs_state) ids[n++]=CR_FS;   // a slot never offered the chain gets no row — "NOT STARTED" would be a lie
+    ids[n++]=CR_BUDDY;
+    if (G.bud[p-G.p].active) ids[n++]=CR_TRAIN;
+    return n;
+}
+static int case_row_id(Player *p, int row){
+    int ids[20]; int n=case_row_ids(p, ids);
+    return (row>=0 && row<n)? ids[row] : -1;
+}
+static int case_story_done(Buddy *b){   // quests at state 2 (done), of 10
+    int n=0; for (int q=0;q<10;q++) if (bw_qstate_g(b,q)==2) n++;
+    return n;
+}
+static int case_story_started(Buddy *b){
+    if (b->story_started) return 1;
+    for (int q=0;q<10;q++) if (bw_qstate_g(b,q)) return 1;
+    return (b->story_bits>>17)&1;   // Zed is down: the story was certainly started
+}
+static const char *case_rank(int r){   // a cup rank as the case says it
+    static const char *R[7] = { "--", "1ST", "2ND", "3RD", "4TH", "5TH", "6TH" };
+    return R[r<0? 0 : r>6? 6 : r];
+}
+static int case_earned(Player *p, int id){
+    Buddy *b=&G.bud[p-G.p];
+    switch (id){
+        case CR_CASTLE: return b->cas_best>0;
+        case CR_STORY: return (b->story_bits>>17)&1;
+        case CR_WAR: return b->war_prog>=8;
+        case CR_CUPS: return (b->crt_cupbest%8)==1 || (b->crt_cupbest/8)==1;
+        case CR_TANK: return b->tank_done>0;
+        case CR_ENT: return b->ent_done>0;
+        case CR_SUB: return b->ent_sub_best>0;
+        case CR_CMED: return crt_medal_count(b,1)+crt_medal_count(b,2)+crt_medal_count(b,3)>0;
+        case CR_RMED: return plat_medal_count(b,1)+plat_medal_count(b,2)+plat_medal_count(b,3)>0;
+        case CR_HAT: return G.rec_hat>0;
+        case CR_KILLS: return G.rec_kills>0;
+        case CR_BOWL: return G.rec_bowl>0;
+        case CR_LONG: return G.rec_time>0;
+        case CR_FS: return G.fs_state==2;
+        case CR_BUDDY: return b->active;
+        case CR_TRAIN: return b->up_hp+b->up_atk+b->up_def>0 || b->skills!=0;
+        default: return 0;
+    }
+}
+static u32 case_chip_col(Player *p, int id){   // an earned row's plaque-chip colour (medal rows wear their best tier)
+    Buddy *b=&G.bud[p-G.p];
+    if (id==CR_CMED){ for (int t=3;t>=1;t--) if (crt_medal_count(b,t)>0) return medal_col(t); }
+    if (id==CR_RMED){ for (int t=3;t>=1;t--) if (plat_medal_count(b,t)>0) return medal_col(t); }
+    return COL(250,200,50);
+}
+static const char *case_row_name(Player *p, int row, char *buf){
+    Buddy *b=&G.bud[p-G.p];
+    char *q=buf;
+    switch (case_row_id(p,row)){
+        case CR_HDR_CAB: return "THE CABINETS";
+        case CR_HDR_MED: return "MEDALS + WALK OF FAME";
+        case CR_HDR_CREW: return "THE CREW";
+        case CR_CASTLE: return "CASTLE";
+        case CR_STORY: return "STORY MODE";
+        case CR_WAR: return "WAR!";
+        case CR_CUPS: return "CART CUPS";
+        case CR_TANK: return "TANK RESCUE";
+        case CR_ENT: return "ENTRANCES";
+        case CR_SUB: return "THE SUBFLOOR";
+        case CR_CMED: return "CART MEDALS";
+        case CR_RMED: return "RUN MEDALS";
+        case CR_HAT: return "HEAVIEST HAT";
+        case CR_KILLS: return "MOST BUGS SQUASHED";
+        case CR_BOWL: return "BEST BUG BOWL";
+        case CR_LONG: return "LONGEST RUN";
+        case CR_FS: return "FIRST SHIFT";
+        case CR_BUDDY:
+            if (b->active){ q=sappend(q,"BUDDY: "); q=sappend(q, BUD_ELF[b->name_idx%BUD_NAMES_N]); *q=0; return buf; }
+            return "YOUR BUDDY";
+        case CR_TRAIN: return "TRAINING";
+        default: return "";
+    }
+}
+static const char *case_row_right(Player *p, int row, char *buf){
+    Buddy *b=&G.bud[p-G.p];
+    char *q=buf;
+    switch (case_row_id(p,row)){
+        case CR_CASTLE:
+            if (b->cas_best>0){ q=sappend(q,"BEST "); q=sapp_int(q,b->cas_best); *q=0; return buf; }
+            return "NOT YET";
+        case CR_STORY:
+            if ((b->story_bits>>17)&1) return "ZED DEFEATED";
+            if (case_story_started(b)){ q=sappend(q,"QUESTS "); q=sapp_int(q,case_story_done(b)); q=sappend(q,"/10"); *q=0; return buf; }
+            return "NOT STARTED";
+        case CR_WAR:
+            if (b->war_prog>=8) return "CONQUERED";
+            if (b->war_prog>0){ q=sapp_int(q,b->war_prog); q=sappend(q,"/8 REGIONS"); *q=0; return buf; }
+            return "NOT YET";
+        case CR_CUPS:
+            q=sappend(q,"HOME "); q=sappend(q,case_rank(b->crt_cupbest%8));
+            q=sappend(q," - FAR "); q=sappend(q,case_rank(b->crt_cupbest/8)); *q=0; return buf;
+        case CR_TANK:
+            if (b->tank_done>0){ q=sappend(q,"LEVEL "); q=sapp_int(q,b->tank_done); *q=0; return buf; }
+            return "NOT YET";
+        case CR_ENT:
+            if (b->ent_done>0){ q=sappend(q,"OUT x"); q=sapp_int(q,b->ent_done); *q=0; return buf; }
+            if (b->ent_best>0){ q=sappend(q,"ROOM "); q=sapp_int(q,b->ent_best); q=sappend(q,"/51"); *q=0; return buf; }
+            return "NOT YET";
+        case CR_SUB:
+            if (b->ent_sub_best>0){ q=sappend(q,"B-"); q=sapp_int(q,b->ent_sub_best); *q=0; return buf; }
+            return "NOT YET";
+        case CR_CMED: case CR_RMED: {
+            int g,s,br;
+            if (case_row_id(p,row)==CR_CMED){ g=crt_medal_count(b,3); s=crt_medal_count(b,2); br=crt_medal_count(b,1); }
+            else { g=plat_medal_count(b,3); s=plat_medal_count(b,2); br=plat_medal_count(b,1); }
+            if (!g && !s && !br) return "NONE YET";
+            q=sapp_int(q,g); q=sappend(q,"G - "); q=sapp_int(q,s); q=sappend(q,"S - "); q=sapp_int(q,br); q=sappend(q,"B"); *q=0; return buf; }
+        case CR_HAT:
+            if (G.rec_hat>0){ q=sapp_int(q,(int)G.rec_hat); q=sappend(q," KG"); *q=0; return buf; }
+            return "NO RECORD";
+        case CR_KILLS:
+            if (G.rec_kills>0){ q=sapp_int(q,G.rec_kills); *q=0; return buf; }
+            return "NO RECORD";
+        case CR_BOWL:
+            if (G.rec_bowl>0){ q=sapp_int(q,G.rec_bowl); *q=0; return buf; }
+            return "NO RECORD";
+        case CR_LONG:
+            if (G.rec_time>0){ int t=(int)G.rec_time; q=sapp_int(q,t/60); q=sappend(q,":"); if (t%60<10) q=sappend(q,"0"); q=sapp_int(q,t%60); *q=0; return buf; }
+            return "NO RECORD";
+        case CR_FS:
+            if (G.fs_state==2) return "COMPLETE";
+            if (G.fs_state==3) return "SKIPPED";
+            q=sappend(q,"STEP "); q=sapp_int(q,G.fs_step+1); q=sappend(q," OF 6"); *q=0; return buf;
+        case CR_BUDDY:
+            if (b->active){ q=sappend(q,"XP "); q=sapp_int(q,b->xp); *q=0; return buf; }
+            return "NONE YET";
+        case CR_TRAIN:
+            q=sappend(q,"HP"); q=sapp_int(q,b->up_hp); q=sappend(q," ATK"); q=sapp_int(q,b->up_atk); q=sappend(q," DEF"); q=sapp_int(q,b->up_def); *q=0; return buf;
+        default: return "";
+    }
+}
+static char case_blurb_buf[128];
+static const char *case_row_blurb(Player *p, int row){
+    Buddy *b=&G.bud[p-G.p];
+    int id=case_row_id(p,row);
+    char *q;
+    switch (id){
+        case CR_HDR_CAB: return "EVERY CABINET IN THE ARCADE KEEPS A PLAQUE HERE.";
+        case CR_HDR_MED: return "MEDALS ARE YOURS ALONE. THE WALK OF FAME BELONGS TO THE HOUSE.";
+        case CR_HDR_CREW: return "THE CREW THAT WEARS THE EVIDENCE.";
+        case CR_CASTLE: return case_earned(p,id)? "OUT THE COURTYARD GATE WITH THE TREASURE. THE CASE KEEPS THE SCORE."
+                                                : "ESCAPE THE CASTLE, TREASURE IN HAND. THE PLAQUE IS WAITING.";
+        case CR_STORY:
+            if ((b->story_bits>>17)&1) return "ZERO-DAY ZED, FUNERALED. THE MEADOW IS PATCHED, AND THE CASE KNOWS.";
+            if (case_story_started(b)) return "PATCHINA'S ERRANDS, PARTLY RUN. ZED IS STILL OUT THERE, UNPATCHED.";
+            return "STORY MODE WAITS IN BANZAI WORLD. TEN QUESTS, ONE FINAL BUG.";
+        case CR_WAR:
+            if (b->war_prog>=8) return "ALL EIGHT REGIONS. THE HIVE SENDS ITS REGARDS. IT HAS NONE LEFT.";
+            if (b->war_prog>0) return "REGIONS FALL ONE AT A TIME. THE MAP REMEMBERS WHERE YOU STOPPED.";
+            return "CONQUER ALL EIGHT REGIONS OF THE WAR! MAP. THE PLAQUE IS WAITING.";
+        case CR_CUPS:
+            if (case_earned(p,id)) return "A CUP ON THE SHELF. THE OTHER KARTS CAN BE HEARD SULKING FROM HERE.";
+            if (b->crt_cupbest) return "FINISH A GRAND PRIX ON TOP AND THE CUP GOES IN THE CASE.";
+            return "WIN A GRAND PRIX - HOME OR FAR COUNTRY - AND THE CUP LIVES HERE.";
+        case CR_TANK: return b->tank_done>0? "THE TANK CAME BACK. THEY ALWAYS COME BACK - DEEPER, NEXT TIME."
+                                           : "RESCUE DEEP IN TANK RESCUE. THE PLAQUE COUNTS YOUR DEEPEST LEVEL.";
+        case CR_ENT:
+            if (b->ent_done>0) return "EVERY ENTRANCE, CLEARED. THE DOORS BEHAVE THEMSELVES NOW. MOSTLY.";
+            if (b->ent_best>0) return "FIFTY-ONE ROOMS DEEP, THE EXIT. HOW FAR DID YOU GET LAST TIME?";
+            return "GET OUT OF ENTRANCES - ALL 51 ROOMS. GENTLE RULES, LONG HALLS.";
+        case CR_SUB: return b->ent_sub_best>0? "BELOW THE FLOORS, THE B-ROOMS. YOU WENT DOWN AND CAME BACK UP."
+                                             : "SOMEWHERE UNDER ENTRANCES THERE ARE B-ROOMS. FIND THE WAY DOWN.";
+        case CR_CMED: case CR_RMED: {
+            int g,s,br;
+            if (id==CR_CMED){ g=crt_medal_count(b,3); s=crt_medal_count(b,2); br=crt_medal_count(b,1); }
+            else { g=plat_medal_count(b,3); s=plat_medal_count(b,2); br=plat_medal_count(b,1); }
+            if (!g && !s && !br) return id==CR_CMED? "BEAT A TRACK'S MEDAL TIME IN SUPER BUDDY CART. BRONZE IS KIND."
+                                                   : "BEAT A LEVEL'S MEDAL TIME IN SUPER BUDDY RUN. BRONZE IS KIND.";
+            q=case_blurb_buf;
+            q=sapp_int(q,g); q=sappend(q," GOLD, "); q=sapp_int(q,s); q=sappend(q," SILVER, "); q=sapp_int(q,br);
+            q=sappend(q, id==CR_CMED? " BRONZE ACROSS THE EIGHT TRACKS." : " BRONZE ACROSS THE FIRST SIXTEEN LEVELS.");
+            *q=0; return case_blurb_buf; }
+        case CR_HAT:
+            if (G.rec_hat>0){ q=case_blurb_buf; q=sappend(q,"SET BY "); q=sappend(q,G.rec_name); q=sappend(q,". THE WHOLE HOUSE WALKS TALLER."); *q=0; return case_blurb_buf; }
+            return "THE HEAVIEST HAT EVER WORN, HOUSE-WIDE. NOBODY HAS SET IT YET.";
+        case CR_KILLS: return G.rec_kills>0? "THE BUSIEST RUN THIS HOUSE HAS EVER SEEN. CARCASSES EVERYWHERE."
+                                           : "MOST BUGS SQUASHED IN ONE RUN, HOUSE-WIDE. NO RECORD YET.";
+        case CR_BOWL: return G.rec_bowl>0? "THE BEST GAME THESE LANES HAVE HOSTED. THE PINS STILL TALK."
+                                          : "BEST BUG BOWL GAME, HOUSE-WIDE. THE LANES ARE WAITING.";
+        case CR_LONG: return G.rec_time>0? "THE LONGEST SINGLE RUN ON THE BOOKS. A PROPER SHIFT."
+                                         : "THE LONGEST SINGLE RUN, HOUSE-WIDE. NO RECORD YET.";
+        case CR_FS:
+            if (G.fs_state==2) return "SIX JOBS, ALL DONE. YOU ARE ON THE CREW NOW.";
+            if (G.fs_state==3) return "SKIPPED, NO HARD FEELINGS. THE CREW FOUND ITS OWN WAY.";
+            return "THE GUIDED FIRST DAY: SIX LITTLE JOBS, PAID IN BUDDY XP.";
+        case CR_BUDDY:
+            if (b->active){ q=case_blurb_buf; q=sappend(q,"YOUR "); q=sappend(q,BUD_NAME[b->species%BUDN]); q=sappend(q,". EVERY CABINET WIN TRAINS THE SAME FRIEND."); *q=0; return case_blurb_buf; }
+            return "NO BUDDY YET. BANZAI BUDDIES, ON THE NORTH WALL, FIXES THAT.";
+        case CR_TRAIN: {
+            int k = (b->skills&1?1:0) + (b->skills&2?1:0) + (b->skills&4?1:0) + (b->skills&8?1:0);
+            q=case_blurb_buf;
+            q=sappend(q,"MOVES TAUGHT "); q=sapp_int(q,k); q=sappend(q," OF 4 - TRAIN AT BANZAI BUDDIES, NORTH WALL.");
+            *q=0; return case_blurb_buf; }
+        default: return "";
+    }
+}
+
 static int station_rows(int st, Player *p){
+    if (st==5){ int ids[20]; return case_row_ids(p, ids); }   // TROPHY CASE
+    if (st==6) return wk_rows();   // CHALLENGE BOARD (v1.25 feat 6): the row model lives in save.c with the week state
+    if (st==7) return bn_rows();   // BOUNTY BOARD (v1.25 feat 8): the row model lives in save.c with the bounty state
     if (st==1) return WHALE_N + 1;   // the vanities + ENTER UNLOCK CODE (Whales Only, below)
     if (st==2) return 6;   // deposit all/half/quarter + withdraw all/half/quarter
+    if (st==8){ int pi=(int)(p-G.p);   // PHOTO BOOTH (feat 9; its own station since the MALL ENLARGEMENT)
+        return booth_stage[pi]? 1 : 5; }   // gallery: the one way back; booth: backdrop / hat / snap / your portrait / step out
     if (st==3){ int pi=(int)(p-G.p); Buddy *b=&G.bud[pi];
         int stage = bud_stage[pi];
         if (stage==1 || stage==3){ int rem = BUD_NAMES_N - bud_page[pi]*12; int n = rem>12? 12 : rem; return n + 1; }   // + the MORE row, on every page
         if (stage==2 || stage==4) return BUD_COLORS_N;
-        return !b->active? BUDN : b->fainted? 1 : 10; }
+        return !b->active? BUDN : b->fainted? 1 : 11; }   // 11: the ten buddy rows + the HAT TOPPER wardrobe row (feat 5). The PHOTO BOOTH row left with the booth itself (MALL ENLARGEMENT: station 8)
     return 0;
 }
 static void store_sel_reset(int pi){
     if (G.p2_slot>=0 && pi==G.p2_slot) G.store_sel2=0; else G.store_sel=0;
 }
 static const char *station_row_name(int st, int row, Player *p, char *buf){
+    if (st==5) return case_row_name(p, row, buf);   // TROPHY CASE
+    if (st==6) return wk_row_name(row, buf);   // CHALLENGE BOARD
+    if (st==7) return bn_row_name(row, buf);   // BOUNTY BOARD
+    if (st==8){   // PHOTO BOOTH rows (feat 9; station 8 since the MALL ENLARGEMENT)
+        if (booth_stage[(int)(p-G.p)]) return "BACK TO THE BOOTH";
+        static const char *BN2[5] = { "BACKDROP", "THE HAT", "SNAP PORTRAIT", "YOUR PORTRAIT", "STEP OUT" };
+        return BN2[row%5];
+    }
     Buddy *b=&G.bud[p-G.p];
     char *q=buf;
     if (st==1){ return row<WHALE_N? WHALE_NAME[row] : "ENTER UNLOCK CODE"; }
@@ -191,12 +427,26 @@ static const char *station_row_name(int st, int row, Player *p, char *buf){
         case 4: q=sappend(q, "TEACH: "); q=sappend(q, BUD_SPEC[b->species%BUDN]); *q=0; return buf;
         case 5: q=sappend(q, "TEACH: "); q=sappend(q, BUD_MOVE3[b->species%BUDN]); *q=0; return buf;
         case 6: q=sappend(q, "TEACH: "); q=sappend(q, BUD_MOVE4[b->species%BUDN]); *q=0; return buf;
+        case 10: return "HAT TOPPER";
         case 8: q=sappend(q, "NAME: "); q=sappend(q, BUD_ELF[b->name_idx%BUD_NAMES_N]); *q=0; return buf;
         case 9: q=sappend(q, "COLOR: "); q=sappend(q, BUD_COLOR_NAME[b->color%BUD_COLORS_N]); *q=0; return buf;
         default: q=sappend(q, "CHANGE TO "); q=sappend(q, BUD_NAME[(b->species+1)%BUDN]); *q=0; return buf;
     }
 }
 static const char *station_row_right(int st, int row, Player *p, char *buf){
+    if (st==5) return case_row_right(p, row, buf);   // TROPHY CASE
+    if (st==6) return wk_row_right(row, buf);   // CHALLENGE BOARD
+    if (st==7) return bn_row_right(row, buf);   // BOUNTY BOARD
+    if (st==8){   // PHOTO BOOTH (feat 9; station 8 since the MALL ENLARGEMENT): rights the generic stage rule below would blank
+        int pi=(int)(p-G.p);
+        if (booth_stage[pi]) return "";
+        Portrait *pt2=&portrait[pi];
+        if (row==0) return PORT_BD_NAME[port_bd[pi]%PORT_BD_N];
+        if (row==1) return port_hat[pi]? "AS WORN" : "BARE";
+        if (row==2) return "FREE";
+        if (row==3) return pt2->has? PORT_BD_NAME[pt2->backdrop%PORT_BD_N] : "NONE YET";
+        return "";
+    }
     Buddy *b=&G.bud[p-G.p];
     char *q=buf;
     if (st==1){
@@ -229,13 +479,25 @@ static const char *station_row_right(int st, int row, Player *p, char *buf){
         case 4: return (b->skills&2)? "TAUGHT" : "80 XP";
         case 5: return (b->skills&4)? "TAUGHT" : "60 XP";
         case 6: return (b->skills&8)? "TAUGHT" : "120 XP";
+        case 10: return b->top_worn? TOP_NAME[b->top_worn] : "NONE";
         case 8: case 9: return "FREE";
         default: fmt_int(buf, "", BUD_PRICE[(b->species+1)%BUDN], " KG"); return buf;
     }
 }
 static const char *station_blurb(int st, int row, Player *p){
+    if (st==5) return case_row_blurb(p, row);   // TROPHY CASE
+    if (st==6) return wk_row_blurb(row);   // CHALLENGE BOARD
+    if (st==7) return bn_row_blurb(row);   // BOUNTY BOARD
     if (st==1) return row<WHALE_N? WHALE_BLURB[row]
                         : "PAID ON THE WEB? TYPE OR PASTE THE UNLOCK CODE IT GAVE YOU.";
+    if (st==8){   // PHOTO BOOTH (feat 9; station 8 since the MALL ENLARGEMENT)
+        if (booth_stage[(int)(p-G.p)]) return "THAT IS THE DAY YOU WORE IT. SNAP A NEW ONE AT THE BOOTH ANY TIME.";
+        if (row==0) return "SIX BACKDROPS, ALL STOLEN FROM PLACES YOU HAVE BLED.";
+        if (row==1) return "POSE WITH THE WHOLE ABSURD TOWER, OR BARE-HEADED AND PROUD.";
+        if (row==2) return "THE PICTURE HANGS AT THE BOOTH, AND A COPY IS YOURS TO KEEP.";
+        if (row==3) return "THE LAST PORTRAIT YOU SNAPPED, KEPT UNDER GLASS. IT NEVER FADES.";
+        return "OUT THE CURTAIN, BACK TO THE MALL FLOOR.";
+    }
     Buddy *b=&G.bud[p-G.p];
     if (st==2) return row<3? "SAFE FOREVER AND WEIGHS NOTHING - BUT NOT A HAT RECORD."
                             : "BACK ON YOUR HEAD: COUNTS AGAIN - AND AT RISK AGAIN.";
@@ -261,11 +523,36 @@ static const char *station_blurb(int st, int row, Player *p){
         case 6: return "TEACH THE FOURTH MOVE. THE BIG ONE - 55 ENERGY, NO APOLOGIES.";
         case 8: return "A NEW NAME FROM THE ELDER DAYS. FREE - NAMES WANT TO BE USED.";
         case 9: return "A NEW COAT, STANDARD OR NEON RAINBOW. FREE.";
+        case 10: return "TROPHIES FOR YOUR HAT, EARNED OUT IN THE WORLD. FIRE CYCLES WHAT YOU HAVE WON.";
         default: return "SWAP SPECIES. TRAINING, NAME AND XP CARRY OVER.";
     }
 }
 static void station_note(int pi, const char *msg){
     if (pi==G.my_id || pi==G.p2_slot) store_note(msg);
+}
+// HAT PORTRAIT BOOTH (v1.25 feat 9): port_arm is set by a SNAP and
+// consumed by the booth draw, which alone knows the frame's true
+// rectangle in the current layout — see draw_booth_panel.
+static int port_arm[MAXP];
+static void booth_snap(int pi){
+    Player *p=&G.p[pi]; Buddy *b=&G.bud[pi]; Portrait *pt2=&portrait[pi];
+    pt2->has = 1;
+    pt2->backdrop = port_bd[pi]%PORT_BD_N;
+    pt2->hat_on = port_hat[pi]? 1 : 0;
+    pt2->top_worn = p->top_worn;
+    pt2->kg = (int)p->carried;
+    pt2->stack_n = 0;
+    if (pt2->hat_on){
+        int n = p->stack_n>MAXSTACK? MAXSTACK : p->stack_n;
+        pt2->stack_n = n;
+        for (int i=0;i<n;i++){ int k=(int)p->stack[i]%4; pt2->kinds[i]=(unsigned char)(k<0? k+4 : k); }
+    }
+    pt2->species = b->species; pt2->bud_color = b->color; pt2->name_idx = b->name_idx;
+    pt2->pcolor = p->color; pt2->whale_on = p->whale_on;
+    port_arm[pi] = 1;
+    if (pi==G.my_id || pi==G.p2_slot) do_save();
+    station_note(pi, "PORTRAIT SNAPPED! IT HANGS AT THE BOOTH.");
+    sfx(11);
 }
 static void station_action(int pi, int st, int row){
     Player *p=&G.p[pi];
@@ -274,6 +561,23 @@ static void station_action(int pi, int st, int row){
     // is closed to them (Daniel, Nov 6): no second purchase, and no
     // bank run that drains the hat out from under the counting till
     if (pay_active && pay_player==pi){ station_note(pi, "THE TILL IS COUNTING YOUR CARCASSES..."); sfx(16); return; }
+    if (st==5){
+        // TROPHY CASE: a display, not a shop — FIRE admires, nothing more
+        station_note(pi, "LOOK, DON'T TOUCH. THE PLAQUES ARE FRAGILE."); sfx(6);
+        return;
+    }
+    if (st==6){
+        // CHALLENGE BOARD: also a display — progress happens out in
+        // the world, never by pressing the board (v1.25 feat 6)
+        station_note(pi, "THE BOARD IS FOR READING. THE WEEK IS FOR DOING."); sfx(6);
+        return;
+    }
+    if (st==7){
+        // BOUNTY BOARD: also a display — the claim is settled in the
+        // field the moment the named one falls (v1.25 feat 8)
+        station_note(pi, "THE BOARD IS FOR READING. THE FIELD IS FOR HUNTING."); sfx(6);
+        return;
+    }
     if (st==1){
         if (row<WHALE_N){
             if (p->whale_own & (1<<row)){
@@ -313,6 +617,36 @@ static void station_action(int pi, int st, int row){
             }
             if (p->banked<0.01f) p->banked=0;
             station_note(pi, "WITHDRAWN. BACK ON YOUR HEAD."); sfx(11);
+        }
+        return;
+    }
+    if (st==8){
+        // PHOTO BOOTH (feat 9; its own station since the MALL
+        // ENLARGEMENT). Plain station actions, no picker — a LAN
+        // guest's activate runs them here on the host like TRAIN
+        // and the wardrobe do.
+        if (booth_stage[pi]){
+            booth_stage[pi]=0; store_sel_reset(pi); sfx(6); return;   // BACK TO THE BOOTH
+        }
+        if (row==0){ port_bd[pi] = (port_bd[pi]+1)%PORT_BD_N; if (pi==G.my_id || pi==G.p2_slot) do_save(); sfx(6); }
+        else if (row==1){ port_hat[pi] = port_hat[pi]? 0 : 1; sfx(6); }
+        else if (row==2){ booth_snap(pi); }
+        else if (row==3){
+            if (portrait[pi].has){ booth_stage[pi]=1; store_sel_reset(pi); sfx(6); }
+            else { station_note(pi, "NO PORTRAIT YET - SNAP ONE FIRST."); sfx(16); }
+        }
+        else {   // STEP OUT: for a local shopper, close the panel the
+                 // way the frame's own close paths do — the lstore
+                 // flag in host co-op, the game state solo/client; a
+                 // LAN guest's panel is theirs to close (their stage
+                 // lives here).
+            booth_stage[pi]=0; store_sel_reset(pi); sfx(6);
+            if (pi==G.my_id){
+                if (G.net_mode==NET_HOST && G.p2_slot>=0) lstore[0]=0;
+                else G.state=GS_PLAY;
+                p->in_store=0; p->station=-1;
+            }
+            else if (pi==G.p2_slot){ lstore[1]=0; p->in_store=0; p->station=-1; }
         }
         return;
     }
@@ -393,6 +727,21 @@ static void station_action(int pi, int st, int row){
             b->xp -= 120; b->skills |= 8; station_note(pi, "FOURTH MOVE TAUGHT!"); sfx(11);
             return;
         }
+        if (row==10){
+            // HAT TOPPERS (feat 5): the wardrobe row — FIRE cycles
+            // NONE through the earned toppers in id order. No picker
+            // UI, so a LAN guest can use it too (their activate
+            // reaches the host like TRAIN does); the choice rides
+            // the snapshot back to their screen.
+            if (!b->top_earned){ station_note(pi, "NO TOPPERS YET - THE WORLD HOLDS THEM."); sfx(16); return; }
+            int cur = b->top_worn;
+            for (int k=0;k<TOP_N;k++){ cur = cur>=TOP_N? 0 : cur+1; if (cur==0 || (b->top_earned & TOP_BIT(cur))) break; }
+            b->top_worn = cur; p->top_worn = cur;
+            if (pi==G.my_id || pi==G.p2_slot) do_save();
+            if (cur){ char nb[32]; char *q=nb; q=sappend(q, "TOPPER ON: "); q=sappend(q, TOP_NAME[cur]); *q=0; station_note(pi, nb); }
+            else station_note(pi, "TOPPER OFF. BARE STACK.");
+            sfx(11); return;
+        }
         if (row==8 || row==9){
             if (pi!=G.my_id && pi!=G.p2_slot){ station_note(pi, "NAMES + COATS ARE CHOSEN AT THE HOST'S TABLE"); sfx(16); return; }
             if (row==8){ bud_page[pi] = b->name_idx/12; bud_stage[pi]=3; store_sel_reset(pi); station_note(pi, "A NEW NAME, THEN."); }
@@ -415,9 +764,17 @@ static void station_action(int pi, int st, int row){
 // Both the input (tap math) and the draw read the same window.
 #define WHALE_VIS 12
 static int whale_scroll[2];
+static int case_scroll[2];   // TROPHY CASE (feat 4): the same windowing, its own scroll pair
 static int whale_slot_of(int pi){ return (G.p2_slot>=0 && pi==G.p2_slot)? 1 : 0; }
 static void whale_scroll_sync(int slot, int sel, int rows){
     int *sc = &whale_scroll[slot];
+    if (sel < *sc) *sc = sel;
+    if (sel > *sc + WHALE_VIS-1) *sc = sel - (WHALE_VIS-1);
+    if (*sc > rows - WHALE_VIS) *sc = rows - WHALE_VIS;
+    if (*sc < 0) *sc = 0;
+}
+static void case_scroll_sync(int slot, int sel, int rows){
+    int *sc = &case_scroll[slot];
     if (sel < *sc) *sc = sel;
     if (sel > *sc + WHALE_VIS-1) *sc = sel - (WHALE_VIS-1);
     if (*sc > rows - WHALE_VIS) *sc = rows - WHALE_VIS;
@@ -461,13 +818,14 @@ static void station_input(int pi, int st, int up, int down, int activate){
     if (up){ *selp = (*selp + rows-1)%rows; sfx(6); }
     if (down){ *selp = (*selp + 1)%rows; sfx(6); }
     if (st==1) whale_scroll_sync(whale_slot_of(pi), *selp, rows);
+    if (st==5) case_scroll_sync(whale_slot_of(pi), *selp, rows);
     if (pi==G.my_id && IN.tapped){
         int w = G.ui_compact? 308 : STORE_W;
         int x = G.ui_compact? G.view_x0 + (G.view_w - w)/2 : STORE_X;
         if (IN.tap_x<x-6 || IN.tap_x>x+w+6 || IN.tap_y<STORE_Y-6 || IN.tap_y>STORE_Y+STORE_H+6) G.tap_close_store=1;
-        else if (st==1){
+        else if (st==1 || st==5){
             // tap math follows the SCROLLED window the draw shows
-            int sc = whale_scroll[whale_slot_of(pi)];
+            int sc = (st==1)? whale_scroll[whale_slot_of(pi)] : case_scroll[whale_slot_of(pi)];
             for (int i=sc;i<sc+WHALE_VIS && i<rows;i++){
                 int ry = MALL_ROW0 + (i-sc)*STORE_ROWH;
                 if (IN.tap_y>=ry-5 && IN.tap_y<=ry+STORE_ROWH-2){
@@ -559,7 +917,71 @@ static int bowl_frame_ri(Bowl *bw, int f){
         ri += (fr<9 && bw->rolls[ri]==10)? 1 : 2;
     return ri;
 }
+// ---------------------------------------------------------------------------
+// BUG BOWL LEAGUE (v1.25 feat 10) — a six-night season at the lanes
+// against three house rivals. Every completed non-Zen game IS the
+// player's next league night; standings are cumulative pins. The
+// rivals' scores are a pure function of (season, night, rival) via
+// hash2 — never the gameplay RNG — so they are identical on every
+// install, are posted on the card BEFORE the player bowls, and need
+// no storage. Calibration is derived from the game's own scoring
+// landmarks (all gutters 0, all open 9s ~90, all spares 150, the
+// BOWL PIN line 200): GUTTER BUG is the open-frame bowler, SPARE
+// CHANGE the spare shooter, KINGPIN above all-spares pace. A flat
+// ±30 spread, no tails. See v125-feat10-spec.md.
+// ---------------------------------------------------------------------------
+#define LG_NIGHTS 6
+#define LG_XP 50   // a season's crown: the Weekly's price for a week-sized arc
+static const char *LG_RIVAL_NAME[3] = { "KINGPIN", "SPARE CHANGE", "GUTTER BUG" };
+static const int LG_RIVAL_MEAN[3] = { 158, 128, 96 };
+static int lg_rival_score(int season, int night, int r){
+    int v = LG_RIVAL_MEAN[r&3] + (int)(hash2(season*7 + night, (r&3)*7919 + 13, 0xB0B1E5u) % 61u) - 30;
+    return v<0? 0 : v>300? 300 : v;
+}
+static int lg_rival_total(int season, int r, int nights){
+    int t=0; for (int n=0;n<nights;n++) t += lg_rival_score(season, n, r);
+    return t;
+}
+// place (1..4) of a score against the three rivals: a rival must
+// score STRICTLY more to stand above the player — ties go to the
+// player, nightly and seasonally (the house is kind).
+static int lg_place_vs(int score, int season, int night){
+    int pl=1; for (int r=0;r<3;r++) if (lg_rival_score(season, night, r) > score) pl++;
+    return pl;
+}
+static void league_finalize(int pi, Bowl *bw){
+    BowlLeague *L=&G.blg[pi];
+    if (L->season<1){ L->season=1; L->night=0; L->spins=0; }
+    // career book
+    L->games++; L->pins += bw->final; L->strikes += bw->strikes;
+    if (bw->final > L->best) L->best = bw->final;
+    // this game is night (night+1) of the season
+    int season=L->season, night=L->night;
+    L->last_score = bw->final;
+    L->last_place = lg_place_vs(bw->final, season, night);
+    L->last_night = night+1; L->last_season = season;
+    L->spins += bw->final;
+    L->night++;
+    if (L->night>=LG_NIGHTS){
+        // the season closes: cumulative pins decide, ties to the player
+        int place=1;
+        for (int r=0;r<3;r++) if (lg_rival_total(season, r, LG_NIGHTS) > L->spins) place++;
+        L->fin_place = place; L->fin_season = season;
+        if (place==1){
+            L->trophies++;
+            if (G.bud[pi].active) buddy_award_xp(pi, LG_XP);
+            else G.fs_pool[pi] += LG_XP;   // the tuition pool flushes it on adoption (the wk pattern)
+            if (pi==G.my_id || pi==G.p2_slot){ spawn_floater(G.p[pi].x, G.p[pi].y-46, "LEAGUE CHAMPION! +50 XP", COL(255,205,40)); sfx(11); }
+        }
+        L->season++; L->night=0; L->spins=0;
+    }
+    // a league night is on disk the moment it lands (the booth-snap
+    // pattern); a LAN guest's finalize runs on their own machine and
+    // persists only in their own slot's saves — the host keeps none.
+    if (G.net_mode!=NET_CLIENT && (pi==G.my_id || pi==G.p2_slot)) do_save();
+}
 static void bowl_record(Bowl *bw, int knocked){
+    if (knocked==10 && bw->pins_before==10) bw->strikes++;   // BUG BOWL LEAGUE: a strike is 10 on a full rack (tenth-frame fresh racks included)
     char m = knocked==0? '-' : (knocked==bw->pins_before? (bw->pins_before==10? 'X' : '/') : (char)('0'+knocked));
     if (bw->nrolls<21){ bw->rolls[bw->nrolls]=knocked; bw->marks[bw->nrolls]=m; bw->nrolls++; }
     int f=bw->frame;
@@ -582,6 +1004,22 @@ static void bowl_record(Bowl *bw, int knocked){
         bw->phase=5;
         bw->final = bowl_cum(bw, 9);
         if (bw->final > G.rec_bowl) G.rec_bowl = bw->final;
+        // HAT TOPPERS (feat 5): the BOWL PIN is awarded HERE, at the
+        // finalize, because the lanes keep only a house best — there
+        // is no per-player record to derive it from later. It follows
+        // the records rule (save_records): Zen sets no records, so a
+        // Zen 200 earns no pin.
+        if (bw->final>=200 && !G.zen_run){
+            int pi=(int)(bw-G.bowl); Buddy *bd=&G.bud[pi];
+            if (bd->active && !(bd->top_earned & TOP_BIT(TOP_PIN))){
+                bd->top_earned |= TOP_BIT(TOP_PIN);
+                if (pi==G.my_id || pi==G.p2_slot){ spawn_floater(G.p[pi].x, G.p[pi].y-46, "BOWL PIN EARNED!", COL(255,205,40)); sfx(11); }
+            }
+        }
+        // BUG BOWL LEAGUE (feat 10): the per-player book is kept
+        // HERE, at the same finalize, under the same records rule
+        // as the pin — Zen games are practice and move nothing.
+        if (!G.zen_run) league_finalize((int)(bw-G.bowl), bw);
     } else bw->phase=0;
 }
 static void bowl_knock(Bowl *bw, int i, float dx, float dy, float speed){
@@ -624,7 +1062,12 @@ static int bowl_axis(int pi){
 static void bowl_update(int pi, float dt){
     Bowl *bw=&G.bowl[pi];
     int act = bw->act; bw->act=0;
-    if (bw->msg_t>0) bw->msg_t-=dt;
+    // (bw->msg_t is NOT decremented here: it decays in frame() for
+    // every connected player, panel open or not — see the note there.
+    // When it ticked only inside bowl_update, closing the lanes panel
+    // within the message's 1.4-1.8s froze the countdown, and the next
+    // visit opened on a stale "FRAME 1 - YOUR THROW!" hanging over
+    // the lanes indefinitely.)
     // toppling pins fly, and can take their neighbours down with them
     for (int i=0;i<10;i++) if (bw->pft[i]>0){
         bw->pft[i]-=dt;
@@ -692,6 +1135,103 @@ static void draw_pin_shape(int x, int y, float tilt){
     disc_fill(x+tx, y-6, 3, COL(245,242,238));
     pset(x+tx-1, y-6, COL(30,30,40)); pset(x+tx+1, y-6, COL(30,30,40));   // beady bug eyes
 }
+// BUG BOWL LEAGUE (feat 10): the lanes' league card — standings and
+// tonight's posted scores, drawn in the case/board idiom (boxed
+// tables, gold headers, right-aligned numbers). Attract and
+// game-over get the full boxes; a game in progress gets one line;
+// compact (split-screen) views get the same facts as two lines.
+static void draw_league_card(int x0, int vw, int cx, int compact){
+    BowlLeague *L=&G.blg[G.store_pi];
+    int season = L->season<1? 1 : L->season;
+    int nights = L->night;   // nights completed this season
+    Bowl *bw=&G.bowl[G.store_pi];
+    if (compact){
+        int y = 97;
+        char b[96]; char *q=b;
+        if (G.zen_run){ q=sappend(q, "LEAGUE: ZEN PRACTICE - GAMES DON'T COUNT"); }
+        else { q=sappend(q, "LEAGUE S"); q=sapp_int(q, season); q=sappend(q, " NIGHT ");
+               q=sapp_int(q, nights+1); q=sappend(q, " OF 6 - YOU "); q=sapp_int(q, L->spins);
+               q=sappend(q, " - RIVALS "); q=sapp_int(q, lg_rival_total(season,0,nights));
+               q=sappend(q, "/"); q=sapp_int(q, lg_rival_total(season,1,nights));
+               q=sappend(q, "/"); q=sapp_int(q, lg_rival_total(season,2,nights)); }
+        *q=0; draw_text_center(cx, y, b, 1, COL(200,220,255));
+        if (!G.zen_run && !bw->active){
+            q=b; q=sappend(q, "TONIGHT: "); q=sapp_int(q, lg_rival_score(season,nights,0));
+            q=sappend(q, "/"); q=sapp_int(q, lg_rival_score(season,nights,1));
+            q=sappend(q, "/"); q=sapp_int(q, lg_rival_score(season,nights,2));
+            q=sappend(q, " - TARGET "); int tg=lg_rival_score(season,nights,0);
+            { int t1=lg_rival_score(season,nights,1), t2=lg_rival_score(season,nights,2); if (t1>tg) tg=t1; if (t2>tg) tg=t2; }
+            q=sapp_int(q, tg); *q=0;
+            draw_text_center(cx, y+9, b, 1, COL(255,230,170));
+        }
+        return;
+    }
+    // ---- left box: the standings + the career book
+    { int bx=x0+8, bw2=cx-122-bx, by=104, bh=136;
+      rect_fill(bx, by, bw2, bh, COL(24,20,40)); rect_line(bx, by, bw2, bh, COL(198,164,84));
+      { char b[64]; char *q=b; q=sappend(q, "THE LEAGUE - SEASON "); q=sapp_int(q, season); *q=0;
+        draw_text_center(bx+bw2/2, by+6, b, 1, COL(255,230,170)); }
+      // standings rows, cumulative pins, sorted (ties: YOU first, then rival order)
+      { const char *nm[4]; int pn[4], you[4];
+        nm[0]="YOU"; pn[0]=L->spins; you[0]=1;
+        for (int r=0;r<3;r++){ nm[r+1]=LG_RIVAL_NAME[r]; pn[r+1]=lg_rival_total(season, r, nights); you[r+1]=0; }
+        for (int i=0;i<3;i++) for (int j=i+1;j<4;j++)
+            if (pn[j]>pn[i] || (pn[j]==pn[i] && you[j] && !you[i])){
+                const char *tn=nm[i]; nm[i]=nm[j]; nm[j]=tn;
+                int tp=pn[i]; pn[i]=pn[j]; pn[j]=tp; int ty=you[i]; you[i]=you[j]; you[j]=ty; }
+        for (int i=0;i<4;i++){
+            int ry=by+20+i*12; char nb[16]; char *q=nb; q=sapp_int(q, pn[i]); *q=0;
+            u32 c = you[i]? COL(160,230,255) : i==0? COL(255,230,170) : COL(220,224,235);
+            draw_text(bx+8, ry, nm[i], 1, c);
+            draw_text(bx+bw2-8-text_w(nb,1), ry, nb, 1, c);
+        } }
+      { char b[80]; char *q=b; q=sappend(q, "CAREER: "); q=sapp_int(q, L->games);
+        q=sappend(q, L->games==1? " GAME" : " GAMES"); *q=0;
+        draw_text(bx+8, by+72, b, 1, COL(200,220,255)); }
+      { char b[80]; char *q=b; q=sappend(q, "BEST "); q=sapp_int(q, L->best);
+        q=sappend(q, " - PINS "); q=sapp_int(q, L->pins); *q=0;
+        draw_text(bx+8, by+84, b, 1, COL(200,220,255)); }
+      { char b[80]; char *q=b; q=sappend(q, "STRIKES "); q=sapp_int(q, L->strikes); *q=0;
+        draw_text(bx+8, by+96, b, 1, COL(200,220,255)); }
+      if (L->fin_season>0){
+          char b[80]; char *q=b; q=sappend(q, "SEASON "); q=sapp_int(q, L->fin_season); q=sappend(q, ": ");
+          if (L->fin_place==1) q=sappend(q, "CHAMPION!");
+          else { q=sapp_int(q, L->fin_place); q=sappend(q, " OF 4"); }
+          *q=0; draw_text(bx+8, by+110, b, 1, COL(255,230,170));
+          if (L->trophies>0){ q=b; q=sappend(q, "LEAGUE TROPHIES: "); q=sapp_int(q, L->trophies); *q=0;
+              draw_text(bx+8, by+122, b, 1, COL(255,230,170)); }
+      }
+    }
+    // ---- right box: tonight's posted card (the rivals bowl first)
+    { int bx=cx+122, bw2=(x0+vw-8)-bx, by=104, bh=88;
+      rect_fill(bx, by, bw2, bh, COL(24,20,40)); rect_line(bx, by, bw2, bh, COL(198,164,84));
+      if (G.zen_run){
+          draw_text_center(bx+bw2/2, by+6, "ZEN PRACTICE", 1, COL(255,230,170));
+          draw_text_center(bx+bw2/2, by+26, "GAMES HERE DON'T COUNT.", 1, COL(220,224,235));
+          draw_text_center(bx+bw2/2, by+38, "THE BOOK WAITS FOR", 1, COL(220,224,235));
+          draw_text_center(bx+bw2/2, by+50, "A REAL RUN.", 1, COL(220,224,235));
+      } else {
+          int tn = bw->game_over? nights : nights;   // after a close, season/night already rolled: this is the NEXT card
+          { char b[64]; char *q=b;
+            q=sappend(q, bw->game_over? "NEXT - NIGHT " : "TONIGHT - NIGHT ");
+            q=sapp_int(q, tn+1); q=sappend(q, " OF 6"); *q=0;
+            draw_text_center(bx+bw2/2, by+6, b, 1, COL(255,230,170)); }
+          { int idx[3]={0,1,2};
+            for (int i=0;i<2;i++) for (int j=i+1;j<3;j++)
+                if (lg_rival_score(season,tn,idx[j]) > lg_rival_score(season,tn,idx[i])){ int t=idx[i]; idx[i]=idx[j]; idx[j]=t; }
+            for (int i=0;i<3;i++){
+                int ry=by+20+i*12; char nb[16]; char *q=nb;
+                q=sapp_int(q, lg_rival_score(season, tn, idx[i])); *q=0;
+                draw_text(bx+8, ry, LG_RIVAL_NAME[idx[i]], 1, COL(220,224,235));
+                draw_text(bx+bw2-8-text_w(nb,1), ry, nb, 1, COL(220,224,235));
+            }
+            { char b[64]; char *q=b; int tg=lg_rival_score(season,tn,idx[0]);
+              q=sappend(q, "TARGET: "); q=sapp_int(q, tg); *q=0;
+              draw_text_center(bx+bw2/2, by+58, b, 1, COL(255,230,170));
+              draw_text_center(bx+bw2/2, by+70, "TIES GO TO YOU", 1, COL(255,230,170)); } }
+      }
+    }
+}
 static void draw_bowling(void){
     Bowl *bw=&G.bowl[G.store_pi]; Player *me=&G.p[G.store_pi];
     int x0=G.view_x0, vw=G.view_w, compact=G.ui_compact;
@@ -738,6 +1278,9 @@ static void draw_bowling(void){
         if (cum>=0){ char cb[8]; char *q=cb; q=sapp_int(q, cum); *q=0;
                      draw_text_center(fx+(fw-2)/2, sy+sh-14, cb, 1, COL(240,244,255)); }
     }
+    // BUG BOWL LEAGUE (feat 10): the league card — full boxes on the
+    // attract and game-over screens, condensed lines in compact views
+    if (compact || !bw->active || bw->game_over) draw_league_card(x0, vw, cx, compact);
     // the lane
     float KX = compact? 1.15f : 1.5f, KY = 0.49f;
     int foul = VH-54;
@@ -789,10 +1332,40 @@ static void draw_bowling(void){
         }
     }
     if (bw->msg_t>0) draw_text_center(cx, foul-108, bw->msg, 2, COL(255,214,64));
+    // BUG BOWL LEAGUE (feat 10): the night's verdict under the final
+    if (bw->game_over){
+        BowlLeague *L=&G.blg[G.store_pi];
+        if (G.zen_run) draw_text_center(cx, foul-88, "ZEN PRACTICE - NOTHING COUNTED", 1, COL(200,220,255));
+        else if (L->last_night>0){
+            char b[80]; char *q=b; q=sappend(q, "NIGHT "); q=sapp_int(q, L->last_night);
+            q=sappend(q, ": YOU "); q=sapp_int(q, L->last_score); q=sappend(q, " - ");
+            q=sappend(q, L->last_place==1? "WON THE NIGHT" : L->last_place==2? "2ND TONIGHT" : L->last_place==3? "3RD TONIGHT" : "4TH TONIGHT");
+            *q=0; draw_text_center(cx, foul-88, b, 1, COL(255,230,170));
+            if (L->last_night>=LG_NIGHTS && L->fin_season==L->last_season){
+                q=b; q=sappend(q, "SEASON "); q=sapp_int(q, L->fin_season); q=sappend(q, ": ");
+                if (L->fin_place==1) q=sappend(q, "CHAMPION! +50 XP");
+                else { q=sapp_int(q, L->fin_place); q=sappend(q, " OF 4"); }
+                *q=0; draw_text_center(cx, foul-76, b, 1, COL(255,230,170));
+            }
+        }
+    }
     if (!bw->active && G.rec_bowl>0){ char b[48]; char *q=b; q=sappend(q, "BEST GAME SO FAR: "); q=sapp_int(q, G.rec_bowl); *q=0;
         draw_text_center(cx, foul+30, b, 1, COL(200,220,255)); }
     if (bw->active && !bw->game_over && me->stack_n<=0 && bw->phase<=2)
         draw_text_center(cx, foul+30, "NO CARCASSES - GO SQUASH SOME BUGS!", 1, COL(255,140,120));
+    // BUG BOWL LEAGUE (feat 10): the night in progress, at the foul
+    // line's spare slot (the no-carcasses warning above keeps it when
+    // the bowler is empty-handed)
+    if (bw->active && !bw->game_over && me->stack_n>0){
+        BowlLeague *L=&G.blg[G.store_pi];
+        char b[80]; char *q=b;
+        if (G.zen_run) q=sappend(q, "ZEN PRACTICE - THIS GAME WON'T COUNT");
+        else { int season = L->season<1? 1 : L->season;
+               int tg=lg_rival_score(season, L->night, 0);
+               { int t1=lg_rival_score(season, L->night, 1), t2=lg_rival_score(season, L->night, 2); if (t1>tg) tg=t1; if (t2>tg) tg=t2; }
+               q=sappend(q, "LEAGUE NIGHT "); q=sapp_int(q, L->night+1); q=sappend(q, " OF 6 - TARGET "); q=sapp_int(q, tg); }
+        *q=0; draw_text_center(cx, foul+30, b, 1, COL(200,220,255));
+    }
     // the prompt line
     { const char *ak = (G.store_pi==G.my_id)? key_name(G.bind[ACT_FIRE]) : "A";
       char pb[96]; char *q=pb;
@@ -801,7 +1374,7 @@ static void draw_bowling(void){
       else if (bw->phase==1){ q=sappend(q, ak); q=sappend(q, " - LOCK THE ANGLE"); }
       else if (bw->phase==2){ q=sappend(q, ak); q=sappend(q, " - THROW!"); }
       else q=sappend(q, "ROLLING...");
-      *q=0; draw_text_center(cx, VH-20, pb, 1, COL(160,230,255)); }
+      *q=0; draw_text_center(cx, VH-12, pb, 1, COL(160,230,255)); }
 }
 
 static void draw_mall_panel(int st){
@@ -818,11 +1391,14 @@ static void draw_mall_panel(int st){
     rect_fill(x-4, y-4, w+8, h+8, OUTLINE);
     rect_fill(x, y, w, h, COL(250,244,225));
     rect_line(x+3, y+3, w-6, h-6, COL(198,164,84));
-    rect_fill(x, y, w, 32, BAND[st&3]);
+    rect_fill(x, y, w, 32, st==7? COL(96,26,26) : st==6? COL(32,58,74) : st==5? COL(96,64,24) : BAND[st&3]);
     rect_fill(x, y+31, w, 2, COL(198,164,84));
-    draw_text_center(x+w/2, y+3, MALL_STATION[st&3], 2, COL(255,226,150));
+    draw_text_center(x+w/2, y+3, MALL_STATION[st], 2, COL(255,226,150));
     { char b[96]; char *q=b;
-      if (st==1){ q=sappend(q, "PURE VANITY - $0.67 EACH - NO GAMEPLAY EFFECT"); }
+      if (st==7){ q=sappend(q, "ONE NAME AT A TIME - PAID IN WEIGHT AND WISDOM"); }
+      else if (st==6){ q=sappend(q, "THE SAME CHALLENGE FOR EVERYBODY - NEW EVERY MONDAY"); }
+      else if (st==5){ q=sappend(q, "THIS SLOT'S PLAQUES - THE FAME IS EVERYONE'S"); }
+      else if (st==1){ q=sappend(q, "PURE VANITY - $0.67 EACH - NO GAMEPLAY EFFECT"); }
       else if (st==2){ q=sappend(q, "BANKED: "); q=sapp_int(q, (int)me->banked); q=sappend(q, " KG - ON YOUR HEAD: "); q=sapp_int(q, (int)me->carried); q=sappend(q, " KG"); }
       else if (bud_stage[G.store_pi]==1 || bud_stage[G.store_pi]==3){ q=sappend(q, "NAMES OF THE ELDER DAYS - PAGE "); q=sapp_int(q, bud_page[G.store_pi]+1); q=sappend(q, " OF "); q=sapp_int(q, (BUD_NAMES_N+11)/12); }
       else if (bud_stage[G.store_pi]==2 || bud_stage[G.store_pi]==4){ q=sappend(q, "STANDARD COATS - AND ONE VERY NEON RAINBOW"); }
@@ -847,15 +1423,16 @@ static void draw_mall_panel(int st){
           draw_text_center(x+w/2, y+136, cb2, 1, COL(120,110,90)); }
         draw_text_center(x+w/2, y+176, "THE CODE IS YOUR RECEIPT - KEEP IT SAFE.", 1, COL(90,80,60));
         draw_text_center(x+w/2, y+192, "UNLOCKS LIVE IN YOUR SAVE DATA; THE CODE RESTORES THEM.", 1, COL(90,80,60));
-        draw_text_center(x+w/2, y+224, "ENTER - REDEEM     ESC - CANCEL", 1, COL(40,36,50));
+        draw_text_center(x+w/2, y+224, hint_dev()==DEV_PAD? "A - REDEEM     BACK - CANCEL" : "ENTER - REDEEM     ESC - CANCEL", 1, COL(40,36,50));
         return;
     }
     int rows = station_rows(st, me);
     int rowh = STORE_ROWH;   // Whales Only scrolls at full size now (Nov 5)
-    int wsc = 0;             // the visible window's first row (Whales Only)
+    int wsc = 0;             // the visible window's first row (Whales Only + the Trophy Case)
     if (st==1){ whale_scroll_sync(whale_slot_of(G.store_pi), sel, rows); wsc = whale_scroll[whale_slot_of(G.store_pi)]; }
+    if (st==5){ case_scroll_sync(whale_slot_of(G.store_pi), sel, rows); wsc = case_scroll[whale_slot_of(G.store_pi)]; }
     int rows_end = rows;
-    if (st==1 && rows_end > wsc+WHALE_VIS) rows_end = wsc+WHALE_VIS;
+    if ((st==1 || st==5) && rows_end > wsc+WHALE_VIS) rows_end = wsc+WHALE_VIS;
     char nb[40], rb[24];
     for (int i=wsc;i<rows_end;i++){
         int ry = MALL_ROW0 + (i-wsc)*rowh;
@@ -868,7 +1445,37 @@ static void draw_mall_panel(int st){
         }
         const char *nm = station_row_name(st, i, me, nb);
         const char *rt = station_row_right(st, i, me, rb);
-        if (G.ui_compact) draw_text(x+16, ry+5, nm, 1, COL(40,36,50));
+        if (st==5){
+            // TROPHY CASE: a plaque chip at the row's left — filled
+            // in its colour when earned, a hollow ring while it waits
+            int cid = case_row_id(me, i);
+            int hdr = (cid==CR_HDR_CAB || cid==CR_HDR_MED || cid==CR_HDR_CREW);
+            if (!hdr){
+                int ccx = x + (G.ui_compact? 14 : 17), ccy = ry + (G.ui_compact? 8 : 9), cr = G.ui_compact? 3 : 4;
+                if (case_earned(me, cid)) disc_fill(ccx, ccy, cr, case_chip_col(me, cid));
+                else circle_out(ccx, ccy, cr, COL(170,160,130));
+            }
+            if (G.ui_compact) draw_text(x+23, ry+5, nm, 1, hdr? COL(150,95,30) : COL(40,36,50));
+            else draw_text(x+28, ry+2, nm, 2, hdr? COL(150,95,30) : COL(40,36,50));
+        }
+        else if (st==6){
+            // CHALLENGE BOARD: section headers in amber, like the
+            // case's — the rows are a card and a ledger, not a shop
+            int wid = wk_row_id(i);
+            int hdr = (wid==WK_HDR_WEEK || wid==WK_HDR_LEDGER);
+            if (G.ui_compact) draw_text(x+16, ry+5, nm, 1, hdr? COL(150,95,30) : COL(40,36,50));
+            else draw_text(x+16, ry+2, nm, 2, hdr? COL(150,95,30) : COL(40,36,50));
+        }
+        else if (st==7){
+            // BOUNTY BOARD (feat 8): headers in amber, the wanted
+            // name itself in wanted-poster red
+            int bid = bn_row_id(i);
+            int hdr = (bid==BN_HDR_WANTED || bid==BN_HDR_LEDGER);
+            u32 nc = (bid==BN_BOUNTY)? COL(150,50,40) : hdr? COL(150,95,30) : COL(40,36,50);
+            if (G.ui_compact) draw_text(x+16, ry+5, nm, 1, nc);
+            else draw_text(x+16, ry+2, nm, 2, nc);
+        }
+        else if (G.ui_compact) draw_text(x+16, ry+5, nm, 1, COL(40,36,50));
         else draw_text(x+16, ry+2, nm, 2, COL(40,36,50));
         if (st==3 && (bud_stage[G.store_pi]==2 || bud_stage[G.store_pi]==4)){
             // a live swatch beside each coat — the rainbow one cycles
@@ -881,7 +1488,7 @@ static void draw_mall_panel(int st){
         if (G.ui_compact) draw_text(x+w-14-text_w(rt,1), ry+5, rt, 1, pc);
         else draw_text(x+w-14-text_w(rt,2), ry+2, rt, 2, pc);
     }
-    if (st==1 && rows>WHALE_VIS){
+    if ((st==1 || st==5) && rows>WHALE_VIS){
         // the scrollbar: a track in the panel margin, a thumb that
         // says where in the sixteen rows you are (craft menu style)
         int track_y = MALL_ROW0-2, track_h = WHALE_VIS*STORE_ROWH-4;
@@ -906,15 +1513,264 @@ static void draw_mall_panel(int st){
     else draw_text(x+14, by+2, station_blurb(st, sel, me), 1, COL(80,66,44));
     if (pay_active) draw_text_center(x+w/2, y+h-13, "COUNTING CARCASSES...", 1, COL(190,60,40));
     else if (G.store_msg_t>0) draw_text_center(x+w/2, y+h-13, G.store_msg, 1, COL(60,140,60));
-    else if (G.ui_compact) draw_text_center(x+w/2, y+h-13, "SHIELD UP - FIRE SELECTS - BACK LEAVES", 1, COL(88,76,54));
-    else if (mobile_ui()) draw_text_center(x+w/2, y+h-13, "TAP A ROW - TAP AGAIN TO SELECT - TAP OUTSIDE TO LEAVE", 1, COL(88,76,54));
-    else { char b[80]; char *q=b; q=sappend(q, "ARROWS CHOOSE - "); q=sappend(q, key_name(G.bind[ACT_FIRE]));
-           q=sappend(q, " SELECTS - "); q=sappend(q, key_name(G.bind[ACT_INTERACT])); q=sappend(q, " LEAVES");
+    else if (G.ui_compact){ if (hint_dev()==DEV_TOUCH) draw_text_center(x+w/2, y+h-13, "TAP A ROW - TAP AGAIN TO SELECT", 1, COL(88,76,54));
+        else { char b[80]; char *q=b; q=sappend(q, "SHIELD UP - "); q=sappend(q, lbla(H_FIRE)); q=sappend(q, " SELECTS - "); q=sappend(q, lbla(H_BACK)); q=sappend(q, " LEAVES");
+               draw_text_center(x+w/2, y+h-13, b, 1, COL(88,76,54)); } }
+    else if (hint_dev()==DEV_TOUCH) draw_text_center(x+w/2, y+h-13, "TAP A ROW - TAP AGAIN TO SELECT - TAP OUTSIDE TO LEAVE", 1, COL(88,76,54));
+    else { char b[96]; char *q=b; q=sappend(q, lbla(H_MOVE)); q=sappend(q, " CHOOSE - "); q=sappend(q, lbla(H_CONFIRM));
+           q=sappend(q, " SELECTS - "); q=sappend(q, lbla(H_INT)); q=sappend(q, " LEAVES");
+           draw_text_center(x+w/2, y+h-13, b, 1, COL(88,76,54)); }
+}
+// ---------------------------------------------------------------------------
+// HAT PORTRAIT BOOTH (v1.25 feature 9) — its own station (index 8)
+// since the MALL ENLARGEMENT: booth_stage 0 is the booth (live pose),
+// 1 is YOUR PORTRAIT (the frozen record under glass). The pose follows
+// render_over's game-over portrait: a synthetic hero Player, the
+// camera inverted at zoom 1 so it stands at an exact screen spot.
+// The buddy is the REAL G.bud[pi] with its pose fields borrowed and
+// restored — never a temp Buddy: draw_buddy's coat path does owner
+// arithmetic on the real struct (the feat-5 warning).
+// ---------------------------------------------------------------------------
+static void booth_frame_rect(int *fx, int *fy, int *fw, int *fh){
+    if (G.ui_compact){
+        int x = G.view_x0 + (G.view_w - 308)/2;
+        *fx = x+12; *fy = STORE_Y+40; *fw = 138; *fh = 196;
+    } else {
+        *fx = STORE_X+16; *fy = STORE_Y+42; *fw = 208; *fh = 260;
+    }
+}
+static void booth_speckle(int x, int y, int w, int h, int n, int seed, u32 c){
+    for (int i=0;i<n;i++){
+        int px = x + (int)(hash_f(i, seed, 7)*(float)(w-1));
+        int py = y + (int)(hash_f(i, seed, 13)*(float)(h-1));
+        pset(px, py, c);
+    }
+}
+static void draw_booth_backdrop(int bd, int x, int y, int w, int h){
+    int fl = y + h*2/3;   // the floor line: subjects stand on it
+    if (bd==0){           // PLAZA DAWN
+        for (int i=0;i<5;i++) rect_fill(x, y+i*(fl-y)/5, w, (fl-y)/5+1, col_shade(COL(250,196,148), 1.0f - i*0.05f));
+        disc_fill(x+w-34, y+26, 11, COL(255,240,190)); disc_fill(x+w-34, y+26, 7, COL(255,248,215));
+        rect_fill(x, fl, w, y+h-fl, COL(178,150,104));
+        booth_speckle(x, fl+3, w, h-(fl-y)-5, 26, 41, COL(150,124,84));
+    } else if (bd==1){    // FROZEN CACHE
+        rect_fill(x, y, w, fl-y, COL(198,226,246));
+        rect_fill(x, fl, w, y+h-fl, COL(238,246,252));
+        ellipse_fill(x+26, fl+8, 30, 7, COL(248,252,255)); ellipse_fill(x+w-30, fl+10, 36, 8, COL(248,252,255));
+        booth_speckle(x, y+2, w, fl-y-4, 46, 97, COL(255,255,255));
+        booth_speckle(x, fl+2, w, h-(fl-y)-4, 16, 55, COL(214,232,244));
+    } else if (bd==2){    // KERNEL BADLANDS
+        rect_fill(x, y, w, fl-y, COL(226,124,66));
+        rect_fill(x, y, w, (fl-y)/2, COL(240,160,84));
+        disc_fill(x+36, y+30, 14, COL(232,74,52)); disc_fill(x+36, y+30, 10, COL(244,110,66));
+        rect_fill(x, fl, w, y+h-fl, COL(122,62,44));
+        for (int i=0;i<4;i++){ int cx0 = x + 10 + (int)(hash_f(i, 3, 71)*(float)(w-20));
+            line_thick(cx0, fl+6+i*5, cx0+9, fl+8+i*5, 1, COL(84,40,30)); }
+        booth_speckle(x, y+3, w, fl-y-6, 20, 23, COL(255,205,120));
+    } else if (bd==3){    // CABLE JUNGLE
+        rect_fill(x, y, w, fl-y, COL(34,86,54));
+        rect_fill(x, y, w, (fl-y)/3, COL(24,64,40));
+        rect_fill(x, fl, w, y+h-fl, COL(44,96,58));
+        for (int i=0;i<6;i++){ int vx = x + 8 + (int)(hash_f(i, 8, 31)*(float)(w-16));
+            line_thick(vx, y, vx+2, y + (fl-y)*2/3, 2, COL(22,58,36));
+            disc_fill(vx+2, y + (fl-y)*2/3, 3, COL(72,150,84)); }
+        for (int i=0;i<22;i++){ int rx = x + (int)(hash_f(i, 17, 43)*(float)(w-8)), ry = y + (int)(hash_f(i, 17, 59)*(float)(fl-y-10));
+            line_thick(rx, ry, rx+2, ry+6, 1, COL(160,210,235)); }
+    } else if (bd==4){    // THE BUG MALL
+        rect_fill(x, y, w, fl-y, COL(84,58,38));
+        rect_fill(x, y+10, w, 2, COL(198,164,84));
+        rect_fill(x, fl, w, y+h-fl, COL(124,94,62));
+        for (int sx2=x+8; sx2<x+w-4; sx2+=13) rect_fill(sx2, fl+2, 1, y+h-fl-4, COL(106,80,52));
+        { int cw2 = w/2; rect_fill(x+(w-cw2)/2, fl, cw2, y+h-fl, COL(148,46,50));
+          rect_line(x+(w-cw2)/2, fl, cw2, y+h-fl, COL(198,164,84)); }
+        disc_fill(x+24, y+22, 6, COL(255,196,96)); disc_fill(x+w-24, y+22, 6, COL(255,196,96));
+    } else {              // WALK OF FAME
+        rect_fill(x, y, w, h, COL(16,14,28));
+        glow_ellipse(x+w/2, fl-16, w/3, 26, COL(255,190,80), 44);
+        rect_fill(x, fl, w, y+h-fl, COL(24,20,38));
+        for (int i=0;i<30;i++){
+            int px = x + (int)(hash_f(i, 29, 3)*(float)(w-2)), py = y + (int)(hash_f(i, 29, 9)*(float)(h-2));
+            pset(px, py, WOF_COL[i%6]); pset(px+1, py, WOF_COL[i%6]);
+        }
+    }
+}
+// draw the pose (backdrop, subjects, plate) inside the frame's
+// inner rect; snap=1 renders the frozen record, snap=0 the live crew
+static void draw_booth_pose(int pi, int snap, int fx, int fy, int fw, int fh){
+    Player *p=&G.p[pi]; Buddy *b=&G.bud[pi]; Portrait *pt2=&portrait[pi];
+    int bd = snap? pt2->backdrop : port_bd[pi];
+    int hat_on = snap? pt2->hat_on : port_hat[pi];
+    int top = snap? pt2->top_worn : p->top_worn;
+    int kg = snap? pt2->kg : (int)p->carried;
+    int stack_n = snap? pt2->stack_n : p->stack_n;
+    int name_idx = snap? pt2->name_idx : b->name_idx;
+    int plate_h = G.ui_compact? 24 : 30;
+    int ix = fx+4, iy = fy+4, iw = fw-8, ih = fh-8;
+    draw_booth_backdrop(bd%PORT_BD_N, ix, iy, iw, ih);
+    int feet_y = iy + ih - plate_h - 3;
+    int vw2 = G.view_w>0? G.view_w : VW, vh2 = G.view_h>0? G.view_h : VH;
+    float pz = G.zoom; G.zoom = 1.0f;
+    // the DEV, wearing the hat (render_over's synthetic hero)
+    { static Player hero;
+      smemset(&hero, 0, sizeof(hero));
+      hero.connected=1; hero.alive=1; hero.name[0]=0;
+      hero.color = snap? pt2->pcolor : p->color;
+      hero.weapon=0; hero.owned[0]=1; hero.hp=hero.maxhp=100;
+      hero.aim=-0.5f; hero.walk_ph=0; hero.idle_t=1.0f;
+      hero.whale_on = snap? pt2->whale_on : p->whale_on;
+      hero.whale_own = p->whale_own;
+      hero.top_worn = top;
+      if (hat_on){
+          hero.stack_n = stack_n;
+          if (snap){ for (int i=0;i<stack_n;i++) hero.stack[i] = (float)pt2->kinds[i] + 0.5f; hero.carried = (float)kg; }
+          else { for (int i=0;i<stack_n;i++) hero.stack[i] = p->stack[i]; hero.carried = p->carried; }
+      }
+      int hcx = ix + iw/2 - (b->active? 15 : 0);
+      hero.x = G.camx + (float)(hcx - G.view_x0 - vw2/2);
+      hero.y = G.camy + (float)(feet_y - 14 - G.view_y0 - vh2/2);
+      draw_player_sprite(&hero); }
+    // the buddy, on the real struct with borrowed pose fields
+    if (b->active){
+        float bx0=b->x, by0=b->y, ba0=b->aim, bw0=b->walk_ph, bm0=b->mv_t, bl0=b->lunge_t, bh0=b->hurt_t;
+        int bo0=b->on_wall, bf0=b->fainted, bs0=b->species, bc0=b->color, wn0=p->whale_on;
+        if (snap){ b->species = pt2->species; b->color = pt2->bud_color; p->whale_on = pt2->whale_on; }
+        b->fainted=0; b->on_wall=-1; b->mv_t=0; b->lunge_t=0; b->hurt_t=0; b->walk_ph=0;
+        b->aim = 1.35f;
+        int bcx = ix + iw/2 + 31;
+        b->x = G.camx + (float)(bcx - G.view_x0 - vw2/2);
+        b->y = G.camy + (float)(feet_y - 8 - G.view_y0 - vh2/2);
+        draw_buddy(b);
+        b->x=bx0; b->y=by0; b->aim=ba0; b->walk_ph=bw0; b->mv_t=bm0; b->lunge_t=bl0; b->hurt_t=bh0;
+        b->on_wall=bo0; b->fainted=bf0; b->species=bs0; b->color=bc0; p->whale_on=wn0;
+    }
+    G.zoom = pz;
+    // the plate: name and hat weight, lettered on the frame
+    rect_fill(ix, iy+ih-plate_h, iw, plate_h, COL(20,16,30));
+    rect_fill(ix, iy+ih-plate_h, iw, 1, COL(198,164,84));
+    if (G.ui_compact){
+        draw_text_center(ix+iw/2, iy+ih-plate_h+3, BUD_ELF[name_idx%BUD_NAMES_N], 1, COL(255,214,90));
+        if (!hat_on) draw_text_center(ix+iw/2, iy+ih-plate_h+13, "BARE-HEADED AND PROUD", 1, COL(240,236,220));
+        else if (!stack_n) draw_text_center(ix+iw/2, iy+ih-plate_h+13, "NO HAT - YET", 1, COL(240,236,220));
+        else { char bb[24]; char *q=bb; q=sapp_int(q, kg); q=sappend(q, " KG OF HAT"); *q=0;
+               draw_text_center(ix+iw/2, iy+ih-plate_h+13, bb, 1, COL(240,236,220)); }
+    } else {
+        draw_text_center(ix+iw/2, iy+ih-plate_h+3, BUD_ELF[name_idx%BUD_NAMES_N], 2, COL(255,214,90));
+        if (!hat_on) draw_text_center(ix+iw/2, iy+ih-plate_h+20, "BARE-HEADED AND PROUD", 1, COL(240,236,220));
+        else if (!stack_n) draw_text_center(ix+iw/2, iy+ih-plate_h+20, "NO HAT - YET", 1, COL(240,236,220));
+        else { char bb[24]; char *q=bb; q=sapp_int(q, kg); q=sappend(q, " KG OF HAT"); *q=0;
+               draw_text_center(ix+iw/2, iy+ih-plate_h+20, bb, 1, COL(240,236,220)); }
+    }
+}
+static void draw_booth_panel(void){
+    Player *me=&G.p[G.store_pi];
+    int snap = booth_stage[G.store_pi];
+    int sel = (G.p2_slot>=0 && G.store_pi==G.p2_slot)? G.store_sel2 : G.store_sel;
+    int y=STORE_Y, h=STORE_H;
+    int w = G.ui_compact? 308 : STORE_W;
+    int x = G.ui_compact? G.view_x0 + (G.view_w - w)/2 : STORE_X;
+    if (!G.ui_compact) rect_fill(0, 0, VW, VH, COL(16,14,28));
+    else rect_fill(G.view_x0, G.view_y0, G.view_w, G.view_h>0? G.view_h : VH, COL(16,14,28));
+    rect_fill(x, y+1, w+8, h+8, COL(8,6,14));
+    rect_fill(x-4, y-4, w+8, h+8, OUTLINE);
+    rect_fill(x, y, w, h, COL(250,244,225));
+    rect_line(x+3, y+3, w-6, h-6, COL(198,164,84));
+    // pose first, words and chrome over it — the game-over rule:
+    // a tall hat never hides a word, and never smears the frame
+    int fx, fy, fw, fh; booth_frame_rect(&fx, &fy, &fw, &fh);
+    rect_fill(fx, fy, fw, fh, COL(24,20,36));
+    draw_booth_pose(G.store_pi, snap, fx, fy, fw, fh);
+    rect_line(fx, fy, fw, fh, COL(198,164,84));
+    rect_line(fx+2, fy+2, fw-4, fh-4, COL(150,118,52));
+    { int nb2 = 7;   // the marquee bulbs, chasing like the Walk of Fame's own
+      for (int i=0;i<nb2;i++){
+          int bx = fx + (i+1)*fw/(nb2+1), by = fy+1;
+          u32 bc = WOF_COL[((int)(G.anim_t*8)+i)%6];
+          disc_fill(bx, by, G.ui_compact? 3 : 4, COL(10,9,18));
+          disc_fill(bx, by, G.ui_compact? 2 : 3, bc);
+          pset(bx-1, by-1, COL(255,255,255));
+      } }
+    { const char *bdn = PORT_BD_NAME[(snap? portrait[G.store_pi].backdrop : port_bd[G.store_pi])%PORT_BD_N];
+      int cw2 = text_w(bdn, 1) + 8;
+      rect_fill(fx+6, fy+6, cw2, 11, COL(20,16,30));
+      draw_text(fx+10, fy+8, bdn, 1, COL(255,240,205)); }
+    // the hand-off: this draw is showing the pose in THIS layout —
+    // record the frame's true rect for the shell, exactly once
+    if (!snap && port_arm[G.store_pi]){
+        G.port_req_x=fx; G.port_req_y=fy; G.port_req_w=fw; G.port_req_h=fh;
+        scpy(G.port_req_name, BUD_ELF[portrait[G.store_pi].name_idx%BUD_NAMES_N], 16);
+        G.port_req_kg = portrait[G.store_pi].kg;
+        G.port_req_serial++;
+        port_arm[G.store_pi]=0;
+    }
+    // the band, over whatever hat spilled upward
+    rect_fill(x, y, w, 32, COL(120,66,32));
+    rect_fill(x, y+31, w, 2, COL(198,164,84));
+    draw_text_center(x+w/2, y+3, MALL_STATION[8], 2, COL(255,226,150));
+    draw_text_center(x+w/2, y+20, snap? "YOUR PORTRAIT - UNDER GLASS, NEVER FADING" : "THE PHOTO BOOTH - SAY 'BUGS!'", 1, COL(255,240,205));
+    if (!G.ui_compact)
+    { const char *sh = "SHIELD: UP";
+      draw_text(x+w-14-text_w(sh,1), y+8, sh, 1, COL(150,220,255)); }
+    // the control rows, in the standard row positions so the
+    // standard input (keys, pad, y-band taps) needs no new math
+    int rows = station_rows(8, me);
+    int rx = fx+fw+14, rw = x+w-8-rx;
+    char nb[48], rb[32];
+    for (int i=0;i<rows;i++){
+        int ry = MALL_ROW0 + i*STORE_ROWH;
+        if (i%2==0) rect_fill(rx, ry-2, rw, STORE_ROWH, COL(243,236,210));
+        rect_line(rx, ry-2, rw, STORE_ROWH, COL(228,219,192));
+        if (i==sel){
+            rect_fill(rx, ry-2, rw, STORE_ROWH, COL(255,224,138));
+            rect_fill(rx, ry-2, 3, STORE_ROWH, COL(190,60,40));
+            rect_line(rx, ry-2, rw, STORE_ROWH, COL(198,164,84));
+        }
+        const char *nm = station_row_name(8, i, me, nb);
+        const char *rt = station_row_right(8, i, me, rb);
+        if (G.ui_compact){ draw_text(rx+6, ry+5, nm, 1, COL(40,36,50)); draw_text(rx+rw-6-text_w(rt,1), ry+5, rt, 1, COL(150,95,30)); }
+        else {
+            // the booth's column is narrower than the full panel, and
+            // the drawn advance runs wider than text_w admits — fit
+            // the pair with a safety factor, stepping the value down
+            // first and the name second, rather than collide
+            int rsize = (text_w(rt,2)*23/20 > rw - text_w(nm,2)*23/20 - 20)? 1 : 2;
+            int nsize = (text_w(nm,2)*23/20 + text_w(rt,rsize)*23/20 + 20 > rw)? 1 : 2;
+            draw_text(rx+8, ry + (nsize==2? 2 : 5), nm, nsize, COL(40,36,50));
+            draw_text(rx+rw-8-text_w(rt,rsize), ry + (rsize==2? 2 : 5), rt, rsize, COL(150,95,30));
+        }
+    }
+    if (!snap && !G.ui_compact){
+        // the booth's own little sign, under the controls
+        draw_text_center(rx+rw/2, MALL_ROW0 + 5*STORE_ROWH + 26, "ONE POSE, KEPT FOREVER.", 1, COL(150,95,30));
+        draw_text_center(rx+rw/2, MALL_ROW0 + 5*STORE_ROWH + 40, "THE CAMERA NEVER BLINKS.", 1, COL(150,95,30));
+    }
+    int by = y+h-40;
+    int bh = G.ui_compact? 24 : 20;
+    rect_fill(x+8, by-4, w-16, bh, COL(240,232,205));
+    rect_line(x+8, by-4, w-16, bh, COL(198,164,84));
+    rect_fill(x+8, by-4, 3, bh, COL(190,60,40));
+    if (G.ui_compact){
+        char bb[128]; scpy(bb, station_blurb(8, sel, me), 128);
+        int cut=-1; for (int i=0; bb[i] && i<34; i++) if (bb[i]==' ') cut=i;
+        if (cut>0 && bb[cut+1]){ bb[cut]=0;
+            draw_text(x+14, by+1, bb, 1, COL(80,66,44));
+            draw_text(x+14, by+12, bb+cut+1, 1, COL(80,66,44));
+        } else draw_text(x+14, by+2, bb, 1, COL(80,66,44));
+    }
+    else draw_text(x+14, by+2, station_blurb(8, sel, me), 1, COL(80,66,44));
+    if (pay_active) draw_text_center(x+w/2, y+h-13, "COUNTING CARCASSES...", 1, COL(190,60,40));
+    else if (G.store_msg_t>0) draw_text_center(x+w/2, y+h-13, G.store_msg, 1, COL(60,140,60));
+    else if (G.ui_compact){ if (hint_dev()==DEV_TOUCH) draw_text_center(x+w/2, y+h-13, "TAP A ROW - TAP AGAIN TO SELECT", 1, COL(88,76,54));
+        else { char b[80]; char *q=b; q=sappend(q, "SHIELD UP - "); q=sappend(q, lbla(H_FIRE)); q=sappend(q, " SELECTS - "); q=sappend(q, lbla(H_BACK)); q=sappend(q, " LEAVES");
+               draw_text_center(x+w/2, y+h-13, b, 1, COL(88,76,54)); } }
+    else if (hint_dev()==DEV_TOUCH) draw_text_center(x+w/2, y+h-13, "TAP A ROW - TAP AGAIN TO SELECT - TAP OUTSIDE TO LEAVE", 1, COL(88,76,54));
+    else { char b[96]; char *q=b; q=sappend(q, lbla(H_MOVE)); q=sappend(q, " CHOOSE - "); q=sappend(q, lbla(H_CONFIRM));
+           q=sappend(q, " SELECTS - "); q=sappend(q, lbla(H_INT)); q=sappend(q, " LEAVES");
            draw_text_center(x+w/2, y+h-13, b, 1, COL(88,76,54)); }
 }
 static void draw_active_panel(void){
     if (G.store_station==0) draw_store_panel();
     else if (G.store_station==4) draw_bowling();
+    else if (G.store_station==8) draw_booth_panel();
     else draw_mall_panel(G.store_station);
 }
 
@@ -1191,6 +2047,7 @@ static void render_slots(void){
     { int y=278;
       if (G.slots_sel==3){ rect_fill(0, y-4, VW, 19, COL(255,205,40)); draw_text_center(VW/2, y, "BACK", 2, COL(30,26,44)); }
       else draw_text_center(VW/2, y, "BACK", 2, COL(235,238,245)); }
+    draw_text_center(VW/2, 306, hint_dev()==DEV_PAD? "STICK/DPAD CHOOSE - A OPENS" : (hint_dev()==DEV_TOUCH? "TAP A SLOT TO OPEN IT" : "ARROWS CHOOSE - SPACE OPENS"), 1, COL(140,150,170));
     if (G.store_msg_t>0) draw_text_center(VW/2, 330, G.store_msg, 1, COL(255,130,130));
 }
 static void menu_input(void){
@@ -1239,14 +2096,20 @@ static void move_key_str(char *b){
 static void render_help(void){
     rect_fill(0,0,VW,VH,COL(24,22,38));
     ui_panel(10, 8, VW-20, VH-16);   // v1.24: the shared panel chrome behind the pages
-    draw_text_center(VW/2, 18, help_page? "THE MALL + MORE" : "HOW TO PLAY", 3, COL(255,214,64));
-    if (help_page){
+    draw_text_center(VW/2, 18, help_page==2? "MORE" : help_page==1? "THE MALL" : "HOW TO PLAY", 3, COL(255,214,64));
+    if (help_page==1){
+        // THE MALL (v1.25 MALL ENLARGEMENT): the old page 2 carried
+        // 44 lines at 9 px from y=44 — its last line landed at
+        // y~431, off the 360-tall panel, and BIG HATS + WALLS were
+        // unreadable. The help is three pages now; this page ends
+        // at y~305, clear of the footer.
         const char *lines2[] = {
             "DIFFICULTY: EASY IS CLASSIC; THE REST MAKE BUGS MEANER.",
             "",
-            "THE BUG BOUNTY IS NOW THE BUG MALL - PRESS INTERACT",
-            "AT THE HUT TO STEP INSIDE. FIVE SHOPS, ONE BUILDING:",
-            "THE COUNTER SELLS EVERYTHING IT ALWAYS DID.",
+            "THE OLD BUG BOUNTY HUT IS NOW THE BUG MALL - PRESS",
+            "INTERACT AT THE HUT TO STEP INSIDE. NINE STOPS,",
+            "ONE BUILDING: THE COUNTER SELLS EVERYTHING IT",
+            "ALWAYS DID.",
             "",
             "WHALES ONLY SELLS PURE VANITY FOR REAL MONEY: GOLD",
             "CARCASSES, A CAPE, RAIN THAT FALLS ONLY ON YOU. NO",
@@ -1255,15 +2118,44 @@ static void render_help(void){
             "THE BUG BANK KEEPS CARCASSES SAFE - THEY WEIGH NOTHING,",
             "NEVER COUNT TO YOUR HEAVIEST HAT, MOVE IN FRACTIONS.",
             "",
-            "BUG BOWL: THE MALL'S OWN LANES. ONE CARCASS A BALL,",
-            "FULL BOWLING SCORING: STRIKES, SPARES, TENTH FRAME.",
+            "THE TROPHY CASE PAST THE BANZAI GATE GATHERS EVERY",
+            "PLAQUE, MEDAL AND RECORD YOU EARN. LOOK, DON'T TOUCH.",
             "",
+            "THE CHALLENGE BOARD AT THE WEST END POSTS ONE WEEKLY",
+            "CHALLENGE - THE SAME FOR EVERYBODY. FINISH IT FOR 50 XP.",
+            "",
+            "THE BOUNTY BOARD ON THE WEST WALL POSTS ONE NAME AT A",
+            "TIME: A NAMED ELITE, THREE TIMES TOO BIG, THAT CRAWLS",
+            "OUT WHEN IT PLEASES - MORE OFTEN FAR FROM HOME. THE",
+            "BOARD SAYS WHERE IT WAS LAST SEEN, AND AN AMBER ARROW",
+            "POINTS THE WAY WHILE IT IS LOOSE. BRING IT DOWN AND",
+            "THE KILLER BANKS ITS WEIGHT AGAIN, WITH 25 XP FOR",
+            "EVERY BUDDY. IF IT SLIPS AWAY, THE CONTRACT STANDS.",
+            "",
+            "BUG BOWL: THE MALL'S OWN LANES. ONE CARCASS A BALL,",
+            "STRIKES, SPARES, TENTH FRAME - AND A HOUSE LEAGUE.",
+        };
+        for (int i=0;i<(int)(sizeof(lines2)/sizeof(lines2[0]));i++)
+            draw_text_center(VW/2, 44+i*9, lines2[i], 1, COL(225,230,240));
+        if (pad_mode()) draw_text_center(VW/2, VH-24, "B - PAGE 3: MORE", 1, COL(160,230,255));
+        else if (mobile_ui()) draw_text_center(VW/2, VH-24, "TAP - PAGE 3: MORE", 1, COL(160,230,255));
+        else { char b[48]; char *q=b; q=sappend(q, key_name(G.bind[ACT_INTERACT])); q=sappend(q, " - PAGE 3: MORE");
+          draw_text_center(VW/2, VH-24, b, 1, COL(160,230,255)); }
+        return;
+    }
+    if (help_page==2){
+        const char *lines3[] = {
             "BANZAI BUDDIES: A PUPPY, KITTY, MOOSE, PLATYPUS, PET",
             "ROCK OR KITCHEN SINK FIGHTS AT YOUR SIDE, EARNING XP",
             "FROM KILLS AND ASSISTS TO SPEND ON TRAINING + MOVES.",
-            "YOU PICK ITS NAME (ELDER DAYS, MOSTLY) AND ITS COAT -",
-            "NEON RAINBOW INCLUDED. BUDDIES ONLY FAINT - NEVER DIE -",
+            "YOU PICK ITS NAME AND ITS COAT - NEON RAINBOW",
+            "INCLUDED.",
             "AND THE SHOP REVIVES THEM - TRAINED ONES COST MORE.",
+            "",
+            "THE PHOTO BOOTH STANDS ALONE ON THE MALL'S WEST",
+            "SIDE: YOU, YOUR BUDDY AND THE HAT, POSED AGAINST",
+            "SIX BACKDROPS. SNAPS ARE FREE, THE PORTRAIT HANGS",
+            "AT THE BOOTH, AND A COPY IS YOURS TO KEEP.",
             "",
             "BIG HATS ARE FRAGILE: ONCE YOU CARRY 50 KG OR MORE,",
             "EVERY BITE SHAKES A CARCASS LOOSE. DON'T GET GREEDY.",
@@ -1273,8 +2165,8 @@ static void render_help(void){
             "WALL MAY NEVER CLOSE INTO A LOOP - THE LOOP MUST",
             "STAY OPEN.",
         };
-        for (int i=0;i<(int)(sizeof(lines2)/sizeof(lines2[0]));i++)
-            draw_text_center(VW/2, 44+i*9, lines2[i], 1, COL(225,230,240));
+        for (int i=0;i<(int)(sizeof(lines3)/sizeof(lines3[0]));i++)
+            draw_text_center(VW/2, 44+i*9, lines3[i], 1, COL(225,230,240));
         if (pad_mode()) draw_text_center(VW/2, VH-24, "B - BACK TO MENU", 1, COL(160,230,255));
         else if (mobile_ui()) draw_text_center(VW/2, VH-24, "TAP - BACK TO MENU", 1, COL(160,230,255));
         else { char b[48]; char *q=b; q=sappend(q, key_name(G.bind[ACT_INTERACT])); q=sappend(q, " - BACK TO MENU");
@@ -1340,67 +2232,140 @@ static void render_help(void){
     };
     for (int i=0;i<(int)(sizeof(lines)/sizeof(lines[0]));i++)
         draw_text_center(VW/2, 48+i*10, lines[i], 1, COL(225,230,240));
-    if (pad_mode()) draw_text_center(VW/2, VH-24, "B - PAGE 2: THE MALL + MORE", 1, COL(160,230,255));
-    else if (mobile_ui()) draw_text_center(VW/2, VH-24, "TAP - PAGE 2: THE MALL + MORE", 1, COL(160,230,255));
-    else { char b[48]; char *q=b; q=sappend(q, key_name(G.bind[ACT_INTERACT])); q=sappend(q, " - PAGE 2: THE MALL + MORE");
+    if (pad_mode()) draw_text_center(VW/2, VH-24, "B - PAGE 2: THE MALL", 1, COL(160,230,255));
+    else if (mobile_ui()) draw_text_center(VW/2, VH-24, "TAP - PAGE 2: THE MALL", 1, COL(160,230,255));
+    else { char b[48]; char *q=b; q=sappend(q, key_name(G.bind[ACT_INTERACT])); q=sappend(q, " - PAGE 2: THE MALL");
       draw_text_center(VW/2, VH-24, b, 1, COL(160,230,255)); }
 }
 // ---------------------------------------------------------------------------
-// Settings: rebind every action. Bindings live in G.bind, are derived into
-// semantic input centrally (derive_input), and persist in the save file.
+// Settings: COMFORT rows (v1.25 feature 2) over the key bindings.
+// Bindings live in G.bind, are derived into semantic input centrally
+// (derive_input), and persist in the save file — the comfort four
+// (music volume, SFX volume, mute, screen shake) persist in the
+// same global blob beside them. Rows: 0..3 comfort, 4..17 bindings,
+// 18 RESET DEFAULTS (which resets the comfort four too). One
+// geometry helper serves the renderer and the tap handler so the
+// two cannot drift apart.
 // ---------------------------------------------------------------------------
-#define SET_ROWS 15   // 14 actions + RESET DEFAULTS
+#define SET_ROWS 19   // 4 comfort + 14 actions + RESET DEFAULTS
+#define SET_BIND0 4   // first key-binding row
+static int set_row_y(int i){
+    if (i<SET_BIND0) return 54 + i*15;
+    return 134 + (i-SET_BIND0)*13;
+}
+static void comfort_changed(int row){
+    // feedback at the NEW level: a click for the SFX row itself, and
+    // one as mute lifts, so the player hears the game come back
+    if (row==1 || (row==2 && !G.mute_all)) sfx(1);
+    do_save();
+}
+static void comfort_adjust(int row, int dir){   // LEFT/RIGHT: volumes clamp, toggles flip
+    if (row==0){ G.vol_music+=dir; if (G.vol_music<0) G.vol_music=0; if (G.vol_music>10) G.vol_music=10; }
+    else if (row==1){ G.vol_sfx+=dir; if (G.vol_sfx<0) G.vol_sfx=0; if (G.vol_sfx>10) G.vol_sfx=10; }
+    else if (row==2){ G.mute_all ^= 1; }
+    else { G.shake_on ^= 1; if (!G.shake_on) G.shake=0; }   // settle the screen the moment it flips off
+    comfort_changed(row);
+}
+static void comfort_bump(int row){              // SELECT / re-tap: volumes cycle, toggles flip
+    if (row==0){ G.vol_music = G.vol_music>=10? 0 : G.vol_music+1; }
+    else if (row==1){ G.vol_sfx = G.vol_sfx>=10? 0 : G.vol_sfx+1; }
+    else if (row==2){ G.mute_all ^= 1; }
+    else { G.shake_on ^= 1; if (!G.shake_on) G.shake=0; }
+    comfort_changed(row);
+}
+static void settings_reset(void){
+    bind_defaults(G.bind);
+    G.vol_music=10; G.vol_sfx=10; G.mute_all=0; G.shake_on=1;
+    do_save();
+}
 static void settings_input(void){
     if (G.set_capture){
         // the next physical key pressed becomes the binding (ESC cancels)
         if (g_raw_edges){
             if (raw_edge(PK_ESC)) G.set_capture=0;
             else for (int pk=0;pk<PK_COUNT;pk++) if ((g_raw_edges>>pk)&1){
-                G.bind[G.set_sel]=pk; G.set_capture=0; do_save(); break;
+                G.bind[G.set_sel-SET_BIND0]=pk; G.set_capture=0; do_save(); break;
             }
         }
         return;
     }
     if (IN.menu_up) G.set_sel=(G.set_sel+SET_ROWS-1)%SET_ROWS;
     if (IN.menu_down) G.set_sel=(G.set_sel+1)%SET_ROWS;
+    if (G.set_sel<SET_BIND0){
+        // adjust on the LOSSLESS edges (the same raw_edge stream the
+        // capture below reads, plus the pad-edge snapshot): the
+        // held-mask key_edges would merge fast repeat taps into one
+        // step — the shell latches key releases ~120 ms, so a quick
+        // second tap never drops the held bit in between.
+        int ladj = raw_edge(PK_LEFT) || raw_edge(G.bind[ACT_LEFT]) || ((IN.pad_edges>>ACT_LEFT)&1);
+        int radj = raw_edge(PK_RIGHT) || raw_edge(G.bind[ACT_RIGHT]) || ((IN.pad_edges>>ACT_RIGHT)&1);
+        if (ladj) comfort_adjust(G.set_sel, -1);
+        else if (radj) comfort_adjust(G.set_sel, +1);
+    }
     if (IN.tapped){
-        for (int i=0;i<SET_ROWS;i++){ int ry=70+i*16;
-            if (IN.tap_y>=ry-3 && IN.tap_y<=ry+13){
-                if (i==G.set_sel && i<14) G.set_capture=1; else G.set_sel=i;
+        for (int i=0;i<SET_ROWS;i++){ int ry=set_row_y(i);
+            if (IN.tap_y>=ry-3 && IN.tap_y<=ry+10){
+                if (i==G.set_sel){
+                    if (i<SET_BIND0) comfort_bump(i);
+                    else if (i<SET_ROWS-1) G.set_capture=1;
+                    else settings_reset();
+                } else G.set_sel=i;
                 return;
             }
         }
     }
     if (IN.esc_pressed || IN.interact_pressed){ G.state=GS_MENU; return; }
     if (IN.select_pressed){
-        if (G.set_sel<14) G.set_capture=1;
-        else { bind_defaults(G.bind); do_save(); }
+        if (G.set_sel<SET_BIND0) comfort_bump(G.set_sel);
+        else if (G.set_sel<SET_ROWS-1) G.set_capture=1;
+        else settings_reset();
     }
 }
 static void render_settings(void){
     rect_fill(0,0,VW,VH,COL(24,22,38));
-    ui_panel(104, 8, 432, 310);   // v1.24: the shared panel chrome behind the bindings
-    draw_text_center(VW/2, 14, "SETTINGS", 3, COL(255,214,64));
-    draw_text_center(VW/2, 44, "KEY BINDINGS - ARROWS CHOOSE, SPACE REBINDS", 1, COL(160,230,255));
-    for (int i=0;i<SET_ROWS;i++){
-        int ry=70+i*16;
+    ui_panel(104, 4, 432, 330);   // v1.24 panel chrome, grown to hold the comfort rows
+    draw_text_center(VW/2, 10, "SETTINGS", 3, COL(255,214,64));
+    draw_text_center(VW/2, 38, hint_dev()==DEV_PAD? "STICK/DPAD CHOOSE - LEFT/RIGHT ADJUSTS - A SELECTS" : (hint_dev()==DEV_TOUCH? "TAP A ROW - TAP AGAIN TO CHANGE IT" : "ARROWS CHOOSE - LEFT/RIGHT ADJUSTS - SPACE REBINDS"), 1, COL(160,230,255));
+    { static const char *CN[4] = { "MUSIC VOLUME", "SOUND FX VOLUME", "MUTE ALL", "SCREEN SHAKE" };
+      for (int i=0;i<SET_BIND0;i++){
+        int ry=set_row_y(i);
         int sel = (i==G.set_sel);
-        if (sel) rect_fill(120, ry-3, 400, 15, COL(255,205,40));
+        if (sel) rect_fill(120, ry-3, 400, 14, COL(255,205,40));
         u32 tc = sel? COL(30,26,44) : COL(235,238,245);
-        if (i<14){
-            draw_text(150, ry, act_name(i), 1, tc);
-            const char *kn = (sel && G.set_capture)? "PRESS A KEY..." : key_name(G.bind[i]);
+        draw_text(150, ry, CN[i], 1, tc);
+        if (i<2){
+            int v = i==0? G.vol_music : G.vol_sfx;
+            for (int b=0;b<10;b++){
+                u32 bc;
+                if (b<v) bc = sel? COL(30,26,44) : (G.mute_all? COL(120,116,130) : COL(255,205,40));
+                else bc = sel? COL(150,138,100) : COL(70,66,90);
+                rect_fill(356+b*13, ry+1, 10, 7, bc);
+            }
+        } else {
+            const char *val = i==2? (G.mute_all? "ON" : "OFF") : (G.shake_on? "ON" : "OFF");
+            draw_text(490-text_w(val,1), ry, val, 1, tc);
+        }
+      } }
+    draw_text_center(VW/2, 120, "KEY BINDINGS", 1, COL(255,214,64));
+    for (int i=SET_BIND0;i<SET_ROWS;i++){
+        int ry=set_row_y(i);
+        int sel = (i==G.set_sel);
+        if (sel) rect_fill(120, ry-2, 400, 13, COL(255,205,40));
+        u32 tc = sel? COL(30,26,44) : COL(235,238,245);
+        if (i<SET_ROWS-1){
+            draw_text(150, ry, act_name(i-SET_BIND0), 1, tc);
+            const char *kn = (sel && G.set_capture)? "PRESS A KEY..." : key_name(G.bind[i-SET_BIND0]);
             draw_text(490-text_w(kn,1), ry, kn, 1, tc);
         } else {
             draw_text(150, ry, "RESET DEFAULTS", 1, tc);
-            draw_text(490-text_w("WASD + E F P",1), ry, "WASD + E F P", 1, tc);
+            draw_text(490-text_w("WASD + SPACE E F P SHIFT",1), ry, "WASD + SPACE E F P SHIFT", 1, tc);
         }
     }
     if (G.set_capture)
-        draw_text_center(VW/2, 330, "PRESS ANY KEY FOR THE HIGHLIGHTED ACTION - ESC CANCELS", 1, COL(255,240,150));
-    else
-        draw_text_center(VW/2, 330, "GAMEPAD: STICK/DPAD MOVE - A FIRE - B INTERACT - X WALL - START PAUSE", 1, COL(140,150,170));
-    { char b[80]; char *q=b; q=sappend(q, key_name(G.bind[ACT_INTERACT]));
+        draw_text_center(VW/2, 344, "PRESS ANY KEY FOR THE HIGHLIGHTED ACTION - ESC CANCELS", 1, COL(255,240,150));
+    else if (pad_mode())
+        draw_text_center(VW/2, 344, "GAMEPAD: STICK/DPAD MOVE - A FIRE - B INTERACT - X WALL - START PAUSE", 1, COL(140,150,170));
+    else { char b[80]; char *q=b; q=sappend(q, key_name(G.bind[ACT_INTERACT]));
       q=sappend(q, " - BACK TO MENU (ARROW KEYS ALWAYS WORK FOR MOVING)");
       draw_text_center(VW/2, 344, b, 1, COL(140,150,170)); }
 }
@@ -1427,12 +2392,12 @@ static void draw_controls_panel(int vx, int vy, int vw2, int vh2, int ctx){
     if (ctx<0 || ctx>8) ctx = 0;
     const char *act[10]; const char *btn[10]; int n=0;
     static char mv[40], spr[8], pau[8], btnstore[10][24];
-    if (pad_mode()) scpy(mv, "STICK / DPAD", 40);
-    else if (mobile_ui()) scpy(mv, G.touch_ctl? "LEFT STICK" : "DRAG", 40);
+    if (hint_dev()==DEV_PAD) scpy(mv, "STICK / DPAD", 40);
+    else if (hint_dev()==DEV_TOUCH) scpy(mv, G.touch_ctl? "LEFT STICK" : "DRAG", 40);
     else move_key_str(mv);
-    scpy(spr, pad_mode()? "LT" : key_name(G.bind[ACT_SPRINT]), 8);
-    scpy(pau, pad_mode()? "START" : key_name(G.bind[ACT_PAUSE]), 8);
-    const char *back = pad_mode()? "START" : (mobile_ui()? "THE MALL DOOR" : "ESC");
+    scpy(spr, hint_dev()==DEV_PAD? "LT" : key_name(G.bind[ACT_SPRINT]), 8);
+    scpy(pau, lbla(H_PAUSE), 8);
+    const char *back = hint_dev()==DEV_PAD? "START" : (hint_dev()==DEV_TOUCH? "THE MALL DOOR" : "ESC");
     // ROW copies the button label NOW: key_name() returns a shared
     // static buffer, so storing its pointer across calls would leave
     // every row showing the LAST key looked up (INTERACT read as F).
@@ -1443,10 +2408,10 @@ static void draw_controls_panel(int vx, int vy, int vw2, int vh2, int ctx){
         CTL_ROW("FIRE", lbl_fire());
         CTL_ROW("INTERACT", lbl_int());
         CTL_ROW("THROW A WALL", lbl_wall());
-        CTL_ROW("WEAPONS", pad_mode()? "LB / RB" : (mobile_ui()? "TAP THE CHIPS" : "1 - 5"));
+        CTL_ROW("WEAPONS", hint_dev()==DEV_PAD? "LB / RB" : (hint_dev()==DEV_TOUCH? "TAP THE CHIPS" : "1 - 5"));
         CTL_ROW("BACKFIRE BEAN", lbl_bean());
-        if (!mobile_ui()) CTL_ROW("SPRINT", spr);
-        if (!mobile_ui()) CTL_ROW("PAUSE MENU", pau);
+        if (hint_dev()!=DEV_TOUCH) CTL_ROW("SPRINT", spr);
+        if (hint_dev()!=DEV_TOUCH) CTL_ROW("PAUSE MENU", pau);
         break;
       case 5:
         CTL_ROW("POSITION", mv);
@@ -1484,10 +2449,10 @@ static void draw_controls_panel(int vx, int vy, int vw2, int vh2, int ctx){
         CTL_ROW("LEAVE", back);
         break;
       case 8:
-        CTL_ROW("SELECT / ORDER", mobile_ui()? "TAP" : "CLICK / TAP");
-        CTL_ROW("SELECT ALL OF A TYPE", "DOUBLE-TAP A UNIT");
-        CTL_ROW("BUILD / TRAIN", "TAP THE BOTTOM BAR");
-        CTL_ROW("PAN THE CAMERA", "DRAG / ARROW KEYS");
+        CTL_ROW("SELECT / ORDER", lbla(H_POINT));
+        CTL_ROW("SELECT ALL OF A TYPE", hint_dev()==DEV_PAD? "A TWICE ON A UNIT" : (hint_dev()==DEV_TOUCH? "DOUBLE-TAP A UNIT" : "DOUBLE-CLICK A UNIT"));
+        CTL_ROW("BUILD / TRAIN", hint_dev()==DEV_PAD? "A ON THE BOTTOM BAR" : (hint_dev()==DEV_TOUCH? "TAP THE BOTTOM BAR" : "CLICK THE BOTTOM BAR"));
+        CTL_ROW("PAN THE CAMERA", hint_dev()==DEV_PAD? "STICK" : (hint_dev()==DEV_TOUCH? "DRAG" : "DRAG / ARROW KEYS"));
         CTL_ROW("LEAVE", back);
         break;
       default:
@@ -1526,8 +2491,31 @@ static void render_pause(void){
     }
     draw_text_center(VW/2+3, 104+3, "PAUSED", 4, COL(10,8,20));
     draw_text_center(VW/2, 104, "PAUSED", 4, COL(255,214,64));
-    { static const char *rows[3] = { "CONTINUE", "CONTROLS", "SAVE + QUIT TO TITLE" };
-      for (int i=0;i<3;i++){
+    // WEEKLY CHALLENGE (v1.25 feature 6): the week's standing as a
+    // plain line between the title and the rows — deliberately NOT
+    // a row (First Shift's skip-row contract keeps indices sacred).
+    if (G.wk_week!=0 && G.net_mode!=NET_CLIENT){
+        char b[64]; char *q=b; q=sappend(q, "WEEKLY: ");
+        int t,tg; wk_challenge(G.wk_week, &t, &tg);
+        q=sappend(q, WK_NAME[t]);
+        if (G.wk_done_week==G.wk_week) q=sappend(q, " - DONE!");
+        else { q=sappend(q, " - "); q=sapp_int(q, wk_progress()); q=sappend(q, "/"); q=sapp_int(q, tg); }
+        *q=0;
+        draw_text_center(VW/2, 150, b, 1, COL(170,200,220));
+    }
+    // NAMED ELITES (v1.25 feature 8): while the named one is loose,
+    // the pause menu says so — a state line under the weekly one,
+    // never a row (the skip-row indices stay sacred here too)
+    if (G.bn_live && G.net_mode!=NET_CLIENT){
+        char bb[80]; char *q=bb;
+        q=sappend(q, "BOUNTY: "); q=sappend(q, ELITE_NAME[bn_name_idx(G.bn_serial)]);
+        q=sappend(q, " IS LOOSE IN ");
+        q=sappend(q, (G.bn_live_reg>=0 && G.bn_live_reg<NREGIONS)? REGION_NAME[G.bn_live_reg] : "?"); *q=0;
+        draw_text_center(VW/2, 163, bb, 1, COL(255,205,110));
+    }
+    { static const char *rows[4] = { "CONTINUE", "CONTROLS", "SAVE + QUIT TO TITLE", "SKIP FIRST SHIFT" };
+      int nrows = G.fs_state==1? 4 : 3;   // v1.25: the skip row exists only while the First Shift chain is active
+      for (int i=0;i<nrows;i++){
           int y=176+i*26;
           if (i==G.pause_sel){ rect_fill(0, y-4, VW, 19, COL(255,205,40)); draw_text_center(VW/2, y, rows[i], 2, COL(30,26,44)); }
           else draw_text_center(VW/2, y, rows[i], 2, COL(235,238,245));
@@ -1555,6 +2543,7 @@ static void render_over(void){
         hero.color=me->color; hero.weapon=0; hero.owned[0]=1;
         hero.hp=hero.maxhp=100; hero.aim=-0.6f; hero.walk_ph=0;
         hero.whale_on=me->whale_on; hero.whale_own=me->whale_own;
+        hero.top_worn=me->top_worn;   // HAT TOPPERS (feat 5): the portrait wears the trophy it died in, too
         hero.stack_n=over_stack_n;
         for (int i=0;i<over_stack_n;i++) hero.stack[i]=over_stack[i];
         hero.carried=over_carried;
@@ -1587,8 +2576,8 @@ static void render_over(void){
       q=sappend(q, "ALL-TIME BEST HAT: "); q=sappend(q, G.rec_name); q=sappend(q, " ");
       q=sapp_int(q, (int)G.rec_hat); q=sappend(q, " KG");
       draw_text_fit(238, y+8, 272, b, 1, COL(150,200,255)); }
-    if (mobile_ui()) draw_text_center(VW/2, 258, "TAP - BACK TO MENU", 1, COL(255,240,150));
-    else { char b[48]; char *q=b; q=sappend(q, key_name(G.bind[ACT_FIRE])); q=sappend(q, " - BACK TO MENU");
+    if (hint_dev()==DEV_TOUCH) draw_text_center(VW/2, 258, "TAP - BACK TO MENU", 1, COL(255,240,150));
+    else { char b[48]; char *q=b; q=sappend(q, lbla(H_FIRE)); q=sappend(q, " - BACK TO MENU");
       draw_text_center(VW/2, 258, b, 1, COL(255,240,150)); }
 #ifdef PLAT_WASM
     // (the share buttons under the canvas speak for themselves —
@@ -1751,7 +2740,7 @@ static void render_hud_compact(Player *p, int vx, int vy, int vw2, int vh2){
            *q++='.'; *q++=(char)('0'+((int)(G.threat*10)%10)); *q=0;
            draw_text(vx+12, vy+82, b, 1, COL(255,150,90)); }
     if (!p->alive) draw_text_center(vx+vw2/2, vy+vh2/2-8, "DOWN", 2, COL(255,90,80));
-    else { char pb[64]; const char *pr = interact_prompt(p, pb, (G.p2_slot>=0 && p==&G.p[G.p2_slot])? 1:0);
+    else { char pb[64]; const char *pr = interact_prompt(p, pb, 0);   // v1.25: each half names its own player's control (the view pass set the device context)
            if (pr) draw_text_center_fit(vx+vw2/2, vy+vh2-22, vw2-16, pr, 1, COL(255,240,180)); }
 }
 static void render_hud_mini(Player *p, int vx, int vy, int vw2){
@@ -1831,6 +2820,7 @@ static void coop_render(float dt){
         G.camx=(vcamx[0]+vcamx[1])*0.5f; G.camy=(vcamy[0]+vcamy[1])*0.5f;
         G.zoom = vzoom[0]<vzoom[1]? vzoom[0] : vzoom[1];
         G.view_pi=G.my_id; G.cam_lock=1;
+        g_dev_ctx = dev_of(G.my_id);
         render_world();
         G.cam_lock=0;
         render_hud();
@@ -1858,12 +2848,14 @@ static void coop_render(float dt){
         G.view_x0=rx[v]; G.view_w=rw[v]; G.view_y0=ry[v]; G.view_h=rh[v];
         G.camx=vcamx[v]; G.camy=vcamy[v]; G.zoom=vzoom[v];
         G.view_pi = v? G.p2_slot : G.my_id; G.cam_lock=1;
+        g_dev_ctx = dev_of(G.view_pi);   // v1.25: each split view labels its own player's device
         int bwv = G.bud[G.view_pi].in_bw;
         if (bwv) bw_render(G.view_pi); else render_world();
         G.cam_lock=0;
         if (bwv){ /* Banzai World draws its own card and hints */ }
         else if (lstore[v] && rw[v]>=316){
             G.store_pi = v? G.p2_slot : G.my_id;
+            g_dev_ctx = dev_of(G.store_pi);
             G.store_station = lstation[v];
             G.ui_compact=1;
             draw_active_panel();
@@ -1919,10 +2911,10 @@ static void coop_frame(float dt){
         else if (IN.select_pressed || IN.enter_pressed) bw_gate_pick(G.my_id);
         else if (IN.esc_pressed || IN.pause_pressed){ bwgate[G.my_id]=0; sfx(6); }
     }
-    // P1 at a cabinet panel: same deal, two rows
+    // P1 at a cabinet panel: same deal (three rows at the unlocked CASTLE panel — feat 7)
     if (arcgate[G.my_id]){
         me->cur_keys=0;
-        if (IN.menu_up || IN.menu_down){ arcgate_sel[G.my_id] = (arcgate_sel[G.my_id]+1)%2; sfx(6); }
+        if (IN.menu_up || IN.menu_down){ arcgate_sel[G.my_id] = (arcgate_sel[G.my_id]+1)%arc_gate_rows(G.my_id); sfx(6); }
         if (IN.tapped){ int vx,vy,vw2,vh2; p1_view_rect(&vx,&vy,&vw2,&vh2); arc_gate_tap(G.my_id, vx, vy, vw2, vh2); }
         else if (IN.select_pressed || IN.enter_pressed) arc_gate_pick(G.my_id);
         else if (IN.esc_pressed || IN.pause_pressed){ arcgate[G.my_id]=0; sfx(6); }
@@ -1943,7 +2935,7 @@ static void coop_frame(float dt){
             // the till is counting YOUR carcasses: the panel stays
             // open until it finishes (Daniel, Nov 6)
             if (pay_active && pay_player==G.my_id){ store_note("THE TILL IS COUNTING - ONE MOMENT"); sfx(16); G.tap_close_store=0; }
-            else { lstore[0]=0; me->in_store=0; me->station=-1; G.tap_close_store=0; bud_stage[G.my_id]=0; }
+            else { lstore[0]=0; me->in_store=0; me->station=-1; G.tap_close_store=0; bud_stage[G.my_id]=0; booth_stage[G.my_id]=0; }
         }
     } else if (IN.interact_pressed && me->alive && downed_near(me)){
         try_revive(G.my_id);
@@ -1970,7 +2962,7 @@ static void coop_frame(float dt){
     // P2 at a cabinet panel
     if (arcgate[G.p2_slot]){
         p2->cur_keys=0;
-        if (p2up || p2down){ arcgate_sel[G.p2_slot] = (arcgate_sel[G.p2_slot]+1)%2; sfx(6); }
+        if (p2up || p2down){ arcgate_sel[G.p2_slot] = (arcgate_sel[G.p2_slot]+1)%arc_gate_rows(G.p2_slot); sfx(6); }
         if (act2_edge(ACT_FIRE)) arc_gate_pick(G.p2_slot);
         else if (act2_edge(ACT_INTERACT) || act2_edge(ACT_ESC)){ arcgate[G.p2_slot]=0; sfx(6); }
     }
@@ -1994,7 +2986,7 @@ static void coop_frame(float dt){
         p2->cur_keys=0;
         station_input(G.p2_slot, lstation[1], p2up, p2down, act2_edge(ACT_FIRE));
         if (act2_edge(ACT_INTERACT) || act2_edge(ACT_ESC)){
-            if (!(pay_active && pay_player==G.p2_slot)){ lstore[1]=0; p2->in_store=0; p2->station=-1; bud_stage[G.p2_slot]=0; }
+            if (!(pay_active && pay_player==G.p2_slot)){ lstore[1]=0; p2->in_store=0; p2->station=-1; bud_stage[G.p2_slot]=0; booth_stage[G.p2_slot]=0; }
         }
     } else if (act2_edge(ACT_INTERACT) && p2->alive && downed_near(p2)){
         try_revive(G.p2_slot);
@@ -2020,7 +3012,7 @@ static void coop_frame(float dt){
         return;
     }
     update_sim(dt);
-    if (G.shake>0) G.shake -= dt*6;
+    if (G.shake>0){ G.shake -= dt*6; if (G.shake<0) G.shake=0; }
     if (G.state==GS_OVER) render_over();
     else coop_render(dt);
     if (G.net_mode==NET_HOST){
@@ -2040,6 +3032,10 @@ static void game_init(void){
     G.my_id=0;
     G.p2_slot=-1; G.view_w=VW; G.view_y0=0; G.view_h=VH;
     bind_defaults(G.bind);
+    // COMFORT defaults (v1.25 feature 2): full volume, unmuted,
+    // shake on — a save that carries the lines overrides these in
+    // the load below; a save from before the feature keeps them.
+    G.vol_music=10; G.vol_sfx=10; G.mute_all=0; G.shake_on=1;
     load_records_and_check_save();
     if (G.slot<1 || G.slot>3) G.slot=1;
     probe_slots();
@@ -2056,15 +3052,21 @@ static void derive_input(float dt){
     u64 pulse = IN.pulse; IN.pulse = 0;
     g_raw_edges = IN.edges_in | pulse | (IN.raw & ~prev_raw);
     IN.edges_in = 0;
-    // last-device stamps (see pad_mode): any pad action — held or
-    // edged, either player's pad — counts as gamepad use; any
-    // physical key (or a touch, which renders keyboard-style labels
-    // through the mobile branches) counts as keyboard use.
+    // last-device stamps (see pad_mode / dev_local): P1's pad actions —
+    // held or edged — count as gamepad use; any physical key OR the
+    // mouse counts as keyboard-class use (a desktop player is a
+    // keyboard+mouse player); touch entry points stamp touch_last in
+    // platform.c. P2's pad (act2) deliberately does NOT stamp here:
+    // P2's device is structurally the gamepad (see dev_of), and its
+    // presses must not flip P1's labels on a split screen. (Until
+    // v1.25 the key stamp also fired on the sticky touch_seen flag,
+    // so one touch made the keyboard stamp "now" forever and the pad
+    // could never win again on a touch-capable machine.)
     IN.dev_t += dt;
-    if (IN.act_held || IN.act_edges || IN.act2_held || IN.act2_edges) IN.pad_last = IN.dev_t;
+    if (IN.act_held || IN.act_edges) IN.pad_last = IN.dev_t;
     { float m=0; for (int i=0;i<4;i++){ float a=IN.pad_ax[i]; if (a<0) a=-a; if (a>m) m=a; }
       if (m>0.18f) IN.pad_last = IN.dev_t; }   // a stick pushed past the cursor deadzone is pad use too, even below the digital threshold
-    if (IN.raw || g_raw_edges || IN.touch_seen) IN.key_last = IN.dev_t;
+    if (IN.raw || g_raw_edges || IN.mdown || IN.mclicked) IN.key_last = IN.dev_t;
     int k=0;
     if (raw_dn(G.bind[ACT_UP])    || raw_dn(PK_UP)    || (IN.act_held>>ACT_UP&1))    k|=K_UP;
     if (raw_dn(G.bind[ACT_DOWN])  || raw_dn(PK_DOWN)  || (IN.act_held>>ACT_DOWN&1))  k|=K_DOWN;
@@ -2088,10 +3090,21 @@ static void derive_input(float dt){
     IN.bean_key = raw_edge(26+6) || ((IN.act_edges>>ACT_BEAN)&1);   // the 6 key (digits are PK 26..35) or the pad's Y button
     IN.weapon_cycle = ((IN.act_edges>>ACT_WNEXT)&1)? 1 : ((IN.act_edges>>ACT_WPREV)&1)? -1 : 0;
     // menu navigation: arrow edges, synthesized auto-repeat while held
-    // (identical repeat timing in every build), gamepad edges
+    // (identical repeat timing in every build), gamepad edges.
+    // The initial delay is 0.50s — the standard key-repeat delay, and
+    // it must stay comfortably above a deliberate tap's PERCEIVED
+    // hold: the web shell's keyup latch adds a 120ms tail, so a
+    // 250ms tap's nominal perceived hold was 370ms — only ~10ms
+    // under the old 0.38s delay, and the latch's free-running
+    // release timer slipped far past it under load (probe-proven in
+    // the v1.25 E2E pass: the repeat fired up to 200ms after the
+    // physical keyup, stepping menus twice). The shell's latch tail
+    // is now frame-gated (overshoot at most one frame past the
+    // 120ms tail), and 0.50s keeps a wide margin on every backend;
+    // the 0.09s repeat cadence after the first repeat is unchanged.
     IN.menu_up=0; IN.menu_down=0;
-    if (raw_edge(PK_UP) || ((IN.act_edges>>ACT_UP)&1)){ IN.menu_up=1; menu_rep_dir=-1; menu_rep_t=0.38f; }
-    else if (raw_edge(PK_DOWN) || ((IN.act_edges>>ACT_DOWN)&1)){ IN.menu_down=1; menu_rep_dir=1; menu_rep_t=0.38f; }
+    if (raw_edge(PK_UP) || ((IN.act_edges>>ACT_UP)&1)){ IN.menu_up=1; menu_rep_dir=-1; menu_rep_t=0.50f; }
+    else if (raw_edge(PK_DOWN) || ((IN.act_edges>>ACT_DOWN)&1)){ IN.menu_down=1; menu_rep_dir=1; menu_rep_t=0.50f; }
     else if (menu_rep_dir!=0 && (raw_dn(PK_UP) || raw_dn(PK_DOWN))){
         menu_rep_t -= dt;
         if (menu_rep_t<=0){
@@ -2102,6 +3115,7 @@ static void derive_input(float dt){
     } else menu_rep_dir=0;
     prev_raw = IN.raw;
     IN.pad_edges = IN.act_edges;   // a snapshot for late readers (WAR!'s pad cursor) — act_edges itself is consumed below
+    IN.pad2_edges = IN.act2_edges;   // the same snapshot for pad 2 (v1.25 feat 13)
     IN.act_edges = 0;   // consumed
 }
 
@@ -2135,6 +3149,7 @@ void frame(void){
     G.anim_t += dt;
     if (G.store_msg_t>0) G.store_msg_t--;
     derive_input(dt);
+    g_dev_ctx = -1;   // v1.25: hint labels default to the local player's device each frame
     G.view_pi = G.my_id>=0? G.my_id : 0;   // split passes override per view
     touch_update(dt);
     update_audio(dt);
@@ -2151,8 +3166,8 @@ void frame(void){
     case GS_HELP:
         if (IN.esc_pressed) G.state=GS_MENU;
         else if (IN.interact_pressed || IN.select_pressed || IN.tapped){
-            help_page ^= 1;   // first press: page two. second: back to the menu
-            if (!help_page) G.state=GS_MENU;
+            help_page++;   // three pages now (v1.25 MALL ENLARGEMENT): HOW TO PLAY -> THE MALL -> MORE -> menu
+            if (help_page>2){ help_page=0; G.state=GS_MENU; }
         }
         render_help(); break;
     case GS_PAUSE:
@@ -2162,20 +3177,23 @@ void frame(void){
         }
         else if (IN.esc_pressed || IN.pause_pressed || act2_edge(ACT_PAUSE) || act2_edge(ACT_ESC)) G.state=GS_PLAY;
         else {
-            if (IN.menu_up) G.pause_sel = (G.pause_sel+2)%3;
-            if (IN.menu_down) G.pause_sel = (G.pause_sel+1)%3;
+            int nrows = G.fs_state==1? 4 : 3;   // v1.25: matches render_pause's rows
+            if (IN.menu_up) G.pause_sel = (G.pause_sel+nrows-1)%nrows;
+            if (IN.menu_down) G.pause_sel = (G.pause_sel+1)%nrows;
             if (IN.tapped){
-                for (int i=0;i<3;i++){ int y=176+i*26;
+                for (int i=0;i<nrows;i++){ int y=176+i*26;
                     if (IN.tap_y>=y-6 && IN.tap_y<=y+17){
                         if (i==2 && G.pause_sel!=2) G.pause_sel=2;    // first tap arms quit
                         else if (i==0) G.state=GS_PLAY;
                         else if (i==1) G.pause_ctl=1;
+                        else if (i==3){ fs_skip(); G.state=GS_PLAY; }
                         else pause_save_quit();
                         break; } }
             }
             else if (IN.select_pressed || IN.interact_pressed){
                 if (G.pause_sel==0) G.state=GS_PLAY;
                 else if (G.pause_sel==1) G.pause_ctl=1;
+                else if (G.pause_sel==3){ fs_skip(); G.state=GS_PLAY; }
                 else pause_save_quit();
             }
         }
@@ -2198,7 +3216,7 @@ void frame(void){
                 draw_demo_scene();
                 rect_fill(0, 140, VW, 60, COL(20,18,36));
                 draw_text_center(VW/2, 158, "CONNECTING TO HOST...", 2, COL(255,214,64));
-                draw_text_center(VW/2, 184, pad_mode()? "BACK - CANCEL" : "ESC - CANCEL", 1, COL(190,200,220));
+                draw_text_center(VW/2, 184, hint_dev()==DEV_PAD? "BACK - CANCEL" : (hint_dev()==DEV_TOUCH? "TAP - CANCEL" : "ESC - CANCEL"), 1, COL(190,200,220));
                 if (IN.esc_pressed){ plat_net_stop(); G.net_mode=NET_OFF; G.state=GS_MENU; }
                 break;
             }
@@ -2263,7 +3281,7 @@ void frame(void){
             }
             if (G.state==GS_PLAY && arcgate[G.my_id]){
                 me->cur_keys=0;
-                if (IN.menu_up || IN.menu_down){ arcgate_sel[G.my_id] = (arcgate_sel[G.my_id]+1)%2; sfx(6); }
+                if (IN.menu_up || IN.menu_down){ arcgate_sel[G.my_id] = (arcgate_sel[G.my_id]+1)%arc_gate_rows(G.my_id); sfx(6); }
                 if (IN.tapped) arc_gate_tap(G.my_id, 0, 0, VW, VH);
                 else if (IN.select_pressed || IN.enter_pressed) arc_gate_pick(G.my_id);
                 else if (IN.esc_pressed || IN.pause_pressed){ arcgate[G.my_id]=0; sfx(6); }
@@ -2306,13 +3324,13 @@ void frame(void){
                 // never be finished). Esc still backs out.
                 if (IN.esc_pressed || (IN.interact_pressed && !(G.store_station==1 && whale_code_mode[G.my_id])) || G.tap_close_store){
                     if (pay_active && pay_player==G.my_id){ store_note("THE TILL IS COUNTING - ONE MOMENT"); sfx(16); G.tap_close_store=0; }
-                    else { G.state=GS_PLAY; me->in_store=0; me->station=-1; G.tap_close_store=0; bud_stage[G.my_id]=0; whale_code_mode[G.my_id]=0; }
+                    else { G.state=GS_PLAY; me->in_store=0; me->station=-1; G.tap_close_store=0; bud_stage[G.my_id]=0; booth_stage[G.my_id]=0; whale_code_mode[G.my_id]=0; }
                 }
             }
             update_sim(dt);
             G.camx += (me->x - G.camx)*(dt*6>1?1:dt*6);
             G.camy += (me->y - G.camy)*(dt*6>1?1:dt*6);
-            if (G.shake>0) G.shake -= dt*6;
+            if (G.shake>0){ G.shake -= dt*6; if (G.shake<0) G.shake=0; }
             if (G.state==GS_STORE) render_store();
             else if (G.state==GS_OVER) render_over();
             else if (G.bud[G.my_id].in_bw) bw_render(G.my_id);
@@ -2339,6 +3357,17 @@ void frame(void){
         }
         break;
     }
+    // BUG BOWL announcements decay in real time for every connected
+    // player, whether or not their lanes panel is open (v1.25 E2E
+    // fix): bowl_update only ticks while a player stands at the
+    // lanes, so a message set just before the panel closed used to
+    // freeze mid-countdown and greet the next visit as a stale
+    // "FRAME 1" over the lanes. The announcement's moment is 1.4-1.8s
+    // of game time, wherever the player goes meanwhile.
+    for (int i=0;i<MAXP;i++) if (G.p[i].connected && G.bowl[i].msg_t>0) G.bowl[i].msg_t-=dt;
+    fs_update(dt);   // v1.25: the First Shift chain polls here so solo, co-op and host all advance it exactly once per frame
+    wk_update(dt);   // v1.25 feat 6: the weekly poll rides the same tail — rollover check, then completion
+    bn_update(dt);   // v1.25 feat 8: the bounty poll rides the same tail — cooldown, claim settle, live scan
     // v1.24: MODE-TRANSITION FADE — a purely cosmetic veil at the
     // render tail. When the SCENE changes (menu <-> run, entering or
     // leaving the mall / arcade, a Banzai World mode switch), a dark
@@ -2357,6 +3386,9 @@ void frame(void){
       if (fade_t>0){ fade_t -= dt; if (fade_t<0) fade_t=0;
           int fa = (int)(165.0f*fade_t/0.22f);
           if (fa>0) blend_rect(0, 0, VW, VH, COL(6,5,12), fa); } }
+    fs_draw_prompt();   // v1.25: the First Shift prompt bar + marker, over the veil, under nothing else
+    wk_draw_flash();   // v1.25 feat 6: the weekly banner, stacked just above the First Shift bar
+    bn_draw_hud();   // v1.25 feat 8: the bounty tracker + claim banner, stacked above the weekly flash
     // clear one-frame input edges
     IN.act2_edges=0;   // pad-2 edges live exactly one frame, like P1's
     IN.mclicked=0; IN.rclicked=0; IN.wall_pressed=0; IN.interact_pressed=0;

@@ -47,7 +47,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   await call('dbg_tp', 0, 80); await sleep(150);
   await key('KeyE', 300);
   ok((await call('dbg_mall')) === 1, 'entered the mall');
-  ok(await walkTo(225, -6108, 14), 'walked to the buddies counter');
+  ok(await walkTo(315, -6148, 14), 'walked to the buddies counter');
   for (let i = 0; i < 6; i++) await call('dbg_feed');   // 60 kg: a rock's price
 
   // adopt the rock: species -> AEGNOR -> NATURAL

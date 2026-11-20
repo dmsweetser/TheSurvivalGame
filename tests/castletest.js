@@ -55,7 +55,7 @@ function T(name, cond, extra) { if (cond) { pass++; } else { fail++; console.log
   await call('dbg_tp', 0, 80); await sleep(200);
   await key('KeyE', 300);
   T('in the mall', (await poll('dbg_mall', v => v === 1)) === 1, await call('dbg_mall'));
-  await call('dbg_tp', 230, -5976); await sleep(200);
+  await call('dbg_tp', 350, -5976); await sleep(200);
   await key('KeyE', 250);
   T('entered the arcade', (await poll('dbg_inarcade', v => v === 1, 4000)) === 1, await call('dbg_inarcade'));
   await call('dbg_tp', 0, -11898); await sleep(200);

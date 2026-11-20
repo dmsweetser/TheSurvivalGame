@@ -111,6 +111,36 @@ static const float CRT_H3[7][3] = {
     { 9, 4, 1.8f },  { 13, 4, 3.6f }, { 13, 4, 0.0f },
 };
 static const int CRT_M[7] = { 168, 188, 217, 246, 275, 304, 347 };
+// MEDAL TIMES (v1.25 feat 3): {gold, silver, bronze} thresholds in
+// deciseconds per track, DERIVED from the slowest rival's measured
+// full-race pace in the shipped game (kart 1, player parked; spec:
+// v125-feat3-spec.md): gold = 0.92x, silver = 1.00x, bronze = 1.16x of
+// that anchor, rounded to the second. Track 5's anchor is smoothed to
+// track 4's pace (its raw AI time is a steering-quirk outlier), so
+// difficulty stays monotonic in track length. Medals derive from the
+// stored per-track best (Buddy.crt_tbest) — retune here, saves follow.
+static const int CRT_MEDAL[8][3] = {
+    { 230, 250, 290 }, { 270, 290, 340 }, { 290, 320, 370 }, { 330, 360, 420 },
+    { 620, 680, 790 }, { 700, 760, 880 }, { 770, 840, 970 }, { 830, 900, 1040 },
+};
+static const char *CRT_SHORT[8] = { "MEADOWS", "SPAGHETTI", "LEGACY", "BADLANDS", "FROZEN", "NEON RAM", "JUNGLE", "DEPTHS" };
+// TROPHY CASE (v1.25 feat 4): how many of this buddy's tracks derive
+// to a given medal tier (0 = a best exists but earned no medal). The
+// case is a pure view — it counts through here so the medal table
+// keeps exactly one reader per piece.
+static int crt_medal_count(Buddy *b, int tier){
+    int n=0;
+    for (int t=0;t<8;t++) if (medal_tier(b->crt_tbest[t], CRT_MEDAL[t])==tier && (tier>0 || b->crt_tbest[t]>0)) n++;
+    return n;
+}
+// append a decisecond time as m:ss.d (the finish panel's format)
+static char *sapp_time(char *q, int tds){
+    int sec = (tds / 10) % 60;
+    q = sapp_int(q, tds / 600); q = sappend(q, ":");
+    if (sec < 10) q = sappend(q, "0");
+    q = sapp_int(q, sec); q = sappend(q, "."); q = sapp_int(q, tds % 10);
+    return q;
+}
 // per-track dressing (index = track): the road narrows, the boost
 // pads multiply and tire stacks appear on the road in the far country
 static const float CRT_HW_T[8]  = { 30, 30, 30, 30, 28, 26, 24, 22 };
@@ -336,7 +366,7 @@ static void crt_start_race(int pi){
     }
     b->x = CRT_OX + S->crt_x[0]; b->y = CRT_OY + S->crt_y[0];
     b->bw_x = b->x; b->bw_y = b->y; b->aim = S->crt_h[0];
-    { char *q = S->note; q = sappend(q, "RACE "); q = sapp_int(q, S->crt_race + 1); q = sappend(q, "/4 - "); q = sappend(q, REGION_NAME[S->crt_track]); q = sappend(q, ". HOLD FIRE TO GO!"); *q = 0; S->note_t = 2.4f; }
+    { char *q = S->note; q = sappend(q, "RACE "); q = sapp_int(q, S->crt_race + 1); q = sappend(q, "/4 - "); q = sappend(q, REGION_NAME[S->crt_track]); q = sappend(q, ". HOLD "); q = sappend(q, lbla(H_FIRE)); q = sappend(q, " TO GO!"); *q = 0; S->note_t = 2.4f; }
     if (S->crt_duo >= 0){ Buddy *gb = &G.bud[S->crt_duo];
         gb->x = CRT_OX + S->crt_x[1]; gb->y = CRT_OY + S->crt_y[1];
         gb->bw_x = gb->x; gb->bw_y = gb->y; gb->aim = S->crt_h[1]; }
@@ -388,11 +418,16 @@ static void crt_drive_kart(BwSim *S, int i, int keys, int go, float dt){
     S->crt_x[i] += fcos(S->crt_h[i]) * v * dt;
     S->crt_y[i] += fsin(S->crt_h[i]) * v * dt;
 }
-static void crt_save_record(int who, int place, int tds){
+static void crt_save_record(int who, int place, int tds, int track){
     if (place <= 0) return;
     Buddy *bb = &G.bud[who];
     if (!bb->crt_best_pos || place < bb->crt_best_pos) bb->crt_best_pos = place;
     if (!bb->crt_best_time || tds < bb->crt_best_time) bb->crt_best_time = tds;
+    // MEDAL TIMES (feat 3): the per-track best rides the SAME shared
+    // race clock for host and guest alike (the legacy co-op rule), but
+    // — standing records rule — a Zen run sets no records.
+    if (!G.zen_run && track >= 0 && track < 8)
+        if (!bb->crt_tbest[track] || tds < bb->crt_tbest[track]) bb->crt_tbest[track] = tds;
 }
 static void crt_finish_floater(int who, int place){
     Player *p = &G.p[who]; char buf[64]; char *q = buf;
@@ -501,8 +536,8 @@ static void crt_update(int pi, float dt, const BwIn *in){
         if (S->crt_fint <= 0){
             int tds = (int)(S->crt_t * 10.0f);
             int guest = S->crt_duo, gplace = S->crt_hfin[1];
-            crt_save_record(pi, S->crt_hfin[0], tds);
-            if (guest >= 0) crt_save_record(guest, gplace, tds);
+            crt_save_record(pi, S->crt_hfin[0], tds, S->crt_track);
+            if (guest >= 0) crt_save_record(guest, gplace, tds, S->crt_track);
             // bank the Grand Prix points for the whole field
             static const int PTS[6] = { 10, 8, 6, 5, 4, 3 };
             for (int i = 0; i < 6; i++){
@@ -802,7 +837,20 @@ static void crt_render_view(int sim_pi, int viewer_pi){
           tri_fill(cx - KTS(92), cy - KTS(16), cx - KTS(92), cy + KTS(16), cx - KTS(70), cy, COL(255, 255, 255));
           tri_fill(cx + KTS(92), cy - KTS(16), cx + KTS(92), cy + KTS(16), cx + KTS(70), cy, COL(255, 255, 255));
           draw_text_center(cx, cy + KTS(64), COLNAME[mycol], 2, COL(255, 255, 255)); }
-        draw_text_center(vx + vw2/2, vy + 98, pad_mode()? "IN THE RACE: HOLD A TO GO, STEER WITH THE STICK" : "IN THE RACE: HOLD FIRE TO GO, STEER WITH THE ARROWS", 1, COL(170, 200, 190));
+        { char b[96]; char *q=b; q=sappend(q, "IN THE RACE: HOLD "); q=sappend(q, lbla(H_FIRE)); q=sappend(q, " TO GO, "); q=sappend(q, lbl_steer()); *q=0;
+          draw_text_center(vx + vw2/2, vy + 98, b, 1, COL(170, 200, 190)); }
+        if (vh2 >= 300){ // MEDAL TIMES (feat 3): your medals on this cup's four tracks (full-height views only — the split room is already a squeeze)
+            char buf[128]; char *q = buf;
+            q = sappend(q, "MEDALS: ");
+            for (int ti = 0; ti < 4; ti++){
+                int tr = S->crt_cup * 4 + ti;
+                if (ti) q = sappend(q, " | ");
+                q = sappend(q, CRT_SHORT[tr]); q = sappend(q, " ");
+                q = sappend(q, medal_name(medal_tier(b->crt_tbest[tr], CRT_MEDAL[tr])));
+            }
+            *q = 0;
+            draw_text_center(vx + vw2/2, vy + 112, buf, 1, COL(200, 214, 200));
+        }
         draw_text_center(vx + vw2/2, vy + vh2 - 104, vk == 0? "LEFT / RIGHT - COLOUR      UP / DOWN - CUP" : "LEFT / RIGHT - COLOUR      THE HOST PICKS THE CUP", 1, COL(200, 230, 200));
         if (S->crt_duo >= 0){
             int imready = (vk == 0)? (S->crt_ready & 1) : (S->crt_ready & 2);
@@ -854,11 +902,26 @@ static void crt_render_view(int sim_pi, int viewer_pi){
             if (best){ q = sappend(q, "   -   CUP BEST P"); q = sapp_int(q, best); }
             *q = 0;
             draw_text_center(vx + vw2/2, vy + 92 + 6 * 30 + 12, buf, 1, COL(255, 240, 200));
-            if (S->crt_gprank[vk] == 1) draw_text_center(vx + vw2/2, vy + 92 + 6 * 30 + 32, "CHAMPION OF THE CUP!", 1, COL(250, 200, 50));
+            { // MEDAL TIMES (feat 3): your medal on the cup's last track
+              char buf2[96]; char *q2 = buf2; int tb = vb->crt_tbest[S->crt_track];
+              q2 = sappend(q2, "YOUR "); q2 = sappend(q2, CRT_SHORT[S->crt_track]); q2 = sappend(q2, " BEST ");
+              if (tb){ q2 = sapp_time(q2, tb); q2 = sappend(q2, " - "); q2 = sappend(q2, medal_name(medal_tier(tb, CRT_MEDAL[S->crt_track]))); }
+              else q2 = sappend(q2, "- NO TIME YET");
+              *q2 = 0;
+              draw_text_center(vx + vw2/2, vy + 92 + 6 * 30 + 30, buf2, 1, medal_col(medal_tier(tb, CRT_MEDAL[S->crt_track]))); }
+            if (S->crt_gprank[vk] == 1) draw_text_center(vx + vw2/2, vy + 92 + 6 * 30 + 48, "CHAMPION OF THE CUP!", 1, COL(250, 200, 50));
         } else {
             char buf[80]; char *q = buf;
             q = sappend(q, "NEXT: "); q = sappend(q, REGION_NAME[S->crt_cup * 4 + S->crt_race + 1]); *q = 0;
             draw_text_center(vx + vw2/2, vy + 92 + 6 * 30 + 12, buf, 1, COL(200, 230, 200));
+            { // MEDAL TIMES (feat 3): your medal on the track just raced
+              Buddy *vb = &G.bud[viewer_pi];
+              char buf2[96]; char *q2 = buf2; int tb = vb->crt_tbest[S->crt_track];
+              q2 = sappend(q2, "YOUR "); q2 = sappend(q2, CRT_SHORT[S->crt_track]); q2 = sappend(q2, " BEST ");
+              if (tb){ q2 = sapp_time(q2, tb); q2 = sappend(q2, " - "); q2 = sappend(q2, medal_name(medal_tier(tb, CRT_MEDAL[S->crt_track]))); }
+              else q2 = sappend(q2, "- NO TIME YET");
+              *q2 = 0;
+              draw_text_center(vx + vw2/2, vy + 92 + 6 * 30 + 30, buf2, 1, medal_col(medal_tier(tb, CRT_MEDAL[S->crt_track]))); }
         }
         if (S->note_t > 0){
             rect_fill(vx, vy + vh2 - 22, vw2, 22, COL(10, 12, 10));
@@ -890,10 +953,13 @@ static void crt_render_view(int sim_pi, int viewer_pi){
       // a far hill line, and the tree line in front of it — all of
       // it sliding as you steer, all of it wearing the REGION
       int rg = S->crt_track;
-      u32 skyT = CRT_SKY[rg][0], skyH = CRT_SKY[rg][1];
+      // THE LIVING SKY (v1.25 feat 12): the kart sky wears the hour
+      // too — bands and clouds through tod_sky, the sun traded for
+      // the moon at night; the road and the karts keep daylight.
+      u32 skyT = tod_sky(CRT_SKY[rg][0]), skyH = tod_sky(CRT_SKY[rg][1]);
       u32 gndA = col_shade(REGION_GA[rg], 0.55f), gndB = col_shade(REGION_GB[rg], 0.55f);
       u32 aprA = col_shade(REGION_GA[rg], 0.74f), aprB = col_shade(REGION_GB[rg], 0.74f);
-      int dark = (rg == 5 || rg == 7);
+      int dark = (rg == 5 || rg == 7) || tod_darkf() > 0.5f;
       { int sh = horizon - vy; if (sh < 4) sh = 4;
         rect_fill(vx, vy, vw2, sh/4 + 1, col_shade(skyT, 0.74f));
         rect_fill(vx, vy + sh/4, vw2, sh/4 + 1, skyT);
@@ -902,7 +968,7 @@ static void crt_render_view(int sim_pi, int viewer_pi){
       disc_fill(vx + vw2 - 90, vy + 44, 31, dark? COL(200, 204, 225) : COL(255, 246, 196));
       disc_fill(vx + vw2 - 90, vy + 44, 20, dark? COL(226, 230, 242) : COL(255, 236, 150));
       { int slide = (int)(kh * 260.0f);
-        u32 cloudc = dark? COL(126, 122, 158) : COL(248, 251, 255);
+        u32 cloudc = tod_sky(dark? COL(126, 122, 158) : COL(248, 251, 255));
         for (int ci = 0; ci < 4; ci++){
             int cw = 54 + (ci * 29) % 40;
             int cxx = (ci * 317 + 60 - slide * 2 - (int)(S->crt_t * 6.0f)) % (vw2 + 240);
@@ -1224,7 +1290,8 @@ static void crt_render_view(int sim_pi, int viewer_pi){
         char nb[2] = { (char)('0' + n), 0 };
         draw_text_center(vx + vw2/2, vy + vh2/2 - 66, nb, 8, COL(255, 220, 90));
         draw_text_center(vx + vw2/2, vy + vh2/2 + 22, "GET READY...", 2, COL(255, 255, 255));
-        draw_text_center(vx + vw2/2, vy + vh2/2 + 52, pad_mode()? "HOLD A TO GO - STEER WITH THE STICK" : "HOLD FIRE TO GO - STEER WITH THE ARROWS", 1, COL(200, 230, 200));
+        { char b[96]; char *q=b; q=sappend(q, "HOLD "); q=sappend(q, lbla(H_FIRE)); q=sappend(q, " TO GO - "); q=sappend(q, lbl_steer()); *q=0;
+          draw_text_center(vx + vw2/2, vy + vh2/2 + 52, b, 1, COL(200, 230, 200)); }
     } else if (S->crt_state == 1 && S->crt_t < 0.9f){
         draw_text_center(vx + vw2/2, vy + vh2/2 - 40, "GO!", 6, COL(120, 255, 120));
     } else if (S->crt_state == 2){
@@ -1246,6 +1313,20 @@ static void crt_render_view(int sim_pi, int viewer_pi){
           if (sec < 10) q = sappend(q, "0");
           q = sapp_int(q, sec); q = sappend(q, "."); q = sapp_int(q, tds % 10); *q = 0;
           draw_text_center(vx + vw2/2, vy + vh2/2 + 8, buf, 1, COL(200, 214, 200)); }
+        { // MEDAL TIMES (feat 3): the tier of the time just run, off the
+          // frozen race clock; the record lands mid-panel, so a best set
+          // by this race shows as soon as it banks
+          int tds = (int)(S->crt_t * 10.0f);
+          int tier = medal_tier(tds, CRT_MEDAL[S->crt_track]);
+          char buf[80]; char *q = buf;
+          if (G.zen_run){ q = sappend(q, "ZEN RUN - NO MEDALS"); *q = 0;
+              draw_text_center(vx + vw2/2, vy + vh2/2 + 24, buf, 1, COL(160, 160, 168)); }
+          else if (tier){ q = sappend(q, medal_name(tier)); q = sappend(q, " MEDAL!");
+              if (b->crt_tbest[S->crt_track] == tds) q = sappend(q, "  NEW TRACK BEST!");
+              *q = 0;
+              draw_text_center(vx + vw2/2, vy + vh2/2 + 24, buf, 1, medal_col(tier)); }
+          else { q = sappend(q, "NO MEDAL - BRONZE IS "); q = sapp_time(q, CRT_MEDAL[S->crt_track][2]); *q = 0;
+              draw_text_center(vx + vw2/2, vy + vh2/2 + 24, buf, 1, COL(160, 160, 168)); } }
     }
     if (S->note_t > 0){
         rect_fill(vx, vy + vh2 - 22, vw2, 22, COL(10, 12, 10));

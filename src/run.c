@@ -15,6 +15,36 @@
 #define PL_ROWS 15
 #define PL_MAXW 240
 #define PL_GROUND 13
+// MEDAL TIMES (v1.25 feat 3): {gold, silver, bronze} thresholds in
+// deciseconds for levels 1..16, DERIVED from the runner's own physics
+// (spec: v125-feat3-spec.md): level distance D = (W-5.5)*24 px with
+// W = min(110+14*lvl, 236); tier target average speeds gold ~109,
+// silver ~94, bronze ~77 u/s (top speed is 124, walk 100), tapering
+// ~0.5 u/s per level for the critter-speed creep. Medals derive from
+// the stored per-level best (Buddy.plat_tbest) — retune here only.
+static const int PLAT_MEDAL[16][3] = {
+    {261,303,369}, {293,340,415}, {326,378,461}, {358,416,508},
+    {391,454,555}, {425,493,603}, {458,532,651}, {493,572,700},
+    {527,612,750}, {529,615,754}, {532,618,758}, {534,621,762},
+    {537,624,766}, {540,628,770}, {542,631,775}, {545,634,779},
+};
+// TROPHY CASE (v1.25 feat 4): how many of this buddy's levels 1..16
+// derive to a given medal tier (0 = a best exists but earned no
+// medal). Twin of cart.c's crt_medal_count — the case counts through
+// here so PLAT_MEDAL keeps exactly one reader per piece.
+static int plat_medal_count(Buddy *b, int tier){
+    int n=0;
+    for (int t=0;t<16;t++) if (medal_tier(b->plat_tbest[t], PLAT_MEDAL[t])==tier && (tier>0 || b->plat_tbest[t]>0)) n++;
+    return n;
+}
+// append a decisecond time as m:ss.d (mirrors cart.c's helper)
+static char *sapp_time_ds(char *q, int tds){
+    int sec = (tds / 10) % 60;
+    q = sapp_int(q, tds / 600); q = sappend(q, ":");
+    if (sec < 10) q = sappend(q, "0");
+    q = sapp_int(q, sec); q = sappend(q, "."); q = sapp_int(q, tds % 10);
+    return q;
+}
 // one sky per region — the run wears the country it is in
 static const u32 PLAT_SKY[NREGIONS][3] = {
     { COL(104,178,238), COL(122,190,242), COL(140,200,245) },   // Clean Code Meadows
@@ -128,12 +158,19 @@ static void plat_load_level(int pi, int lvl){
     b->x = 2.5f*PL_TILE; b->y = PL_GROUND*PL_TILE;
     S->plat_vx=0; S->plat_vy=0; S->plat_face=1; S->plat_cpx = 2.5f*PL_TILE;
     S->plat_run_t=0; S->plat_skid=0; S->plat_land_t=0; S->plat_jumpheld=0; S->plat_dust_t=0;
+    S->plat_lvl_t=0; S->plat_show_tds=0; S->plat_show_tier=0; S->plat_show_newbest=0;   // MEDAL TIMES: a fresh level, a fresh clock
     for (int i=0;i<10;i++) S->plat_puff_a[i]=0;
 }
 static void plat_enter(int pi){
     BwSim *S=&BWS[pi]; Buddy *b=&G.bud[pi];
     S->plat_score=0; S->plat_bits=0; S->plat_hearts=3; S->plat_power=0; S->plat_t=0;
     plat_load_level(pi, b->plat_done+1);
+    // MEDAL TIMES (feat 3): a player who has finished a level gets the
+    // level select (the replay hook — medals live there); a brand-new
+    // player's entry flow is exactly as before.
+    S->plat_sel = (b->plat_done >= 1)? 1 : 0;
+    S->plat_pick = b->plat_done + 1;
+    S->plat_selt = 0;
 }
 static void plat_hurt(int pi, float fromx){
     BwSim *S=&BWS[pi]; Buddy *b=&G.bud[pi];
@@ -200,9 +237,32 @@ static void plat_vault_exit(int pi){
 static void plat_update(int pi, float dt, const BwIn *in){
     BwSim *S=&BWS[pi]; Buddy *b=&G.bud[pi];
     if (in->exit_){ bw_exit(pi, 0); return; }
+    if (S->plat_sel){
+        // MEDAL TIMES (feat 3): the level select — LEFT/RIGHT pick any
+        // unlocked level, FIRE runs it (after a grace beat so the
+        // cabinet-entry press can't confirm by accident), EXIT left
+        // above. Nothing else in the level moves while you pick.
+        int l_edge = (in->keys & K_LEFT) && !(S->plat_prevk & K_LEFT);
+        int r_edge = (in->keys & K_RIGHT) && !(S->plat_prevk & K_RIGHT);
+        S->plat_prevk = in->keys;
+        S->plat_selt += dt;
+        if (l_edge && S->plat_pick > 1){ S->plat_pick--; sfx(1); }
+        if (r_edge && S->plat_pick < b->plat_done + 1){ S->plat_pick++; sfx(1); }
+        if (in->sel && S->plat_selt > 0.35f){
+            S->plat_sel = 0;
+            plat_load_level(pi, S->plat_pick);
+            { char *q=S->note; q=sappend(q, "LEVEL "); q=sapp_int(q, S->plat_lvl); q=sappend(q, " - "); q=sappend(q, REGION_NAME[S->plat_region]); q=sappend(q, ". ");
+              if (S->plat_lvl<=16 && b->plat_tbest[S->plat_lvl-1]){ q=sappend(q, "BEST "); q=sapp_time_ds(q, b->plat_tbest[S->plat_lvl-1]); q=sappend(q, " - "); q=sappend(q, medal_name(medal_tier(b->plat_tbest[S->plat_lvl-1], PLAT_MEDAL[S->plat_lvl-1]))); q=sappend(q, ". "); }
+              else if (S->plat_lvl<=16){ q=sappend(q, "NO TIME YET - GOLD IS "); q=sapp_time_ds(q, PLAT_MEDAL[S->plat_lvl-1][0]); q=sappend(q, ". "); }
+              q=sappend(q, lbl_fire()); q=sappend(q, " JUMPS. STOMP BUGS!"); *q=0; }
+            S->note_t=3.4f;
+        }
+        return;
+    }
     int dn_edge = (in->keys & K_DOWN) && !(S->plat_prevk & K_DOWN);
     S->plat_prevk = in->keys;
     S->plat_t += dt;
+    if (S->plat_cleart<=0) S->plat_lvl_t += dt;   // MEDAL TIMES: the level clock freezes at the flag touch
     if (S->plat_grace>0) S->plat_grace -= dt;
     if (b->atk_cd>0) b->atk_cd -= dt;
     if (S->plat_deadt>0){
@@ -254,7 +314,15 @@ static void plat_update(int pi, float dt, const BwIn *in){
             acc = 2400.0f; S->plat_skid = 0.16f;   // skidding against your own momentum
             if (S->plat_dust_t<=0){ plat_puff(S, b->x - S->plat_face*8, b->y-2); S->plat_dust_t = 0.05f; }
         }
-        S->plat_vx += dir*acc*dt;
+        // the cap has to be a cap: above it, the 560/s bleed must
+        // WIN, so never feed accel into an overspeed push. Playtest
+        // find (Nov 19): accel 1240 vs bleed 560 netted +680/s for as
+        // long as the key was held — a plain held run rocketed past
+        // 600 u/s inside two seconds, which is also why the runner
+        // "felt too fast" no matter where the cap was tuned. With
+        // the guard, a push at/above the cap just holds it while a
+        // knockback's overspeed still bleeds off at 560/s as meant.
+        if (!((dir>0 && S->plat_vx>=maxs) || (dir<0 && S->plat_vx<=-maxs))) S->plat_vx += dir*acc*dt;
         if (dir>0 && S->plat_vx>maxs){ float d2 = S->plat_vx-560*dt; S->plat_vx = d2>maxs? d2 : maxs; }
         if (dir<0 && S->plat_vx<-maxs){ float d2 = S->plat_vx+560*dt; S->plat_vx = d2<-maxs? d2 : -maxs; }
         S->plat_face = dir;
@@ -323,13 +391,31 @@ static void plat_update(int pi, float dt, const BwIn *in){
         S->plat_land_t = 0.14f;   // a hard landing: crouch + a puff of dust
         plat_puff(S, b->x-6, b->y-1); plat_puff(S, b->x+6, b->y-1);
     }
-    // checkpoint + flag
-    if (b->x > S->plat_cpx + 6*PL_TILE && S->plat_cpx < (S->plat_w/2+6)*PL_TILE) S->plat_cpx = (S->plat_w/2)*PL_TILE;
+    // checkpoint + flag. The midpoint post arms only when the runner
+    // REACHES it: arming it a few tiles out of spawn (the old rule)
+    // teleported every early pit fall to the middle of the level,
+    // skipping the whole first half — and banked medal times for
+    // courses the runner never ran (playtest find, Nov 19: a level-1
+    // pit dive banked a 141ds gold against a 261ds threshold whose
+    // derivation assumes the full course). Falls before the post
+    // respawn at the start post, as the white flag says.
+    if (S->plat_cpx < (S->plat_w/2)*PL_TILE && b->x > (S->plat_w/2)*PL_TILE) S->plat_cpx = (S->plat_w/2)*PL_TILE;
     {
         int tx = (int)(b->x/PL_TILE);
         for (int ty=0;ty<PL_ROWS;ty++) if (plat_tile(S, tx, ty)==8){
             S->plat_cleart = 0.001f; S->plat_cleary = b->y; S->plat_score += 500 + S->plat_hearts*100; sfx(11);
             scpy(S->note, "FLAG PLANTED! LEVEL CLEAR!", 72); S->note_t=2.6f;
+            // MEDAL TIMES (feat 3): the finish is THIS moment — bank
+            // the level time now (not after the celebration), Zen
+            // excluded by the standing records rule
+            { int tds = (int)(S->plat_lvl_t * 10.0f);
+              S->plat_show_tds = tds;
+              S->plat_show_tier = (S->plat_lvl<=16)? medal_tier(tds, PLAT_MEDAL[S->plat_lvl-1]) : 0;
+              S->plat_show_newbest = 0;
+              if (!G.zen_run && S->plat_lvl>=1 && S->plat_lvl<=16){
+                  int *slot = &b->plat_tbest[S->plat_lvl-1];
+                  if (!*slot || tds < *slot){ *slot = tds; S->plat_show_newbest = 1; }
+              } }
             break;
         }
     }
@@ -592,19 +678,22 @@ static void plat_render(int pi){
     // sky, then two layers of server skyline drifting behind — the
     // sky wears the level's REGION (the vault borrows the Depths)
     int rg = S->plat_sub? 7 : S->plat_region;
-    rect_fill(vx, vy, vw2, vh2, PLAT_SKY[rg][0]);
-    rect_fill(vx, vy+vh2/3, vw2, vh2/3, PLAT_SKY[rg][1]);   // gradient step (glow-up)
-    rect_fill(vx, vy+vh2*2/3, vw2, vh2/3, PLAT_SKY[rg][2]);
+    // THE LIVING SKY (v1.25 feat 12): the sky wears the hour too —
+    // bands, skyline base and clouds through tod_sky; the tiles,
+    // the runner and the HUD keep their daylight colours.
+    rect_fill(vx, vy, vw2, vh2, tod_sky(PLAT_SKY[rg][0]));
+    rect_fill(vx, vy+vh2/3, vw2, vh2/3, tod_sky(PLAT_SKY[rg][1]));   // gradient step (glow-up)
+    rect_fill(vx, vy+vh2*2/3, vw2, vh2/3, tod_sky(PLAT_SKY[rg][2]));
     // the sun, high and pleased with itself (glow-up) — a pale moon
-    // over the dark countries
+    // over the dark countries, and over every country at night
     { int sunx = vx + vw2 - 84, suny = vy + 44;
-      int dark = (rg==5 || rg==7);
+      int dark = (rg==5 || rg==7) || tod_darkf() > 0.5f;
       glow_ellipse(sunx, suny, 34, 34, dark? COL(200,204,225) : COL(255,236,160), 60);
       disc_fill(sunx, suny, 15, dark? COL(226,230,242) : COL(255,240,170));
       disc_fill(sunx-4, suny-4, 6, dark? COL(240,242,250) : COL(255,250,215)); }
     // lazy clouds on the slowest parallax (glow-up)
     { int coff = (int)(camx*0.12f + G.anim_t*3.0f);
-      u32 cloudc = (rg==5 || rg==7)? COL(126,122,158) : COL(235,246,255);
+      u32 cloudc = tod_sky((rg==5 || rg==7)? COL(126,122,158) : COL(235,246,255));
       for (int sx = vx - (coff % 150) - 150; sx < vx+vw2+150; sx += 150){
           int idx = (coff + sx - vx)/150;
           u32 hh = hash2(idx, 3, 0xC10Du);
@@ -615,7 +704,7 @@ static void plat_render(int pi){
       } }
     for (int layer=0; layer<2; layer++){
         float par = layer? 0.65f : 0.35f;
-        u32 lc = col_shade(PLAT_SKY[rg][2], layer? 0.60f : 0.76f);
+        u32 lc = col_shade(tod_sky(PLAT_SKY[rg][2]), layer? 0.60f : 0.76f);
         int off = (int)(camx*par) % 92;
         for (int sx = vx - off - 92; sx < vx+vw2+92; sx += 92){
             int wx = sx + (int)(camx*par) - vx;
@@ -736,7 +825,39 @@ static void plat_render(int pi){
         disc_fill(hx-3, hy-2, 4, COL(240,80,90)); disc_fill(hx+3, hy-2, 4, COL(240,80,90));
         rect_fill(hx-6, hy-2, 13, 5, COL(240,80,90));
     }
-    if (S->plat_cleart>0) draw_text_center(vx+vw2/2, vy+vh2/3, "LEVEL CLEAR!", 2, COL(255,244,180));
+    if (S->plat_cleart>0){
+        draw_text_center(vx+vw2/2, vy+vh2/3, "LEVEL CLEAR!", 2, COL(255,244,180));
+        // MEDAL TIMES (feat 3): the run's time and the medal it earns —
+        // in Zen the time shows but no medal is earned or banked
+        char buf[96]; char *q=buf;
+        q=sappend(q, "TIME "); q=sapp_time_ds(q, S->plat_show_tds);
+        if (!G.zen_run && S->plat_show_tier){ q=sappend(q, " - "); q=sappend(q, medal_name(S->plat_show_tier)); q=sappend(q, " MEDAL!"); if (S->plat_show_newbest) q=sappend(q, "  NEW BEST!"); }
+        else if (!G.zen_run && S->plat_lvl<=16){ q=sappend(q, " - NO MEDAL (BRONZE "); q=sapp_time_ds(q, PLAT_MEDAL[S->plat_lvl-1][2]); q=sappend(q, ")"); }
+        else if (G.zen_run) q=sappend(q, " - ZEN: NO MEDALS");
+        *q=0;
+        draw_text_center(vx+vw2/2, vy+vh2/3 + 22, buf, 1, (!G.zen_run && S->plat_show_tier)? medal_col(S->plat_show_tier) : COL(220,224,230));
+    }
+    if (S->plat_sel){
+        // MEDAL TIMES (feat 3): the level select panel, over the
+        // (loaded, frozen) frontier level
+        rect_fill(vx+vw2/2-190, vy+vh2/2-64, 380, 128, COL(12,14,22));
+        rect_line(vx+vw2/2-190, vy+vh2/2-64, 380, 128, COL(250,200,50));
+        draw_text_center(vx+vw2/2, vy+vh2/2-52, "SUPER BUDDY RUN", 2, COL(250,200,50));
+        draw_text_center(vx+vw2/2, vy+vh2/2-30, "PICK YOUR LEVEL", 1, COL(255,255,255));
+        { char buf[64]; char *q=buf;
+          q=sappend(q, "<  LEVEL "); q=sapp_int(q, S->plat_pick); q=sappend(q, "  >"); *q=0;
+          draw_text_center(vx+vw2/2, vy+vh2/2-10, buf, 2, COL(255,240,200)); }
+        draw_text_center(vx+vw2/2, vy+vh2/2+10, REGION_NAME[(S->plat_pick-1)%8], 1, COL(170,200,190));
+        { char buf[96]; char *q=buf; int pk = S->plat_pick;
+          if (pk<=16 && b->plat_tbest[pk-1]){ q=sappend(q, "BEST "); q=sapp_time_ds(q, b->plat_tbest[pk-1]); q=sappend(q, " - "); q=sappend(q, medal_name(medal_tier(b->plat_tbest[pk-1], PLAT_MEDAL[pk-1]))); q=sappend(q, " MEDAL"); }
+          else if (pk<=16){ q=sappend(q, "NO TIME YET - GOLD IS "); q=sapp_time_ds(q, PLAT_MEDAL[pk-1][0]); }
+          else q=sappend(q, "BEYOND THE MEDAL BOOK (LEVEL 16+)");
+          if (pk == b->plat_done+1) q=sappend(q, "   -   NEW!");
+          *q=0;
+          draw_text_center(vx+vw2/2, vy+vh2/2+28, buf, 1, (pk<=16 && b->plat_tbest[pk-1])? medal_col(medal_tier(b->plat_tbest[pk-1], PLAT_MEDAL[pk-1])) : COL(200,214,200)); }
+        { char b[80]; char *q=b; q=sappend(q, "LEFT / RIGHT - LEVEL      "); q=sappend(q, lbla(H_FIRE)); q=sappend(q, " - RUN IT"); *q=0;
+          draw_text_center(vx+vw2/2, vy+vh2/2+48, b, 1, COL(200,230,200)); }
+    }
     // (no standing hint line here any more — controls live in the
     // Start-menu's CONTROLS panel; Daniel, Nov 6)
     if (S->note_t>0){

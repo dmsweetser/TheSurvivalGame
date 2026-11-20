@@ -71,7 +71,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   // P1: into the mall, to the gate, INTERACT -> Banzai World
   await call('dbg_tp', 0, 80);
   await key('KeyE', 200); await sleep(400);
-  await call('dbg_tp', 185, -5908);
+  await call('dbg_tp', 215, -5868);
   await sleep(250);
   await key('KeyE', 200);
   ok((await poll('dbg_gate', v => v === 1, 5000)) === 1, 'gate panel opened for P1');
@@ -98,13 +98,13 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   // P1 leaves with Esc; DEV is back at the gate in the mall
   await key('Escape', 200);
   ok((await poll('dbg_bwstate', v => v === 0, 5000)) === 0, 'P1 Esc leaves Banzai World');
-  ok(Math.abs((await call('dbg_px')) - 185) < 3 && Math.abs((await call('dbg_py')) - -5904) < 4,
-     'P1 DEV back at the mall gate', (await call('dbg_px')) + ',' + (await call('dbg_py')));
+  ok(Math.abs((await call('dbg_px')) - 215) < 3 && Math.abs((await call('dbg_py')) - -5864) < 4,
+     'P1 DEV back at the mall gate', (await call('dbg_px')) + ',' + (await call('dbg_py')));   // BW exit placement: (BW_SX 215, MALL_CY+136) — v1.25 MALL ENLARGEMENT
 
   // P2's own trip: mall via pad interact at the storefront, gate, B
   await call('dbg_tp2', 0, 80);
   await btn(1, 1, 180); await sleep(400);
-  await call('dbg_tp2', 185, -5908);
+  await call('dbg_tp2', 215, -5868);
   await sleep(250);
   await btn(1, 1, 180);
   await sleep(350);

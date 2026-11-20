@@ -34,7 +34,7 @@ function T(name, cond, extra) {
   async function buyPuppy() {
     await call('dbg_tp', 0, 80); await sleep(150);
     await key('KeyE', 300);                       // into the mall
-    await call('dbg_tp', 225, -6108); await sleep(200);
+    await call('dbg_tp', 315, -6148); await sleep(200);
     for (let i = 0; i < 10; i++) await call('dbg_feed');   // 100 kg: a puppy's price
     await key('KeyE', 350);                       // buddies panel
     if ((await call('dbg_station')) !== 3) return false;
@@ -66,7 +66,7 @@ function T(name, cond, extra) {
   await freshRun();
   T('A: puppy bought at the counter', await buyPuppy());
   await key('Escape', 300);                       // close the panel
-  await call('dbg_tp', 0, -5850); await sleep(200);
+  await call('dbg_tp', 0, -5810); await sleep(200);
   await key('KeyE', 300);                         // out of the mall
   T('A: back in the field', (await call('dbg_mall')) === 0);
   // play in the normal game for a bit: stroll and let time pass
@@ -84,7 +84,7 @@ function T(name, cond, extra) {
   await freshRun();
   T('B: puppy bought at the counter', await buyPuppy());
   await key('Escape', 300);
-  await call('dbg_tp', 0, -5850); await sleep(200);
+  await call('dbg_tp', 0, -5810); await sleep(200);
   await key('KeyE', 300);
   await call('dbg_budfaint');
   await sleep(400);

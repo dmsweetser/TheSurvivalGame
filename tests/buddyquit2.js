@@ -41,14 +41,14 @@ const T = (name, ok, info) => { console.log((ok ? 'PASS' : 'FAIL') + ' | ' + nam
   await call('dbg_tp', 0, 80); await sleep(150);
   await key('KeyE', 300);
   T('entered the mall', (await call('dbg_mall')) === 1);
-  T('walked to the buddies counter', await walkTo(225, -6108, 14));
+  T('walked to the buddies counter', await walkTo(315, -6148, 14));
   for (let i = 0; i < 6; i++) await call('dbg_feed');
   await key('KeyE', 350);
   for (let i = 0; i < 4; i++) await key('ArrowDown', 130);
   await key('Space', 350); await key('Space', 350); await key('Space', 400);
   T('pet rock adopted', (await poll('dbg_buddy', v => v !== 0, 20000)) === 5);
   await key('Escape', 300);
-  T('walked to the exit mat', await walkTo(0, -5850, 10));
+  T('walked to the exit mat', await walkTo(0, -5810, 10));
   await key('KeyE', 300);
   T('left the mall', (await call('dbg_mall')) === 0);
   T('buddy followed out', (await poll('dbg_budy', v => v > -1000, 5000)) > -1000);

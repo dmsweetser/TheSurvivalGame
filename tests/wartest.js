@@ -110,7 +110,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   await call('dbg_tp', 0, 80); await sleep(200);
   await key('KeyE', 300);
   ok((await poll('dbg_mall', [], v => v === 1)) === 1, 'in the mall');
-  await call('dbg_tp', 230, -5976); await sleep(200);
+  await call('dbg_tp', 350, -5976); await sleep(200);
   await key('KeyE', 250);
   ok((await poll('dbg_inarcade', [], v => v === 1)) === 1, 'in the arcade');
   await call('dbg_tp', 256, -11898); await sleep(200);
@@ -541,7 +541,9 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   // The pad cursor is a finger routed through war_handle_tap: the
   // left stick flies it, A presses it (single / double / triple
   // musters fall out of the tap streak), LB/RB + A work the command
-  // bar, B peels a layer back, the right stick pans screen-locked.
+  // bar, B peels a layer back, the right stick flies the cursor too
+  // with the camera centred on it (v1.25; it panned screen-locked
+  // until Daniel's Nov 19 centred-cursor directive).
   ok((await call('dbg_warenter', 0)) === 1, 'pad: fresh battle for the gamepad checks');
   await sleep(700);   // entry grace
   ok((await call('dbg_warcur')) === -1, 'pad: no cursor before any pad input');
@@ -600,21 +602,48 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   }, 7000, 200);
   ok(mMoved >= 0 && mMoved !== mBefore, 'pad: A on open ground marched the selection EAST', mBefore + ' -> ' + mMoved);
 
-  // 6 (early, while the camera is known): the right stick pans and
-  // the cursor keeps its SCREEN position
-  const scrOf = async () => {
-    const [ux, uy] = unxy(await call('dbg_warunitxy', meleeA));
-    const [sx, sy] = unpos(await call('dbg_warunitpos', meleeA));
-    const camx = ux - (sx - 320), camy = uy - (sy - 180 + 23);
-    const [qx, qy] = unxy(await call('dbg_warcur'));
-    return [320 + (qx - camx), 180 + (qy - camy - 23), camx];
-  };
+  // 6 (early, while the camera is known): the right stick FLIES the
+  // cursor and the camera centres on it. DERIVATION (Nov 19, 2026):
+  // this check used to assert the v1.16 model — right stick pans the
+  // camera, cursor keeps its SCREEN spot. Daniel's Nov 19 directive
+  // supersedes that model outright ("the cursor to always be
+  // centered... allow the view to go off screen"): the pan is what
+  // stranded the cursor off-centre. The new assertions are STRONGER,
+  // not weaker: the cursor's arena x must advance with the stick
+  // (the old check never proved the cursor moved at all), its screen
+  // spot must be the field centre (320,157) before AND after (the
+  // old check allowed any constant offset), and the camera must sit
+  // ON the cursor. scrOf reads a reference pair + the cursor in ONE
+  // evaluate. The ruler is ANY unit or terrain feature whose screen
+  // pos is honest: the pos exports clamp negative screen coords to
+  // 0, and the mustered melee roams off and fights, so pinning the
+  // ruler to it read garbage (screen y=185-194 for a cursor the
+  // scanning version of this same flow reads at 320,157).
+  const scrOf = async () => page.evaluate(() => {
+    const T = window.__TSG;
+    const cur = T.dbg_warcur();
+    const qx = Math.floor(cur / 10000), qy = cur % 10000;
+    const derive = (axy, apos) => {
+      if (axy < 0 || apos < 0) return null;
+      const ax = Math.floor(axy / 10000), ay = axy % 10000;
+      const sx = apos % 10000, sy = Math.floor(apos / 10000);
+      if (sx < 2 || sy < 2) return null;
+      const camx = ax - (sx - 320), camy = ay - (sy - 180 + 23);
+      return [320 + (qx - camx), 180 + (qy - camy - 23), camx, qx];
+    };
+    for (let i = 0; i < 80; i++) { const r = derive(T.dbg_warunitxy(i), T.dbg_warunitpos(i)); if (r) return r; }
+    const tn = T.dbg_warterrain();
+    for (let t = 0; t < tn; t++) { const r = derive(T.dbg_warfeatxy(t), T.dbg_warfeatpos(t)); if (r) return r; }
+    return [-999, -999, -999, qx];
+  });
   const scr0 = await scrOf();
   await padAxes(0, 0, 1, 0); await sleep(500); await padAxes(0, 0, 0, 0); await sleep(200);
   const scr1 = await scrOf();
-  ok(Math.abs(scr1[0] - scr0[0]) <= 8 && Math.abs(scr1[1] - scr0[1]) <= 8 && scr1[2] > scr0[2] + 60,
-     'pad: right stick panned the camera, cursor SCREEN-locked',
-     `screen ${scr0[0]},${scr0[1]} -> ${scr1[0]},${scr1[1]}, camx ${scr0[2]} -> ${scr1[2]}`);
+  ok(Math.abs(scr0[0] - 320) <= 8 && Math.abs(scr0[1] - 157) <= 8 &&
+     Math.abs(scr1[0] - 320) <= 8 && Math.abs(scr1[1] - 157) <= 8 &&
+     scr1[3] > scr0[3] + 60 && Math.abs(scr1[2] - scr1[3]) <= 3,
+     'pad: right stick flew the cursor, camera centred on it (v1.25 centred model)',
+     `screen ${scr0[0]},${scr0[1]} -> ${scr1[0]},${scr1[1]}, curx ${scr0[3]} -> ${scr1[3]}, camx ${scr1[2]}`);
 
   // 4. the command bar by pad: select the Core with A — v1.20: the
   // selection captures the bar with the first button already lit —

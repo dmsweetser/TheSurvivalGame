@@ -24,17 +24,17 @@ const T = (name, ok, info) => { console.log((ok ? 'PASS' : 'FAIL') + ' | ' + nam
   await call('dbg_tp', 0, 80); await sleep(150);
   await key('KeyE', 300);                        // enter the mall properly
   T('in the mall', (await call('dbg_mall')) === 1, await call('dbg_mall'));
-  await call('dbg_tp', 60, CY + 134);            // west of the gate, in its band
+  await call('dbg_tp', 60, CY + 174);            // west of the gate, in its band (band moved +40 with the south wall, v1.25 MALL ENLARGEMENT)
   await sleep(150);
   await page.keyboard.down('KeyD');              // walk east into the gate block
   let maxx = -1e9;
   for (let i = 0; i < 30; i++) { await sleep(100); const x = await call('dbg_px'); if (x > maxx) maxx = x; }
   await page.keyboard.up('KeyD');
   const fx = await call('dbg_px');
-  // gate west face with radius: 185-52-11 = 122. Stuck-out means ~122;
-  // the old bug parked you at 185-52+11 = 144, inside the block.
-  T('walking east into the gate stops at its west face', fx > 112 && fx < 134, 'x=' + fx);
-  T('never shoved inside the block', maxx < 134, 'maxx=' + maxx);
+  // gate west face with radius: BW_SX 215-52-11 = 152. Stuck-out means ~152;
+  // the old bug parked you at 215-52+11 = 174, inside the block.
+  T('walking east into the gate stops at its west face', fx > 142 && fx < 164, 'x=' + fx);
+  T('never shoved inside the block', maxx < 164, 'maxx=' + maxx);
   console.log(fails.length ? 'GATETEST FAILURES: ' + fails.join(', ') : 'GATETEST ALL PASS');
   await browser.close(); process.exit(fails.length ? 1 : 0);
 })().catch(e => { console.error('ERR', e.message); process.exit(1); });

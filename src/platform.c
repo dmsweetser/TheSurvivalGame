@@ -9,6 +9,8 @@
 // ===========================================================================
 #ifdef PLAT_WASM
 __attribute__((import_module("env"), import_name("js_now")))   double js_now(void);
+__attribute__((import_module("env"), import_name("js_daynum"))) int js_daynum(void);
+__attribute__((import_module("env"), import_name("js_minutes"))) double js_minutes(void);
 __attribute__((import_module("env"), import_name("js_note")))  void js_note(int,int,int,int);
 __attribute__((import_module("env"), import_name("js_save")))  void js_save(int, const char*, int);
 __attribute__((import_module("env"), import_name("js_load")))  int js_load(int, char*, int);
@@ -19,6 +21,8 @@ __attribute__((import_module("env"), import_name("js_net_recv")))  int js_net_re
 __attribute__((import_module("env"), import_name("js_net_src")))   int js_net_src(void);
 
 double plat_now(void){ return js_now(); }
+int plat_daynum(void){ return js_daynum(); }
+float plat_minutes(void){ return (float)js_minutes(); }
 void plat_note(int ch, int note, int vel, int instr){ js_note(ch, note, vel, instr); }
 void plat_save(const char *d, int len){ js_save(0, d, len); }
 int plat_load(char *buf, int cap){ return js_load(0, buf, cap); }
@@ -78,6 +82,9 @@ __attribute__((export_name("pads"))) void exp_pads(int n){ IN.pad_count = n; }
 __attribute__((export_name("pad_axes"))) void exp_pad_axes(float lx, float ly, float rx, float ry){
     IN.pad_ax[0]=lx; IN.pad_ax[1]=ly; IN.pad_ax[2]=rx; IN.pad_ax[3]=ry;   // web Gamepad axes: +Y is down
 }
+__attribute__((export_name("pad2_axes"))) void exp_pad2_axes(float lx, float ly, float rx, float ry){
+    IN.pad2_ax[0]=lx; IN.pad2_ax[1]=ly; IN.pad2_ax[2]=rx; IN.pad2_ax[3]=ry;   // pad 2, same convention (v1.25 feat 13)
+}
 __attribute__((export_name("text_mode"))) int exp_text_mode(void){
     // nonzero while a text field owns typing: 1/2 = the menu's name/IP
     // fields, 3 = the Whales Only code entry. The web shell watches
@@ -107,16 +114,16 @@ __attribute__((export_name("evt_char"))) void exp_evt_char(int c){
     if (IN.typed_n<16) IN.typed[IN.typed_n++]=(char)c;
 }
 __attribute__((export_name("set_touch"))) void exp_set_touch(int x, int y, int down){
-    IN.touch_x=x; IN.touch_y=y; IN.touch_down=down; if (down) IN.touch_seen=1;
+    IN.touch_x=x; IN.touch_y=y; IN.touch_down=down; if (down){ IN.touch_seen=1; IN.touch_last=IN.dev_t+0.001f; }
 }
 __attribute__((export_name("evt_tap"))) void exp_evt_tap(int x, int y){
-    IN.tap_x=x; IN.tap_y=y; IN.tapped=1; IN.touch_seen=1;
+    IN.tap_x=x; IN.tap_y=y; IN.tapped=1; IN.touch_seen=1; IN.touch_last=IN.dev_t+0.001f;
 }
 __attribute__((export_name("set_mobile"))) void exp_set_mobile(int on){
     IN.mobile_boot = on? 1:0;   // touch-first device: hide key-binding UI
 }
 __attribute__((export_name("touch_point"))) void exp_touch_point(int id, int x, int y, int phase){
-    IN.touch_seen=1;
+    IN.touch_seen=1; IN.touch_last=IN.dev_t+0.001f;
     if (phase==0){   // finger down: claim a slot, note d-pad zone/buttons
         for (int i=0;i<6;i++) if (!IN.tp[i].active){
             IN.tp[i].active=1; IN.tp[i].id=id;
@@ -163,6 +170,13 @@ __attribute__((export_name("autostart"))) void exp_autostart(void){
 const char *plat_join_addr(void){ return 0; }   // the web build never hosts
 __attribute__((export_name("dbg_state"))) int exp_dbg_state(void){ return G.state; }
 __attribute__((export_name("dbg_piece"))) int exp_dbg_piece(void){ return mus_piece(); }
+// ADAPTIVE MUSIC INTENSITY (v1.25 feat 15): the latched level, the
+// raw danger signal, and the context — observed, never steered (the
+// danger itself is staged with the game's own seams: dbg_spawnbug,
+// dbg_tp, dbg_bwhackhere, dbg_bnforce). Nothing here is ever saved.
+__attribute__((export_name("dbg_muslvl"))) int exp_dbg_muslvl(void){ return mus_dbg_lvl(); }
+__attribute__((export_name("dbg_mushot"))) int exp_dbg_mushot(void){ return mus_dbg_hot(); }
+__attribute__((export_name("dbg_musctx"))) int exp_dbg_musctx(void){ return mus_dbg_ctx(); }
 __attribute__((export_name("dbg_whale"))) int exp_dbg_whale(void){ return G.whale_own; }
 __attribute__((export_name("dbg_whaleon"))) int exp_dbg_whaleon(void){ return G.whale_on; }
 static char dbg_code_scratch[200];
@@ -170,6 +184,12 @@ __attribute__((export_name("dbg_scratch"))) char *exp_dbg_scratch(void){ return 
 __attribute__((export_name("dbg_redeem"))) int exp_dbg_redeem(void){
     int s = whale_redeem(dbg_code_scratch); if (s>=0) whale_grant(s); return s; }
 __attribute__((export_name("dbg_kills"))) int exp_dbg_kills(void){ return G.total_kills; }
+__attribute__((export_name("dbg_fs"))) int exp_dbg_fs(void){ return G.fs_state*10 + G.fs_step; }
+__attribute__((export_name("dbg_fspool"))) int exp_dbg_fspool(void){ int id = G.my_id>=0? G.my_id : 0; return G.fs_pool[id]; }
+__attribute__((export_name("dbg_comfort"))) int exp_dbg_comfort(void){ return G.vol_music*10000 + G.vol_sfx*100 + G.mute_all*10 + G.shake_on; }
+__attribute__((export_name("dbg_shake"))) int exp_dbg_shake(void){ return (int)(G.shake*100); }
+__attribute__((export_name("dbg_fxshake"))) int exp_dbg_fxshake(void){ fx_shake(3.0f); return (int)(G.shake*100); }
+__attribute__((export_name("dbg_shkoff"))) int exp_dbg_shkoff(void){ return (int)(shk_off_x*100); }
 __attribute__((export_name("dbg_bugs"))) int exp_dbg_bugs(void){
     int n=0; for (int i=0;i<MAXBUGS;i++) if (G.bugs[i].alive) n++; return n; }
 __attribute__((export_name("dbg_bugavgw"))) int exp_dbg_bugavgw(void){
@@ -187,6 +207,12 @@ __attribute__((export_name("dbg_walls"))) int exp_dbg_walls(void){
     int n=0; for (int i=0;i<MAXWALLS;i++) if (G.walls[i].alive==1) n++; return n; }
 __attribute__((export_name("dbg_storesel"))) int exp_dbg_storesel(void){ return G.store_sel; }
 __attribute__((export_name("dbg_pads"))) int exp_dbg_pads(void){ return IN.pad_count; }
+__attribute__((export_name("dbg_dev"))) int exp_dbg_dev(void){ return dev_local(); }
+__attribute__((export_name("dbg_devp2"))) int exp_dbg_devp2(void){ return G.p2_slot>=0? dev_of(G.p2_slot) : -1; }
+__attribute__((export_name("dbg_lbl"))) char *exp_dbg_lbl(int act){
+    static char b[16]; scpy(b, lbl2(dev_local(), act), 16); return b; }
+__attribute__((export_name("dbg_lblp2"))) char *exp_dbg_lblp2(int act){
+    static char b[16]; scpy(b, G.p2_slot>=0? lbl2(dev_of(G.p2_slot), act) : "", 16); return b; }
 __attribute__((export_name("dbg_menun"))) int exp_dbg_menun(void){ return menu_count(); }
 __attribute__((export_name("dbg_mdiff"))) int exp_dbg_mdiff(void){ return G.difficulty; }
 __attribute__((export_name("dbg_mzen"))) int exp_dbg_mzen(void){ return G.zen; }
@@ -300,8 +326,28 @@ __attribute__((export_name("dbg_bowl_score"))) int exp_dbg_bowl_score(void){
     return t;
 }
 __attribute__((export_name("dbg_bowl_frame"))) int exp_dbg_bowl_frame(void){ return G.bowl[G.my_id].frame*10 + G.bowl[G.my_id].ball; }
+__attribute__((export_name("dbg_bowl_msgt"))) int exp_dbg_bowl_msgt(void){ return (int)(G.bowl[G.my_id].msg_t*1000); }
 __attribute__((export_name("dbg_bowl_over"))) int exp_dbg_bowl_over(void){ return G.bowl[G.my_id].game_over; }
 __attribute__((export_name("dbg_bowl_pins"))) int exp_dbg_bowl_pins(void){ return bowl_pins_up(&G.bowl[G.my_id]); }
+// BUG BOWL LEAGUE (v1.25 feat 10): the league book of the local
+// player, one field per id (0 games, 1 best, 2 pins, 3 strikes,
+// 4 season, 5 night, 6 spins, 7 trophies, 8 last_score, 9 last_place,
+// 10 fin_place, 11 last_night, 12 fin_season, 13 xp-pool note via
+// dbg_lgxp below), plus the rival functions the draw itself reads —
+// so the suite asserts the game's own arithmetic, not a copy.
+__attribute__((export_name("dbg_lg"))) int exp_dbg_lg(int f){
+    BowlLeague *L=&G.blg[G.my_id];
+    switch (f){
+        case 0: return L->games; case 1: return L->best; case 2: return L->pins;
+        case 3: return L->strikes; case 4: return L->season; case 5: return L->night;
+        case 6: return L->spins; case 7: return L->trophies; case 8: return L->last_score;
+        case 9: return L->last_place; case 10: return L->fin_place; case 11: return L->last_night;
+        case 12: return L->fin_season; default: return -1;
+    }
+}
+__attribute__((export_name("dbg_lgrival"))) int exp_dbg_lgrival(int season, int night, int r){ return lg_rival_score(season, night, r); }
+__attribute__((export_name("dbg_lgtotal"))) int exp_dbg_lgtotal(int season, int r, int nights){ return lg_rival_total(season, r, nights); }
+__attribute__((export_name("dbg_lgname"))) char *exp_dbg_lgname(int r){ return (char*)LG_RIVAL_NAME[r<0? 0 : r>2? 2 : r]; }
 __attribute__((export_name("dbg_track"))) int exp_dbg_track(void){ return mus_piece(); }
 __attribute__((export_name("dbg_setthreat"))) void exp_dbg_setthreat(int t){ threat_override = t<0? -1 : t*0.1f; }
 __attribute__((export_name("dbg_diff"))) int exp_dbg_diff(void){ return G.diff_run; }
@@ -367,6 +413,103 @@ __attribute__((export_name("dbg_casitems"))) int exp_dbg_casitems(void){ int id 
 __attribute__((export_name("dbg_casgive"))) int exp_dbg_casgive(int what){ int id = G.my_id>=0? G.my_id : 0; if (what==1) BWS[id].cas_sword = 1; else if (what==2) BWS[id].cas_key = 1; return BWS[id].cas_sword + BWS[id].cas_key*2; }
 __attribute__((export_name("dbg_casmon"))) int exp_dbg_casmon(void){ int id = G.my_id>=0? G.my_id : 0; int n = 0; for (int i=0;i<15;i++) if (BWS[id].cas_malive[i] && BWS[id].cas_mroom[i]==BWS[id].cas_room) n++; return n; }
 __attribute__((export_name("dbg_casbest"))) int exp_dbg_casbest(void){ int id = G.my_id>=0? G.my_id : 0; return G.bud[id].cas_best; }
+__attribute__((export_name("dbg_casshuffle"))) int exp_dbg_casshuffle(void){ int id = G.my_id>=0? G.my_id : 0; return BWS[id].cas_shuffle; }
+__attribute__((export_name("dbg_casseed"))) int exp_dbg_casseed(void){ int id = G.my_id>=0? G.my_id : 0; return BWS[id].cas_seed; }
+__attribute__((export_name("dbg_cassetseed"))) int exp_dbg_cassetseed(int n){ g_cas_seed_override = n; return n; }
+__attribute__((export_name("dbg_casitemroom"))) int exp_dbg_casitemroom(int it){ int id = G.my_id>=0? G.my_id : 0; return BWS[id].cas_iroom[it]; }
+__attribute__((export_name("dbg_casitemx"))) int exp_dbg_casitemx(int it){ int id = G.my_id>=0? G.my_id : 0; return (int)(BWS[id].cas_ix[it] - 20000.0f); }
+__attribute__((export_name("dbg_casitemy"))) int exp_dbg_casitemy(int it){ int id = G.my_id>=0? G.my_id : 0; return (int)(BWS[id].cas_iy[it] - 20000.0f); }
+__attribute__((export_name("dbg_casmonroom"))) int exp_dbg_casmonroom(int m){ int id = G.my_id>=0? G.my_id : 0; return BWS[id].cas_mroom[m]; }
+__attribute__((export_name("dbg_casmontype"))) int exp_dbg_casmontype(int m){ int id = G.my_id>=0? G.my_id : 0; return BWS[id].cas_mtype[m]; }
+__attribute__((export_name("dbg_casmonx"))) int exp_dbg_casmonx(int m){ int id = G.my_id>=0? G.my_id : 0; return (int)(BWS[id].cas_mx[m] - 20000.0f); }
+__attribute__((export_name("dbg_casmony"))) int exp_dbg_casmony(int m){ int id = G.my_id>=0? G.my_id : 0; return (int)(BWS[id].cas_my[m] - 20000.0f); }
+// TROPHY CASE (v1.25 feat 4): the case panel's own words, read back
+// through the very helpers the panel draws with — the suite asserts
+// what the player sees, not a re-implementation of it.
+__attribute__((export_name("dbg_caserows"))) int exp_dbg_caserows(void){ int id = G.my_id>=0? G.my_id : 0; return station_rows(5, &G.p[id]); }
+__attribute__((export_name("dbg_casename"))) char *exp_dbg_casename(int row){ static char b[48]; int id = G.my_id>=0? G.my_id : 0; const char *s = station_row_name(5, row, &G.p[id], b); if (s!=b) scpy(b, s, 48); return b; }
+__attribute__((export_name("dbg_caseright"))) char *exp_dbg_caseright(int row){ static char b[32]; int id = G.my_id>=0? G.my_id : 0; const char *s = station_row_right(5, row, &G.p[id], b); if (s!=b) scpy(b, s, 32); return b; }
+__attribute__((export_name("dbg_caseblurb"))) char *exp_dbg_caseblurb(int row){ int id = G.my_id>=0? G.my_id : 0; return (char*)station_blurb(5, row, &G.p[id]); }
+// WEEKLY CHALLENGE (v1.25 feat 6): the board's own words through the
+// panel helpers, plus the week seam — dbg_wksetday pins the perceived
+// day (a day number; <0 hands the clock back to the device) so the
+// suite can live in a known week and roll weeks on demand.
+__attribute__((export_name("dbg_wksetday"))) int exp_dbg_wksetday(int d){ wk_test_set_day(d); return wk_week_now(); }
+__attribute__((export_name("dbg_wkweek"))) int exp_dbg_wkweek(void){ return wk_week_now(); }
+__attribute__((export_name("dbg_wk"))) int exp_dbg_wk(void){ return G.wk_week; }
+__attribute__((export_name("dbg_wktype"))) int exp_dbg_wktype(void){ if (!G.wk_week) return -1; int t,tg; wk_challenge(G.wk_week, &t, &tg); return t; }
+__attribute__((export_name("dbg_wktarget"))) int exp_dbg_wktarget(void){ if (!G.wk_week) return -1; int t,tg; wk_challenge(G.wk_week, &t, &tg); return tg; }
+__attribute__((export_name("dbg_wkprog"))) int exp_dbg_wkprog(void){ return G.wk_week? wk_progress() : -1; }
+__attribute__((export_name("dbg_wkdone"))) int exp_dbg_wkdone(void){ return (G.wk_week && G.wk_done_week==G.wk_week)? 1 : 0; }
+__attribute__((export_name("dbg_wktotal"))) int exp_dbg_wktotal(void){ return G.wk_total; }
+__attribute__((export_name("dbg_wkname"))) char *exp_dbg_wkname(void){ static char b[24]; if (!G.wk_week){ scpy(b, "", 24); return b; } int t,tg; wk_challenge(G.wk_week, &t, &tg); scpy(b, WK_NAME[t], 24); return b; }
+__attribute__((export_name("dbg_wkrows"))) int exp_dbg_wkrows(void){ int id = G.my_id>=0? G.my_id : 0; return station_rows(6, &G.p[id]); }
+__attribute__((export_name("dbg_wkrowname"))) char *exp_dbg_wkrowname(int row){ static char b[48]; int id = G.my_id>=0? G.my_id : 0; const char *s = station_row_name(6, row, &G.p[id], b); if (s!=b) scpy(b, s, 48); return b; }
+__attribute__((export_name("dbg_wkrowright"))) char *exp_dbg_wkrowright(int row){ static char b[32]; int id = G.my_id>=0? G.my_id : 0; const char *s = station_row_right(6, row, &G.p[id], b); if (s!=b) scpy(b, s, 32); return b; }
+// THE LIVING SKY (v1.25 feat 12): the clock seam and the pure
+// functions, observed. dbg_todset pins the perceived minutes of day
+// (tenths; <0 hands the clock back to the device) and dbg_todday
+// pins the perceived daynum for the sky/weather only — the Weekly
+// Challenge's own seam is untouched. Nothing here is ever saved.
+__attribute__((export_name("dbg_todset"))) int exp_dbg_todset(int min_x10){ tod_test_set_min(min_x10 < 0? -1.0f : min_x10/10.0f); return (int)(tod_minutes()*10.0f); }
+__attribute__((export_name("dbg_todday"))) int exp_dbg_todday(int d){ tod_test_set_day(d); return tod_daynum(); }
+__attribute__((export_name("dbg_todmin"))) int exp_dbg_todmin(void){ return (int)(tod_minutes()*10.0f); }
+__attribute__((export_name("dbg_toddk"))) int exp_dbg_toddk(void){ return (int)(tod_darkf()*1000.0f); }
+__attribute__((export_name("dbg_todwarm"))) int exp_dbg_todwarm(void){ return (int)(tod_warmf()*1000.0f); }
+__attribute__((export_name("dbg_todsky"))) int exp_dbg_todsky(int r, int g, int b){ u32 c = tod_sky(COL(r, g, b)); return (COL_R(c)<<16) | (COL_G(c)<<8) | COL_B(c); }
+__attribute__((export_name("dbg_wxkind"))) int exp_dbg_wxkind(int region){ return (region < 0 || region >= NREGIONS)? -1 : WX_KIND[region]; }
+__attribute__((export_name("dbg_wxepoch"))) int exp_dbg_wxepoch(void){ return wx_epoch_now(); }
+__attribute__((export_name("dbg_wx"))) int exp_dbg_wx(int region){ return wx_state(region, wx_epoch_now()); }
+__attribute__((export_name("dbg_wxat"))) int exp_dbg_wxat(int region, int epoch){ return wx_state(region, epoch); }
+// NAMED ELITES (v1.25 feature 8): the bounty board's state, the name
+// derivation, the live elite, and the force seam — dbg_bnforce arms
+// the elevation for the NEXT spawn_bug, which still has to pass the
+// in-spawn gate (cooldown, no live elite, not a client), exactly the
+// way the spawner's own roll does.
+__attribute__((export_name("dbg_bnserial"))) int exp_dbg_bnserial(void){ return G.bn_serial; }
+__attribute__((export_name("dbg_bndone"))) int exp_dbg_bndone(void){ return G.bn_done; }
+__attribute__((export_name("dbg_bncool"))) int exp_dbg_bncool(void){ return (int)(G.bn_cool+0.5f); }
+__attribute__((export_name("dbg_bnname"))) char *exp_dbg_bnname(void){ static char b[24]; scpy(b, ELITE_NAME[bn_name_idx(G.bn_serial)], 24); return b; }
+__attribute__((export_name("dbg_bntitle"))) char *exp_dbg_bntitle(void){ static char b[48]; scpy(b, ELITE_TITLE[bn_name_idx(G.bn_serial)], 48); return b; }
+__attribute__((export_name("dbg_bnkind"))) int exp_dbg_bnkind(void){ return bn_kind_of(G.bn_serial); }
+__attribute__((export_name("dbg_bnforce"))) int exp_dbg_bnforce(void){ bn_force = 1; return 1; }
+__attribute__((export_name("dbg_bnlive"))) int exp_dbg_bnlive(void){ return G.bn_live; }
+__attribute__((export_name("dbg_bnelite"))) int exp_dbg_bnelite(void){ int li = bn_any_live(); return li<0? -1 : G.bugs[li].elite-1; }
+__attribute__((export_name("dbg_bnelitew"))) int exp_dbg_bnelitew(void){ int li = bn_any_live(); return li<0? -1 : (int)(G.bugs[li].w+0.5f); }
+__attribute__((export_name("dbg_bnx"))) int exp_dbg_bnx(void){ int li = bn_any_live(); return li<0? -99999 : (int)G.bugs[li].x; }
+__attribute__((export_name("dbg_bny"))) int exp_dbg_bny(void){ int li = bn_any_live(); return li<0? -99999 : (int)G.bugs[li].y; }
+__attribute__((export_name("dbg_bnsetcool"))) int exp_dbg_bnsetcool(int s){ G.bn_cool = (float)s; return (int)G.bn_cool; }
+__attribute__((export_name("dbg_bnrows"))) int exp_dbg_bnrows(void){ int id = G.my_id>=0? G.my_id : 0; return station_rows(7, &G.p[id]); }
+__attribute__((export_name("dbg_bnrowname"))) char *exp_dbg_bnrowname(int row){ static char b[48]; int id = G.my_id>=0? G.my_id : 0; const char *s = station_row_name(7, row, &G.p[id], b); if (s!=b) scpy(b, s, 48); return b; }
+__attribute__((export_name("dbg_bnrowright"))) char *exp_dbg_bnrowright(int row){ static char b[32]; int id = G.my_id>=0? G.my_id : 0; const char *s = station_row_right(7, row, &G.p[id], b); if (s!=b) scpy(b, s, 32); return b; }
+__attribute__((export_name("dbg_bnblurb"))) char *exp_dbg_bnblurb(int row){ int id = G.my_id>=0? G.my_id : 0; return (char*)station_blurb(7, row, &G.p[id]); }
+__attribute__((export_name("dbg_topearned"))) int exp_dbg_topearned(void){ int id = G.my_id>=0? G.my_id : 0; return G.bud[id].top_earned; }
+__attribute__((export_name("dbg_topworn"))) int exp_dbg_topworn(void){ int id = G.my_id>=0? G.my_id : 0; return G.bud[id].top_worn; }
+__attribute__((export_name("dbg_topwornp"))) int exp_dbg_topwornp(void){ int id = G.my_id>=0? G.my_id : 0; return G.p[id].top_worn; }
+__attribute__((export_name("dbg_topname"))) char *exp_dbg_topname(int t){ static char b[20]; if (t<0||t>TOP_N) t=0; scpy(b, TOP_NAME[t], 20); return b; }
+__attribute__((export_name("dbg_topheavy"))) int exp_dbg_topheavy(int kg){ int id = G.my_id>=0? G.my_id : 0; G.p[id].heaviest = (float)kg; return (int)G.p[id].heaviest; }
+__attribute__((export_name("dbg_budrows"))) int exp_dbg_budrows(void){ int id = G.my_id>=0? G.my_id : 0; return station_rows(G.p[id].in_store? G.p[id].station : 3, &G.p[id]); }
+__attribute__((export_name("dbg_budrowname"))) char *exp_dbg_budrowname(int row){ static char b[48]; int id = G.my_id>=0? G.my_id : 0; const char *s = station_row_name(G.p[id].in_store? G.p[id].station : 3, row, &G.p[id], b); if (s!=b) scpy(b, s, 48); return b; }
+// HAT PORTRAIT BOOTH (v1.25 feat 9): the booth's state, read-only —
+// suites enter and pose through real input and observe through these
+__attribute__((export_name("dbg_portstage"))) int exp_dbg_portstage(void){ int id = G.my_id>=0? G.my_id : 0;
+    // feat 9's numbering, kept stable across the MALL ENLARGEMENT: 5 = the
+    // booth's rows are open, 6 = the gallery, 0 = neither. The booth is
+    // station 8 now and its stage lives in booth_stage.
+    if (booth_stage[id]) return 6;
+    if (G.p[id].in_store && G.p[id].station==8) return 5;
+    return bud_stage[id]; }
+__attribute__((export_name("dbg_portbd"))) int exp_dbg_portbd(void){ int id = G.my_id>=0? G.my_id : 0; return port_bd[id]; }
+__attribute__((export_name("dbg_porthat"))) int exp_dbg_porthat(void){ int id = G.my_id>=0? G.my_id : 0; return port_hat[id]; }
+__attribute__((export_name("dbg_porthas"))) int exp_dbg_porthas(void){ int id = G.my_id>=0? G.my_id : 0; return portrait[id].has; }
+__attribute__((export_name("dbg_portkg"))) int exp_dbg_portkg(void){ int id = G.my_id>=0? G.my_id : 0; return portrait[id].kg; }
+__attribute__((export_name("dbg_porttop"))) int exp_dbg_porttop(void){ int id = G.my_id>=0? G.my_id : 0; return portrait[id].top_worn; }
+__attribute__((export_name("dbg_portn"))) int exp_dbg_portn(void){ int id = G.my_id>=0? G.my_id : 0; return portrait[id].stack_n; }
+__attribute__((export_name("dbg_portbk"))) int exp_dbg_portbk(void){ int id = G.my_id>=0? G.my_id : 0; return portrait[id].backdrop; }
+__attribute__((export_name("dbg_porthaton"))) int exp_dbg_porthaton(void){ int id = G.my_id>=0? G.my_id : 0; return portrait[id].hat_on; }
+__attribute__((export_name("dbg_portkind"))) int exp_dbg_portkind(int i){ int id = G.my_id>=0? G.my_id : 0; if (i<0 || i>=MAXSTACK) return -1; return portrait[id].kinds[i]; }
+__attribute__((export_name("dbg_portserial"))) int exp_dbg_portserial(void){ return G.port_req_serial; }
+__attribute__((export_name("dbg_budrowright"))) char *exp_dbg_budrowright(int row){ static char b[32]; int id = G.my_id>=0? G.my_id : 0; const char *s = station_row_right(G.p[id].in_store? G.p[id].station : 3, row, &G.p[id], b); if (s!=b) scpy(b, s, 32); return b; }
 __attribute__((export_name("dbg_casx"))) int exp_dbg_casx(void){ int id = G.my_id>=0? G.my_id : 0; return (int)(G.bud[id].x - 20000.0f); }
 __attribute__((export_name("dbg_casy"))) int exp_dbg_casy(void){ int id = G.my_id>=0? G.my_id : 0; return (int)(G.bud[id].y - 20000.0f); }
 __attribute__((export_name("dbg_crtstate"))) int exp_dbg_crtstate(void){ int id = G.my_id>=0? G.my_id : 0; return BWS[id].crt_state; }
@@ -394,6 +537,12 @@ __attribute__((export_name("dbg_crtprog"))) int exp_dbg_crtprog(void){ int id = 
 __attribute__((export_name("dbg_crttime"))) int exp_dbg_crttime(void){ int id = G.my_id>=0? G.my_id : 0; return (int)(BWS[id].crt_t * 10.0f); }
 __attribute__((export_name("dbg_crtbest"))) int exp_dbg_crtbest(void){ int id = G.my_id>=0? G.my_id : 0; return G.bud[id].crt_best_pos; }
 __attribute__((export_name("dbg_crtbesttime"))) int exp_dbg_crtbesttime(void){ int id = G.my_id>=0? G.my_id : 0; return G.bud[id].crt_best_time; }
+// MEDAL TIMES (v1.25 feat 3): read the per-track best + derived medal
+// through the same table the game renders with; set the live race clock
+// so a test can land a finish at a chosen time via the real record path
+__attribute__((export_name("dbg_crttbest"))) int exp_dbg_crttbest(int track){ int id = G.my_id>=0? G.my_id : 0; if (track<0 || track>7) return -1; return G.bud[id].crt_tbest[track]; }
+__attribute__((export_name("dbg_crtmedal"))) int exp_dbg_crtmedal(int track){ int id = G.my_id>=0? G.my_id : 0; if (track<0 || track>7) return -1; return medal_tier(G.bud[id].crt_tbest[track], CRT_MEDAL[track]); }
+__attribute__((export_name("dbg_crtsettime"))) int exp_dbg_crtsettime(int ds){ int id = G.my_id>=0? G.my_id : 0; BWS[id].crt_t = ds * 0.1f; return (int)(BWS[id].crt_t * 10.0f); }
 __attribute__((export_name("dbg_crtskip"))) int exp_dbg_crtskip(void){ int id = G.my_id>=0? G.my_id : 0; BwSim *S = &BWS[id];
     if (G.bud[id].bw_mode != 7) return -1;
     // park the player a short straight from home on the final lap
@@ -512,6 +661,38 @@ __attribute__((export_name("dbg_warfeatpos"))) int exp_dbg_warfeatpos(int t){ in
     if (sx<0) sx=0; if (sy<0) sy=0; return sx + sy*10000; }
 __attribute__((export_name("dbg_warfog"))) int exp_dbg_warfog(int x, int y){ int id = G.my_id>=0? G.my_id : 0; BwSim *S = &BWS[id];
     if (S->war_state==0) return -1; return war_fog_at(S, WAR_OX + (float)x, WAR_OY + (float)y); }
+// WAR! co-op (v1.25 feat 13) test hooks: the second commander's link,
+// view and the shared battle read from their side. All return
+// sentinels when there is no local P2.
+__attribute__((export_name("dbg_warduo"))) int exp_dbg_warduo(void){ int id = G.my_id>=0? G.my_id : 0; return BWS[id].war_duo; }   // my sim's co-commander (-1 none — a fresh sim reads 0 until its first war_update self-heals it to -1)
+__attribute__((export_name("dbg_warlink2"))) int exp_dbg_warlink2(void){ if (G.p2_slot<0) return -9; return BWS[G.p2_slot].war_guest; }   // P2's link: 0 = not a guest, else owner pi + 1
+__attribute__((export_name("dbg_warduo2"))) int exp_dbg_warduo2(void){ if (G.p2_slot<0) return -9; return BWS[G.p2_slot].war_duo; }   // P2 as owner: their co-commander
+__attribute__((export_name("dbg_war2state"))) int exp_dbg_war2state(void){ if (G.p2_slot<0) return -9; return (G.bud[G.p2_slot].in_bw && G.bud[G.p2_slot].bw_mode==8)? BWS[G.p2_slot].war_state : -1; }   // in_bw matters: bw_exit leaves bw_mode stale at 8 (dbg_bwstate2's convention)
+__attribute__((export_name("dbg_war2cur"))) int exp_dbg_war2cur(void){ if (G.p2_slot<0) return -9; BwSim *S = &BWS[G.p2_slot];
+    if (!S->war_curon) return -1; return (int)(S->war_curx-WAR_OX)*10000 + (int)(S->war_cury-WAR_OY); }
+__attribute__((export_name("dbg_war2cam"))) int exp_dbg_war2cam(void){ if (G.p2_slot<0) return -9; BwSim *S = &BWS[G.p2_slot];
+    return (int)(S->war_camx-WAR_OX)*10000 + (int)(S->war_camy-WAR_OY); }
+__attribute__((export_name("dbg_war2sel"))) int exp_dbg_war2sel(void){ if (G.p2_slot<0) return -9; return war_sel_count(&BWS[G.p2_slot]); }
+__attribute__((export_name("dbg_war2selstruct"))) int exp_dbg_war2selstruct(void){ if (G.p2_slot<0) return -9; return BWS[G.p2_slot].war_selstruct; }
+__attribute__((export_name("dbg_war2barcap"))) int exp_dbg_war2barcap(void){ if (G.p2_slot<0) return -9; if (!BWS[G.p2_slot].war_barcap) return 0; return BWS[G.p2_slot].war_barhl_row? 2 : 1; }
+__attribute__((export_name("dbg_war2barhl"))) int exp_dbg_war2barhl(void){ if (G.p2_slot<0) return -9; return BWS[G.p2_slot].war_barhl; }
+__attribute__((export_name("dbg_war2bits"))) int exp_dbg_war2bits(void){ if (G.p2_slot<0) return -9; BwSim *S = &BWS[G.p2_slot];
+    if (S->war_guest) S = &BWS[S->war_guest-1]; return S->war_bits; }   // the shared purse, read from the guest's side
+__attribute__((export_name("dbg_war2structxy"))) int exp_dbg_war2structxy(int i){ if (G.p2_slot<0) return -9; BwSim *S = &BWS[G.p2_slot];
+    if (S->war_guest) S = &BWS[S->war_guest-1];
+    if (i<0 || i>=WAR_MAXS || S->war_shp[i]<=0) return -1;
+    return (int)(S->war_sx[i]-WAR_OX)*10000 + (int)(S->war_sy[i]-WAR_OY); }   // dbg_warstructxy packing, read from P2's side of the link
+__attribute__((export_name("dbg_war2find"))) int exp_dbg_war2find(int type){ if (G.p2_slot<0) return -9; BwSim *S = &BWS[G.p2_slot];
+    if (S->war_guest) S = &BWS[S->war_guest-1];
+    for (int i=0;i<WAR_MAXU;i++) if (S->war_uhp[i]>0 && S->war_utype[i]==type) return i; return -1; }
+__attribute__((export_name("dbg_war2hurt"))) int exp_dbg_war2hurt(int what, int idx, int dmg){ if (G.p2_slot<0) return -9; int o = G.p2_slot; BwSim *S = &BWS[o];
+    if (S->war_guest) o = S->war_guest-1;
+    if (what==0){ war_hurt_unit(o, idx, dmg); return (idx>=0 && idx<WAR_MAXU)? (int)BWS[o].war_uhp[idx] : -1; }
+    war_hurt_struct(o, idx, dmg); return (idx>=0 && idx<WAR_MAXS)? (int)BWS[o].war_shp[idx] : -1; }
+__attribute__((export_name("dbg_war2pause"))) int exp_dbg_war2pause(void){ if (G.p2_slot<0) return -9; BwSim *S = &BWS[G.p2_slot];
+    if (S->war_guest) S = &BWS[S->war_guest-1]; return S->war_pause; }
+__attribute__((export_name("dbg_war2conq"))) int exp_dbg_war2conq(void){ if (G.p2_slot<0) return -9; return G.bud[G.p2_slot].war_prog; }
+__attribute__((export_name("dbg_buddyxp2"))) int exp_dbg_buddyxp2(void){ if (G.p2_slot<0) return -9; return G.bud[G.p2_slot].xp; }
 __attribute__((export_name("dbg_warmove"))) int exp_dbg_warmove(int i, int x, int y){ int id = G.my_id>=0? G.my_id : 0; BwSim *S = &BWS[id];
     if (i<0 || i>=WAR_MAXU || S->war_uhp[i]<=0) return -1;
     S->war_ux[i] = WAR_OX + (float)x; S->war_uy[i] = WAR_OY + (float)y; S->war_utx[i] = S->war_ux[i]; S->war_uty[i] = S->war_uy[i];
@@ -534,6 +715,17 @@ __attribute__((export_name("dbg_platbits"))) int exp_dbg_platbits(void){ int id 
 __attribute__((export_name("dbg_plath"))) int exp_dbg_plath(void){ int id = G.my_id>=0? G.my_id : 0; return BWS[id].plat_hearts; }
 __attribute__((export_name("dbg_platpow"))) int exp_dbg_platpow(void){ int id = G.my_id>=0? G.my_id : 0; return BWS[id].plat_power; }
 __attribute__((export_name("dbg_platdone"))) int exp_dbg_platdone(void){ int id = G.my_id>=0? G.my_id : 0; return G.bud[id].plat_done; }
+// MEDAL TIMES (v1.25 feat 3): per-level best + derived medal, the live
+// level clock (read + set, so a test can land a flag touch at a chosen
+// time through the real record path), the flag column's centre x, and
+// the level-select state
+__attribute__((export_name("dbg_plattbest"))) int exp_dbg_plattbest(int lvl){ int id = G.my_id>=0? G.my_id : 0; if (lvl<1 || lvl>16) return -1; return G.bud[id].plat_tbest[lvl-1]; }
+__attribute__((export_name("dbg_platmedal"))) int exp_dbg_platmedal(int lvl){ int id = G.my_id>=0? G.my_id : 0; if (lvl<1 || lvl>16) return -1; return medal_tier(G.bud[id].plat_tbest[lvl-1], PLAT_MEDAL[lvl-1]); }
+__attribute__((export_name("dbg_plattime"))) int exp_dbg_plattime(void){ int id = G.my_id>=0? G.my_id : 0; return (int)(BWS[id].plat_lvl_t * 10.0f); }
+__attribute__((export_name("dbg_platsettime"))) int exp_dbg_platsettime(int ds){ int id = G.my_id>=0? G.my_id : 0; BWS[id].plat_lvl_t = ds * 0.1f; return (int)(BWS[id].plat_lvl_t * 10.0f); }
+__attribute__((export_name("dbg_platflagx"))) int exp_dbg_platflagx(void){ int id = G.my_id>=0? G.my_id : 0; return (BWS[id].plat_w - 3) * 24 + 12; }
+__attribute__((export_name("dbg_platsel"))) int exp_dbg_platsel(void){ int id = G.my_id>=0? G.my_id : 0; return BWS[id].plat_sel; }
+__attribute__((export_name("dbg_platpick"))) int exp_dbg_platpick(void){ int id = G.my_id>=0? G.my_id : 0; return BWS[id].plat_pick; }
 __attribute__((export_name("dbg_tanklvl"))) int exp_dbg_tanklvl(void){ int id = G.my_id>=0? G.my_id : 0; return BWS[id].tank_lvl; }
 __attribute__((export_name("dbg_tanky"))) int exp_dbg_tanky(void){ int id = G.my_id>=0? G.my_id : 0; return (int)G.bud[id].y; }
 __attribute__((export_name("dbg_tankpass"))) int exp_dbg_tankpass(void){ int id = G.my_id>=0? G.my_id : 0; return BWS[id].tank_pass; }
@@ -644,9 +836,14 @@ __attribute__((export_name("dbg_entdiag"))) int exp_dbg_entdiag(int room, int wh
     if (which==2) return b->bw_seed;
     if (which==1) return (int)(ent_rnd(b, room, 400) % 5);
     if (which==3){ float kx, ky; ent_key_pos(id, room, &kx, &ky); return (int)kx + (int)ky*100000; }
+    if (which==4) return ent_door_ly(b, room);   // DEEPER DOORS (feat 11): the real door's row, so a suite can stand on a duet plate precisely
     return ent_door_locked(id, room);
 }
 __attribute__((export_name("dbg_entlant"))) int exp_dbg_entlant(void){ int id = G.my_id>=0? G.my_id : 0; return BWS[id].ent_lant; }
+__attribute__((export_name("dbg_entchap"))) int exp_dbg_entchap(void){ int id = G.my_id>=0? G.my_id : 0; return BWS[id].ent_chap; }
+__attribute__((export_name("dbg_ent2rec"))) int exp_dbg_ent2rec(void){ int id = G.my_id>=0? G.my_id : 0; return G.bud[id].ent2_best + G.bud[id].ent2_done*10000; }
+__attribute__((export_name("dbg_entduet"))) int exp_dbg_entduet(int room){ int id = G.my_id>=0? G.my_id : 0; return ent_duet_door(id, room); }
+__attribute__((export_name("dbg_entlu"))) int exp_dbg_entlu(void){ int id = G.my_id>=0? G.my_id : 0; return (int)BWS[id].ent_lux + (int)BWS[id].ent_luy*100000; }
 __attribute__((export_name("dbg_enttypo"))) int exp_dbg_enttypo(void){ int id = G.my_id>=0? G.my_id : 0; return (int)BWS[id].ent_tyx + (int)BWS[id].ent_tyy*100000; }
 __attribute__((export_name("dbg_bwenter"))) void exp_dbg_bwenter(void){
     int id = G.my_id>=0? G.my_id : 0; mall_enter(id); bw_enter_mode(id, 0); }
@@ -710,6 +907,8 @@ __attribute__((export_name("dbg_setkills"))) void exp_dbg_setkills(int k){
     int id = G.my_id>=0? G.my_id : 0; G.p[id].kills=k; }
 __attribute__((export_name("dbg_bughp"))) int exp_dbg_bughp(int i){
     return (i>=0 && i<MAXBUGS && G.bugs[i].alive)? (int)G.bugs[i].hp : -1; }
+__attribute__((export_name("dbg_bugw"))) int exp_dbg_bugw(int i){
+    return (i>=0 && i<MAXBUGS && G.bugs[i].alive)? (int)(G.bugs[i].w*10) : -1; }
 __attribute__((export_name("dbg_tp"))) void exp_dbg_tp(int x, int y){
     int id = G.my_id>=0? G.my_id : 0; G.p[id].x=(float)x; G.p[id].y=(float)y; }
 __attribute__((export_name("dbg_xp"))) void exp_dbg_xp(int n){
@@ -740,6 +939,23 @@ __attribute__((export_name("share_info"))) const char *exp_share_info(void){
     q=sapp_int(q, G.zen_run); *q=0;
     return share_buf;
 }
+// HAT PORTRAIT BOOTH (v1.25 feat 9): the shell polls this beside
+// share_info — "serial|x|y|w|h|name|kg" in stage coordinates. The
+// serial only ever changes inside the booth draw, in the same
+// frame whose framebuffer the shell is about to present, so the
+// crop it takes is the portrait the player just snapped.
+static char port_info_buf[128];
+__attribute__((export_name("portrait_info"))) const char *exp_portrait_info(void){
+    char *q=port_info_buf;
+    q=sapp_int(q, G.port_req_serial); *q++='|'; *q=0;
+    q=sapp_int(q, G.port_req_x); *q++='|'; *q=0;
+    q=sapp_int(q, G.port_req_y); *q++='|'; *q=0;
+    q=sapp_int(q, G.port_req_w); *q++='|'; *q=0;
+    q=sapp_int(q, G.port_req_h); *q++='|'; *q=0;
+    q=sappend(q, G.port_req_name); *q++='|'; *q=0;
+    q=sapp_int(q, G.port_req_kg); *q=0;
+    return port_info_buf;
+}
 __attribute__((export_name("dbg_overhat"))) void exp_dbg_overhat(int n){
     int id = G.my_id>=0? G.my_id : 0; Player *p=&G.p[id];
     if (n>MAXSTACK) n=MAXSTACK; if (n<0) n=0;
@@ -763,7 +979,16 @@ __attribute__((export_name("dbg_termord"))) int exp_dbg_termord(void){
 __attribute__((export_name("dbg_boss"))) int exp_dbg_boss(void){
     int id = G.my_id>=0? G.my_id : 0; return BWS[id].bat.active? BWS[id].bat.boss : -1; }
 __attribute__((export_name("dbg_setq"))) void exp_dbg_setq(int q, int s){
-    int id = G.my_id>=0? G.my_id : 0; if (q>=0 && q<4) bw_qset(&G.bud[id], q, s); }
+    int id = G.my_id>=0? G.my_id : 0; Buddy *b=&G.bud[id];
+    // staging only: quests 0-3 shipped with this door; feat 14
+    // extends it across the whole list so a suite can stage a
+    // completed story the way bosstest stages its pieces. The
+    // chapter's own suite stages only quests 0-9 with it — the
+    // chapter itself is earned through the real doors there.
+    if (q>=0 && q<4) bw_qset(b, q, s);
+    else if (q>=4 && q<6) bw_qset_x(b, q, s);
+    else if (q>=6 && q<10) bw_qset2(b, q, s);
+    else if (q>=10 && q<14) bw_qset3(b, q, s); }
 __attribute__((export_name("dbg_bwhackhere"))) void exp_dbg_bwhackhere(void){
     int id = G.my_id>=0? G.my_id : 0; Buddy *b=&G.bud[id]; BwSim *S=&BWS[id];
     // bring a roamer to the buddy, re-homing it to a hacker cell the
@@ -816,6 +1041,18 @@ __attribute__((export_name("dbg_tp2"))) void exp_dbg_tp2(int x, int y){
 __attribute__((export_name("dbg_bwstate2"))) int exp_dbg_bwstate2(void){
     return (G.p2_slot>=0 && G.bud[G.p2_slot].in_bw)? 1 : 0; }
 __attribute__((export_name("dbg_sq2v"))) int exp_dbg_sq2v(void){ int id = G.my_id>=0? G.my_id : 0; return G.bud[id].story_bits2; }
+__attribute__((export_name("dbg_ch2q"))) int exp_dbg_ch2q(void){ int id = G.my_id>=0? G.my_id : 0; Buddy *b=&G.bud[id];
+    return bw_qstate3(b,10) + bw_qstate3(b,11)*4 + bw_qstate3(b,12)*16 + bw_qstate3(b,13)*64; }   // THE REBUILDING (feat 14): chapter quest states, packed
+__attribute__((export_name("dbg_ch2race"))) int exp_dbg_ch2race(void){ int id = G.my_id>=0? G.my_id : 0; BwSim *S=&BWS[id];
+    return S->ch2_race_on? (int)(S->ch2_race_t + 0.999f) : -1; }
+__attribute__((export_name("dbg_ch2escd"))) int exp_dbg_ch2escd(void){ int id = G.my_id>=0? G.my_id : 0;
+    float d = bw_duster_dist(&G.bud[id]); return d<0? -1 : (int)d; }
+__attribute__((export_name("dbg_ch2ex"))) int exp_dbg_ch2ex(void){ int id = G.my_id>=0? G.my_id : 0; return BWS[id].ch2_esc_on? (int)BWS[id].ch2_esc_x : 99999; }
+__attribute__((export_name("dbg_ch2solid"))) int exp_dbg_ch2solid(int x, int y){ int id = G.my_id>=0? G.my_id : 0; return bw_solid_b(&G.bud[id], (float)x, (float)y); }
+__attribute__((export_name("dbg_ch2ey"))) int exp_dbg_ch2ey(void){ int id = G.my_id>=0? G.my_id : 0; return BWS[id].ch2_esc_on? (int)BWS[id].ch2_esc_y : 99999; }
+__attribute__((export_name("dbg_ch2fest"))) int exp_dbg_ch2fest(void){ int id = G.my_id>=0? G.my_id : 0; return BWS[id].ch2_fest_t>0? 1 : 0; }
+__attribute__((export_name("dbg_story10"))) int exp_dbg_story10(void){ int id = G.my_id>=0? G.my_id : 0; Buddy *b=&G.bud[id];
+    int n=0; for (int q=0;q<10;q++) if (bw_qstate_g(b,q)==2) n++; return n; }
 __attribute__((export_name("dbg_ridge"))) int exp_dbg_ridge(int x, int y){ return bw_ridge_solid((float)x, (float)y); }
 __attribute__((export_name("dbg_alertmax"))) int exp_dbg_alertmax(void){
     int id = G.my_id>=0? G.my_id : 0; BwSim *S=&BWS[id]; int m=0;
@@ -838,6 +1075,20 @@ __attribute__((export_name("dbg_hsigntp"))) void exp_dbg_hsigntp(int i){
 __attribute__((export_name("dbg_bwx2"))) int exp_dbg_bwx2(void){
     return G.p2_slot>=0? (int)G.bud[G.p2_slot].bw_x : -99999; }
 #endif // PLAT_WASM
+
+#if defined(PLAT_WIN32) || defined(PLAT_LINUX) || defined(PLAT_MAC)
+// civil date -> days since 1970-01-01 (Hinnant's algorithm, integer
+// only) — shared by the native plat_daynum() implementations below
+// (v1.25 feat 6: the weekly challenge's calendar).
+static int days_from_civil(int y, int m, int d){
+    y -= m <= 2;
+    int era = (y >= 0 ? y : y-399) / 400;
+    int yoe = y - era * 400;                                   // [0, 399]
+    int doy = (153*(m + (m > 2 ? -3 : 9)) + 2)/5 + d-1;        // [0, 365]
+    int doe = yoe * 365 + yoe/4 - yoe/100 + doy;               // [0, 146096]
+    return era * 146097 + doe - 719468;
+}
+#endif
 
 // ===========================================================================
 // PLATFORM: Windows — Win32 + GDI + winmm MIDI + Winsock UDP. Single .exe.
@@ -868,6 +1119,14 @@ double plat_now(void){
     if (!qpf_ok){ QueryPerformanceFrequency(&qpf); qpf_ok=1; }
     LARGE_INTEGER t; QueryPerformanceCounter(&t);
     return (double)t.QuadPart / (double)qpf.QuadPart;
+}
+int plat_daynum(void){
+    SYSTEMTIME st; GetLocalTime(&st);
+    return days_from_civil((int)st.wYear, (int)st.wMonth, (int)st.wDay);
+}
+float plat_minutes(void){
+    SYSTEMTIME st; GetLocalTime(&st);
+    return (float)st.wHour*60.0f + (float)st.wMinute + (float)st.wSecond/60.0f + (float)st.wMilliseconds/60000.0f;
 }
 // --- MIDI ---
 static HMIDIOUT g_midi=0;
@@ -1020,6 +1279,10 @@ static void win32_pad_apply(XIState *s, int ch){
         IN.pad_ax[0] = s->lx/32767.0f; IN.pad_ax[1] = -s->ly/32767.0f;
         IN.pad_ax[2] = s->rx/32767.0f; IN.pad_ax[3] = -s->ry/32767.0f;
     }
+    if (ch==1){   // pad 2's raw sticks (v1.25 feat 13), same flip
+        IN.pad2_ax[0] = s->lx/32767.0f; IN.pad2_ax[1] = -s->ly/32767.0f;
+        IN.pad2_ax[2] = s->rx/32767.0f; IN.pad2_ax[3] = -s->ry/32767.0f;
+    }
     set(ACT_UP,    (b&0x0001) || s->ly>12000);
     set(ACT_DOWN,  (b&0x0002) || s->ly<-12000);
     set(ACT_LEFT,  (b&0x0004) || s->lx<-12000);
@@ -1050,6 +1313,7 @@ static void win32_pad_poll(void){
         win32_pad_apply(&s, ch++);
     }
     if (!count) IN.pad_ax[0]=IN.pad_ax[1]=IN.pad_ax[2]=IN.pad_ax[3]=0;   // no pad: no phantom sticks
+    if (count<2) IN.pad2_ax[0]=IN.pad2_ax[1]=IN.pad2_ax[2]=IN.pad2_ax[3]=0;   // no second pad: no phantom sticks either
     IN.pad_count = count;
 }
 int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR cmd, int show){
@@ -1126,6 +1390,16 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR cmd, int show){
 double plat_now(void){
     struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
     return (double)ts.tv_sec + (double)ts.tv_nsec/1e9;
+}
+int plat_daynum(void){
+    time_t t = time(0); struct tm lt;
+    localtime_r(&t, &lt);
+    return days_from_civil(lt.tm_year+1900, lt.tm_mon+1, lt.tm_mday);
+}
+float plat_minutes(void){
+    time_t t = time(0); struct tm lt;
+    localtime_r(&t, &lt);
+    return (float)lt.tm_hour*60.0f + (float)lt.tm_min + (float)lt.tm_sec/60.0f;
 }
 
 // --- software synth: square / triangle / noise voices with decay ---
@@ -1361,6 +1635,10 @@ static void linux_pad_apply(int *btn, int *ax, int ch){
         IN.pad_ax[0] = ax[0]/32767.0f; IN.pad_ax[1] = ax[1]/32767.0f;
         IN.pad_ax[2] = ax[3]/32767.0f; IN.pad_ax[3] = ax[4]/32767.0f;
     }
+    if (ch==1){   // pad 2's raw sticks (v1.25 feat 13), same mapping
+        IN.pad2_ax[0] = ax[0]/32767.0f; IN.pad2_ax[1] = ax[1]/32767.0f;
+        IN.pad2_ax[2] = ax[3]/32767.0f; IN.pad2_ax[3] = ax[4]/32767.0f;
+    }
     set(ACT_UP,    ax[1]<-12000 || ax[7]<-12000);
     set(ACT_DOWN,  ax[1]>12000  || ax[7]>12000);
     set(ACT_LEFT,  ax[0]<-12000 || ax[6]<-12000);
@@ -1376,10 +1654,11 @@ static void linux_pad_apply(int *btn, int *ax, int ch){
     set(ACT_SPRINT, btn[9] || ax[2]>0);
 }
 static void linux_pad_poll(void){
-    int n=0;
+    int n=0, n2=0;
     if (linux_js_drain(&js_fd, "/dev/input/js0", &js_retry, js_btn, js_ax)){ linux_pad_apply(js_btn, js_ax, 0); n++; }
-    if (linux_js_drain(&js2_fd, "/dev/input/js1", &js2_retry, js2_btn, js2_ax)){ linux_pad_apply(js2_btn, js2_ax, 1); n++; }
+    if (linux_js_drain(&js2_fd, "/dev/input/js1", &js2_retry, js2_btn, js2_ax)){ linux_pad_apply(js2_btn, js2_ax, 1); n++; n2=1; }
     if (!n) IN.pad_ax[0]=IN.pad_ax[1]=IN.pad_ax[2]=IN.pad_ax[3]=0;   // no pad: no phantom sticks
+    if (!n2) IN.pad2_ax[0]=IN.pad2_ax[1]=IN.pad2_ax[2]=IN.pad2_ax[3]=0;   // no second pad: no phantom sticks either
     IN.pad_count = n;
 }
 int main(int argc, char **argv){

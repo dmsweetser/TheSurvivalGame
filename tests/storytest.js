@@ -37,7 +37,7 @@ function T(name, cond, extra) {
   // the gate panel, for real: mall, gate, INTERACT, pick STORY MODE
   await call('dbg_tp', 0, 80);
   await key('KeyE', 200); await sleep(400);
-  await call('dbg_tp', 185, -5908);
+  await call('dbg_tp', 215, -5868);
   await sleep(250);
   await key('KeyE', 200);
   T('gate panel opens', (await poll('dbg_gate', v => v === 1)) === 1);

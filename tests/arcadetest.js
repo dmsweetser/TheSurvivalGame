@@ -33,7 +33,7 @@ function T(name, cond, extra) { if (cond) { pass++; } else { fail++; console.log
 
   // the torii gate panel is trimmed: Down x2 from the top is LEAVE,
   // not ENTRANCES — Space there must close the panel, not launch a game
-  await call('dbg_tp', 185, -5866); await sleep(250);
+  await call('dbg_tp', 215, -5868); await sleep(250);   // the Banzai gate disc (BW_SX 215, MALL_CY+132 — v1.25 MALL ENLARGEMENT)
   await key('KeyE', 250);
   await key('ArrowDown', 200); await key('ArrowDown', 200);
   await key('Space', 300);
@@ -48,7 +48,7 @@ function T(name, cond, extra) { if (cond) { pass++; } else { fail++; console.log
   T('back in the mall after the gate trip', (await call('dbg_mall')) === 1 && (await call('dbg_inarcade')) === 0);
 
   // through the east door into THE ARCADE
-  await call('dbg_tp', 230, -5976); await sleep(200);
+  await call('dbg_tp', 350, -5976); await sleep(200);
   await key('KeyE', 250);
   T('entered the arcade', (await poll('dbg_inarcade', v => v === 1, 4000)) === 1, await call('dbg_inarcade'));
   T('still in the mall safe zone', (await call('dbg_mall')) === 1, await call('dbg_mall'));
@@ -99,6 +99,30 @@ function T(name, cond, extra) { if (cond) { pass++; } else { fail++; console.log
   await key('KeyE', 250);
   T('left the arcade to the mall', (await poll('dbg_inarcade', v => v === 0, 4000)) === 0 && (await call('dbg_mall')) === 1,
     'arc=' + (await call('dbg_inarcade')) + ' mall=' + (await call('dbg_mall')));
+
+  // v1.25 E2E regression: a save written INSIDE the Arcade must not
+  // strand the player outside it after a reload. The load resumes at
+  // the Mall centre (Daniel's rule), but the save's ar= flag used to
+  // survive the load — the reloaded player stood in the Mall still
+  // flagged in_arcade, and the east door (which requires !in_arcade)
+  // refused entry until they left by the exit mat. Found by the
+  // feat-7 battery; the load now clears in_arcade with the rest of
+  // the resume placement.
+  await call('dbg_tp', 350, -5976); await sleep(200);
+  await key('KeyE', 250);
+  T('back inside the arcade for the save test', (await poll('dbg_inarcade', v => v === 1, 4000)) === 1, await call('dbg_inarcade'));
+  await key('KeyP', 400);
+  await key('ArrowDown', 200); await key('ArrowDown', 200);   // SAVE + QUIT row
+  await key('Space', 500);
+  T('save+quit from inside the arcade reaches the title', (await poll('dbg_state', v => v === 0, 5000)) === 0, await call('dbg_state'));
+  await key('Space', 500); await key('Enter', 700);           // CONTINUE, slot 1
+  T('continued after the arcade save', (await poll('dbg_state', v => v === 1, 8000)) === 1, await call('dbg_state'));
+  T('reload resumes at the mall centre', Math.abs(await call('dbg_px')) <= 8 && Math.abs((await call('dbg_py')) + 6000) <= 8 && (await call('dbg_mall')) === 1,
+    'px=' + (await call('dbg_px')) + ' py=' + (await call('dbg_py')));
+  T('...and is NOT flagged in_arcade anymore', (await call('dbg_inarcade')) === 0, await call('dbg_inarcade'));
+  await call('dbg_tp', 350, -5976); await sleep(200);
+  await key('KeyE', 250);
+  T('the east door lets the reloaded player straight back in', (await poll('dbg_inarcade', v => v === 1, 4000)) === 1, await call('dbg_inarcade'));
 
   console.log('arcadetest: ' + pass + ' passed, ' + fail + ' failed');
   await browser.close();

@@ -219,7 +219,7 @@ function pk_from_event(e){
   }
   return -1;
 }
-const pkDown = {}, pkTimers = {}, pkPhys = {};
+const pkDown = {}, pkTimers = {}, pkPhys = {}, pkRel = {};
 addEventListener('keydown', (e)=>{
   audio_init(); if (AC && AC.state==='suspended') AC.resume();
   if (!EX) return;
@@ -235,6 +235,7 @@ addEventListener('keydown', (e)=>{
     // Backspace indistinguishable from a tap on web.
     if (e.key==='Backspace'){
       if (pkTimers[44]){ clearTimeout(pkTimers[44]); pkTimers[44] = 0; }
+      pkRel[44] = 0;   // a genuine physical hold cancels a pending release
       pkPhys[44] = true; pkDown[44] = true; pk_set(44, true); send_raw();
     }
     return;
@@ -245,9 +246,10 @@ addEventListener('keydown', (e)=>{
   const pk = pk_from_event(e);
   if (pk>=0){
     // one edge per physical press: a press counts when the key was up —
-    // including "up but still inside the release latch" (fast re-tap)
-    const wasUp = !pkDown[pk] || !!pkTimers[pk];
+    // including "up but its release is still pending" (fast re-tap)
+    const wasUp = !pkDown[pk] || !!pkTimers[pk] || !!pkRel[pk];
     if (pkTimers[pk]){ clearTimeout(pkTimers[pk]); pkTimers[pk] = 0; }
+    pkRel[pk] = 0;   // a press cancels a pending frame-boundary release
     if (wasUp) EX.press(pk);
     pkDown[pk] = true;
     pk_set(pk, true); send_raw();
@@ -272,6 +274,7 @@ function kb_backspace(){
   if (!EX) return;
   EX.press(44);
   if (pkTimers[44]){ clearTimeout(pkTimers[44]); pkTimers[44] = 0; }
+  pkRel[44] = 0;
   pkDown[44] = true; pk_set(44, true); send_raw();
   // the pulse releases itself after ~120ms — unless a physical key is
   // genuinely holding Backspace down, in which case the keyup latch
@@ -316,10 +319,23 @@ addEventListener('keyup', (e)=>{
   const pk = pk_from_event(e);
   if (pk>=0){
     pkPhys[pk] = false;
-    // latch the release ~120ms so a fast tap still registers as held on
-    // at least one game frame, even at low fps
-    if (pkTimers[pk]) clearTimeout(pkTimers[pk]);
-    pkTimers[pk] = setTimeout(()=>{ pk_set(pk, false); pkDown[pk] = false; pkTimers[pk] = 0; send_raw(); }, 120);
+    // the release is DEFERRED to the frame loop (applied right after
+    // EX.frame()) at keyup+120ms: the shell's long-standing keyup
+    // latch, which stretches every perceived hold by a 120ms tail —
+    // shipped feel that hold-sensitive mechanics (the Runner's
+    // hold-to-rise jump, walk distances, tap combat) calibrate to.
+    // What changed in v1.25 is only HOW the tail is timed: the old
+    // free-running setTimeout could fire arbitrarily late under
+    // load, and nominal expiry for a deliberate 250ms menu tap was
+    // already 370ms — ~10ms under the game's old 380ms menu
+    // auto-repeat delay — so slop stretched taps past the delay and
+    // stepped menus twice (the pause-menu double-step race behind
+    // the loadtest/nametest flakes; root-caused in the v1.25
+    // end-to-end pass, probe-watched landing ~110-200ms after the
+    // keyup). Frame-gating bounds the tail's overshoot to one frame,
+    // and the game now waits 500ms before repeating, so a deliberate
+    // tap's worst-case perceived hold (~390ms) stays well clear.
+    pkRel[pk] = performance.now() + 120;
     e.preventDefault();
   }
 });
@@ -390,6 +406,11 @@ function poll_pad(){
   if (EX.pad_axes){
     const a = pads[0]? pads[0].axes : null;
     EX.pad_axes(a? (a[0]||0) : 0, a? (a[1]||0) : 0, a? (a[2]||0) : 0, a? (a[3]||0) : 0);
+  }
+  // pad 2's raw sticks, same deal (WAR! co-op's second cursor)
+  if (EX.pad2_axes){
+    const a = pads[1]? pads[1].axes : null;
+    EX.pad2_axes(a? (a[0]||0) : 0, a? (a[1]||0) : 0, a? (a[2]||0) : 0, a? (a[3]||0) : 0);
   }
 }
 // ---------- display sizing: letterbox the 640x360 frame into the window.
@@ -593,6 +614,49 @@ document.getElementById('sharebtn').addEventListener('click', (e) => doShare(e.c
 document.getElementById('savecard').addEventListener('click', (e) => saveCard(e.currentTarget));
 document.getElementById('copytxt').addEventListener('click', (e) => copyShareText(e.currentTarget));
 
+// ---------- Hat Portrait Booth (v1.25): the PNG hand-off ----------
+// The game freezes a pose at the Mall's photo booth and, in the
+// same frame it draws the framed portrait, publishes its exact
+// stage rectangle through portrait_info. We crop that rectangle
+// out of the frame, upscale it crisp, and save it the way the
+// score card is saved: share sheet in the app, download elsewhere.
+let lastPortSerial = 0;
+function readPortraitInfo(){
+  if (!EX || !EX.portrait_info || !MEM) return null;
+  try {
+    const ptr = EX.portrait_info();
+    const bytes = new Uint8Array(MEM.buffer, ptr, 128);
+    let s = '';
+    for (let i = 0; i < bytes.length && bytes[i]; i++) s += String.fromCharCode(bytes[i]);
+    const p = s.split('|');
+    if (p.length < 7) return null;
+    return { serial: +p[0] || 0, x: +p[1] || 0, y: +p[2] || 0, w: +p[3] || 0, h: +p[4] || 0, name: p[5] || 'BUDDY', kg: +p[6] || 0 };
+  } catch (e) { return null; }
+}
+async function savePortrait(pi){
+  if (!pi.w || !pi.h) return;
+  const c = document.createElement('canvas'); c.width = pi.w * 4; c.height = pi.h * 4;
+  const g = c.getContext('2d');
+  g.imageSmoothingEnabled = false;   // the frame is pixel art — keep it crisp at 2x
+  try { g.drawImage(off, pi.x * 2, pi.y * 2, pi.w * 2, pi.h * 2, 0, 0, pi.w * 4, pi.h * 4); } catch (e) { return; }
+  const blob = await new Promise((r) => c.toBlob(r, 'image/png'));
+  if (!blob) return;
+  if (window.AndroidShare) { // WebView can't download blobs: share instead (the score card's fork)
+    window.AndroidShare.share(pi.name + ' wore a ' + pi.kg + ' KG carcass hat in THE SURVIVAL GAME. Play it free: ' + GAME_URL, await blobToB64(blob));
+    return;
+  }
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob); a.download = 'survival-portrait.png';
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 4000);
+}
+function pollPortrait(){
+  const pi = readPortraitInfo();
+  if (!pi) return;
+  if (pi.serial === 0) { lastPortSerial = 0; return; }   // a reloaded game re-syncs the shell
+  if (pi.serial !== lastPortSerial) { lastPortSerial = pi.serial; savePortrait(pi); }
+}
+
 // ---------- Whales Only: browser hand-off for unlock codes ----------
 // After paying, the payment page links back here with ?whale=<code>:
 // stash it (survives a reload), clean the URL, hand it to the game.
@@ -629,6 +693,8 @@ async function boot(){
   }catch(e){ document.getElementById('load').style.display='none'; document.getElementById('err').textContent = "Could not load the game payload: "+e; return; }
   const env = {
     js_now: ()=> performance.now()/1000,
+    js_daynum: ()=>{ const d=new Date(); return Math.floor(Date.UTC(d.getFullYear(), d.getMonth(), d.getDate())/86400000); },
+    js_minutes: ()=>{ const d=new Date(); return d.getHours()*60 + d.getMinutes() + d.getSeconds()/60 + d.getMilliseconds()/60000; },
     js_note, js_save, js_load,
     js_net_start, js_net_stop, js_net_send, js_net_recv, js_net_src,
     js_open_url, js_whale_poll,
@@ -677,6 +743,13 @@ async function boot(){
     }
     try{ EX.frame(); }
     catch(e){ document.getElementById('load').style.display='none'; document.getElementById('err').textContent = "The game hit a snag: "+e; return; }
+    // apply due key releases (see the keyup handler): a release is
+    // due 120ms after its keyup; the frame above still saw the key
+    // as held, so the tail overshoots by at most one frame — never
+    // by a free-running timer's unbounded slop
+    { const now = performance.now(); let rel = false;
+      for (const k in pkRel) if (pkRel[k] && now >= pkRel[k]){ pkRel[k] = 0; pkDown[k] = false; pk_set(+k, false); rel = true; }
+      if (rel) send_raw(); }
     if (firstFrame){ firstFrame = false; document.getElementById('load').style.display='none'; }
     const fb = EX.fb();
     img.data.set(new Uint8Array(MEM.buffer, fb, 1280*720*4));
@@ -690,6 +763,9 @@ async function boot(){
       const bar = document.getElementById('sharebar');
       if (bar && (bar.style.display === 'flex') !== over) bar.style.display = over ? 'flex' : 'none';
     }
+    // photo booth: a snapped portrait publishes its frame rect —
+    // save the PNG the moment a new serial appears
+    pollPortrait();
     requestAnimationFrame(loop);
   }
   try{ cv.focus(); }catch(_){}

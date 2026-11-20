@@ -58,7 +58,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   ok((await call('dbg_budname')) === 0, 'buddy starts with name index 0');
   await call('dbg_tp', 0, 80); await sleep(150);
   await key('KeyE', 300);
-  ok(await walkTo(225, -6108, 14), 'walked to the buddies counter');
+  ok(await walkTo(315, -6148, 14), 'walked to the buddies counter');
   await key('KeyE', 350);
   ok((await call('dbg_station')) === 3, 'buddies panel open');
 

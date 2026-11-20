@@ -77,7 +77,17 @@ static void bw_qset(Buddy *b, int q, int s){ b->story_bits = (b->story_bits & ~(
 static int bw_qstate_x(Buddy *b, int q){ if (q<4) return bw_qstate(b,q); return (b->story_bits >> (18+(q-4)*2)) & 3; }
 static int bw_qstate2(Buddy *b, int q){ return (b->story_bits2 >> ((q-6)*2)) & 3; }   // quests 6-9
 static void bw_qset2(Buddy *b, int q, int s){ int sh=(q-6)*2; b->story_bits2 = (b->story_bits2 & ~(3<<sh)) | ((s&3)<<sh); }
-static int bw_qstate_g(Buddy *b, int q){ return q<6? bw_qstate_x(b,q) : bw_qstate2(b,q); }   // any quest, 0-9
+// THE REBUILDING (v1.25 feat 14): the post-game chapter's quests
+// 10-13 live in story_bits2's spare bits 17-24 — no new save token,
+// and a pre-chapter save loads with the chapter unstarted (bits 0).
+static int bw_qstate3(Buddy *b, int q){ return (b->story_bits2 >> (17+(q-10)*2)) & 3; }   // quests 10-13
+static void bw_qset3(Buddy *b, int q, int s){ int sh=17+(q-10)*2; b->story_bits2 = (b->story_bits2 & ~(3<<sh)) | ((s&3)<<sh); }
+static int bw_qstate_g(Buddy *b, int q){ return q<6? bw_qstate_x(b,q) : q<10? bw_qstate2(b,q) : bw_qstate3(b,q); }   // any quest, 0-13
+// "Story complete" has exactly one definition in the game — the
+// Trophy Case's count of quests 0-9 at state 2 — and the chapter's
+// unlock test uses it, so the two can never disagree.
+static int bw_story_complete(Buddy *b){ int n=0; for (int q=0;q<10;q++) if (bw_qstate_g(b,q)==2) n++; return n==10; }
+static int bw_chapter_done(Buddy *b){ if (!bw_story_complete(b)) return 0; for (int q=10;q<14;q++) if (bw_qstate3(b,q)!=2) return 0; return 1; }   // the Story Complete+ flag
 static int bw_lakekills(Buddy *b){ return (b->story_bits2>>8)&3; }
 static void bw_lakekills_set(Buddy *b, int n){ b->story_bits2 = (b->story_bits2 & ~(3<<8)) | ((n&3)<<8); }
 static int bw_signs_read(Buddy *b){ int n=0; for (int i=0;i<6;i++) n += (b->story_bits2>>(11+i))&1; return n; }
@@ -171,6 +181,12 @@ static int bw_bitling_near(Buddy *b, float maxd){
     float dx=x-b->x, dy=y-b->y;
     return dx*dx+dy*dy < maxd*maxd;
 }
+// Duster, the village sweep-bot (feat 14, quest 11): a little round
+// bot who must be walked to the Server Farm to scrub the racks. Its
+// home post stands by the village green, clear of the hut boxes; its
+// heels live in the owner's BwSim like everything else about a trip.
+#define CH2_DUSTER_X (-2470)
+#define CH2_DUSTER_Y (-1380)
 static int bw_npc_near(Buddy *b, float maxd){
     if (b->bw_mode!=1) return -1;
     for (int i=0;i<3;i++){
@@ -387,6 +403,22 @@ typedef struct {
     float ent_bbx, ent_bby, ent_bbdir, ent_bbcharge, ent_noise;
     int ent_loot_rooms[96], ent_loot_n;
     int ent_finished;
+    // DEEPER DOORS (v1.25 feat 11): Chapter 2 run state — per-trip
+    // only, never saved; the records live on the Buddy (e2).
+    // ent_chap is 1 for a Chapter 1 run (the default everywhere)
+    // and 2 for a Deeper run; Lumen's hover point and the duet
+    // door's charge ride along.
+    int ent_chap;
+    float ent_lux, ent_luy, ent_duet_t;
+    // THE REBUILDING (v1.25 feat 14): the post-game chapter's trip
+    // state — per-trip only, never saved; the records live on the
+    // Buddy (sq2 bits 17-24). The cider run's clock, Duster the
+    // sweep-bot's post and heels, and the Patch Day clock.
+    float ch2_race_t; int ch2_race_on;
+    float ch2_esc_x, ch2_esc_y; int ch2_esc_on;
+    float ch2_wp_x, ch2_wp_y; int ch2_wp_on;         // feat 14: the escort's pathing waypoint
+    float ch2_path_t, ch2_stall, ch2_base;           // feat 14: repath cooldown, stall clock, progress baseline
+    float ch2_fest_t;
     // SUPER BUDDY RUN session (mode 3, Nov 5): a side-scrolling
     // platformer. The level is generated into plat_grid on entry;
     // records (levels done) live on the Buddy as pd.
@@ -397,6 +429,11 @@ typedef struct {
     int plat_en_n; PlatEn plat_en[24];
     float plat_fx[8], plat_fy[8], plat_fvx[8], plat_fvy[8], plat_ft[8]; int plat_fa[8];
     unsigned char plat_grid[240*15];
+    // MEDAL TIMES (v1.25 feat 3): a per-level timer (plat_t above is a
+    // session clock and never resets per level), the level-select
+    // state, and what the clear banner reports for the run just done
+    float plat_lvl_t, plat_selt;
+    int plat_sel, plat_pick, plat_show_tds, plat_show_tier, plat_show_newbest;
     // regional alignment (Nov 14): level L IS main-game region
     // (L-1)%8 — same name, ground palette, bug strain and difficulty
     // pressure as the country that far from the epicenter. Plus the
@@ -448,6 +485,9 @@ typedef struct {
     float cas_mx[16], cas_my[16], cas_mwt[16];
     int cas_mtype[16], cas_mhp[16], cas_mroom[16], cas_malive[16];
     unsigned char cas_taken[20];   // item ids: 0-12 treasures, 13 sword, 14 key, 15-16 tonics
+    int cas_shuffle, cas_seed;         // CASTLE SHUFFLE (v1.25 feat 7): this run is a shuffle, and the seed it was dealt
+    unsigned char cas_iroom[17];       // the room each item sits in THIS run (the classic deal or a shuffle deal)
+    float cas_ix[17], cas_iy[17];      // ...and its dealt position (classic fills these from the original formula)
     // SUPER BUDDY CART (bw_mode 7, Nov 14 2026): one race's state.
     // Kart 0 is the player's buddy; 1-5 are AI rivals. Progress is
     // px along the centreline relative to the start line (negative
@@ -515,6 +555,16 @@ typedef struct {
     // categorized command bar. war_bcat: -1 top level (categories),
     // 0 TRAIN, 1 BUILD, 2 DEFENSE. war_pause freezes the battle.
     int war_pause, war_bcat;
+    // WAR! LOCAL CO-OP COMMAND (v1.25 feat 13): two local players
+    // command ONE battle — the battle lives in the OWNER's sim (who
+    // launched it), the other commander is the GUEST. war_duo sits
+    // on the owner's sim (the guest's pi, -1 = none; crt_duo's
+    // convention), war_guest on the guest's sim (owner pi + 1,
+    // 0 = not a guest; crt_guest's convention). A link is trusted
+    // only when both sides agree, so the zero-init state can never
+    // fake one. war_pause_by: who opened the shared battle pause.
+    // All three are runtime-only, never saved, never snapshotted.
+    int war_duo, war_guest, war_pause_by;
     // v1.19: SKIRMISH — ad-hoc WAR! battles off the world map.
     // war_skirmish marks the live battle as ad-hoc (never parked,
     // never touches war_prog); war_aw/war_ah are the LIVE field
@@ -653,6 +703,12 @@ static void bw_boss_start(int pi, int boss){
         S->bat.lvl = 9; S->bat.hmax = 430;
         scpy(S->bat.msg, "THE CACHE HOARDER WAKES ON ITS HOARD!", 96);
         scpy(S->bat.msg2, "IT HAS BEEN SITTING ON THE GATE CRANK FOR YEARS.", 72);
+    } else if (boss==4){
+        // THE REBUILDING (feat 14): the rematch — the original's
+        // mirror trick at a harder weight, between RAID and Zed.
+        S->bat.lvl = 9; S->bat.hmax = 460;
+        scpy(S->bat.msg, "BROKEN RAID, REASSEMBLED!", 96);
+        scpy(S->bat.msg2, "IT KEPT THE RECEIPTS. IT REMEMBERS YOU.", 72);
     } else {
         S->bat.lvl = 12; S->bat.hmax = 560;
         scpy(S->bat.msg, "ZERO-DAY ZED. UNPATCHED. UNBOTHERED.", 96);
@@ -691,6 +747,15 @@ static void bw_battle_end(int pi, int won){
             b->xp += 150;
             for (int it=0; it<4; it++){ b->items[it] += 2; if (b->items[it]>9) b->items[it]=9; }
             scpy(S->note, "ZERO-DAY ZED HAS BEEN FUNERALED. THE MEADOW IS PATCHED.", 72); S->note_t=5.0f; noted=1;
+        } else if (S->bat.boss==4){
+            // THE REBUILDING (feat 14): the rematch is quest 12 —
+            // winning it arms the festival report (quest 13) on the
+            // spot. Story bit 16 (the ORIGINAL Raid) is not touched:
+            // it was already set for anyone who can reach this fight.
+            if (bw_qstate3(b,12)==1){ bw_qset3(b,12,2); bw_qset3(b,13,1); }
+            b->xp += 80;
+            for (int it=0; it<4; it++){ b->items[it] += 1; if (b->items[it]>9) b->items[it]=9; }
+            scpy(S->note, "BROKEN RAID, SCRAPPED FOR GOOD. +80 XP. PATCHINA WILL WANT A FESTIVAL.", 72); S->note_t=5.0f; noted=1;
         }
         // story: clearing hackers AT the farm counts toward the quest
         if (b->bw_mode==1 && S->bat.site==1 && bw_qstate(b, 1)==1){
@@ -721,7 +786,7 @@ static void bw_battle_end(int pi, int won){
     if (b->hp<=0){ b->hp=0; b->fainted=1; bw_exit(pi, 1); }
 }
 static const char *bw_foe_name(BwSim *S){
-    return S->bat.boss==1? "BROKEN RAID" : S->bat.boss==2? "ZERO-DAY ZED" : S->bat.boss==3? "CACHE HOARDER" : bw_hacker_name(S->bat.lvl);
+    return S->bat.boss==1? "BROKEN RAID" : S->bat.boss==2? "ZERO-DAY ZED" : S->bat.boss==3? "CACHE HOARDER" : S->bat.boss==4? "BROKEN RAID MK. II" : bw_hacker_name(S->bat.lvl);
 }
 static void bw_foe_strike(int pi){
     BwSim *S = &BWS[pi];
@@ -729,7 +794,7 @@ static void bw_foe_strike(int pi){
     const char *mv = BW_HACK_MOVE[(S->bat.lvl + (int)(G.anim_t*7)) % 6];
     float f = (1.0f - 0.12f*b->up_def) * BUD_DEF[b->species%BUDN];
     S->bat.strikes++;
-    if (S->bat.boss==1 && S->bat.strikes%3==0){
+    if ((S->bat.boss==1 || S->bat.boss==4) && S->bat.strikes%3==0){   // boss 4 (feat 14) kept the original's mirror trick
         float dmg = S->bat.lastdmg * 0.5f * f; if (dmg<3) dmg=3;
         b->hp -= dmg; if (b->hp<0) b->hp=0;
         scpy(S->bat.msg, "BROKEN RAID MIRRORS YOUR LAST MOVE!", 96);
@@ -864,6 +929,7 @@ static void bw_gate_try(int pi){
     bwgate[pi]=1; bwgate_sel[pi]=0; sfx(19);
 }
 static void bw_enter_mode(int pi, int mode){
+    g_dev_ctx = dev_of(pi);   // v1.25: the entry note names the entering player's controls
     BwSim *S = &BWS[pi];
     Buddy *b=&G.bud[pi];
     if (G.net_mode==NET_CLIENT) return;
@@ -876,29 +942,47 @@ static void bw_enter_mode(int pi, int mode){
         b->bw_x = 0; b->bw_y = 56;
     }
     b->bw_mode = mode;
-    if (mode==2){ ent_reset(pi); }
+    if (mode==2){ ent_reset(pi);
+        // DEEPER DOORS (feat 11): the cabinet panel's chapter
+        // request, consumed here and only here — ent_reset has
+        // defaulted the run to Chapter 1, and no ent_rnd call
+        // happens between the reset and this line
+        S->ent_chap = bw_ent_ch2_req[pi]? 2 : 1; bw_ent_ch2_req[pi]=0; }
     if (mode==1 && !b->story_started){
         b->story_started = 1; bw_qset(b, 0, 1);   // quest 0: meet the elder
     }
     S->defeated_n = 0; S->bat.active = 0; S->sleep_t = 0; S->grace_t = 0; S->note_t = 0;
+    // THE REBUILDING (feat 14): the chapter's clocks are per-trip —
+    // the cider run parks (Patchina's door restarts it), the
+    // festival ends at the gate, and Duster is re-posted at the
+    // village for as long as its escort is still owed.
+    S->ch2_race_on = 0; S->ch2_race_t = 0; S->ch2_fest_t = 0;
+    S->ch2_esc_on = (mode==1 && bw_qstate3(b,11)==1)? 1 : 0;
+    if (S->ch2_esc_on){ S->ch2_esc_x = CH2_DUSTER_X; S->ch2_esc_y = CH2_DUSTER_Y; }
+    S->ch2_wp_on = 0; S->ch2_path_t = 0; S->ch2_stall = 0; S->ch2_base = 1e9f;
     for (int i=0;i<BW_ROAMN;i++) S->roam[i].alert = 0;   // a fresh entry is a fresh temper: no hunt survives the gate (alerts also freeze during battles, so a stale one could otherwise outlive its mode)
     S->log_open = 0; S->site_cur = -2; S->bw_menu = 0; S->bw_msel = 0;
-    if (mode==2){ b->x = 3.5f*BW_TILE; b->y = ENT_DOORY; }
+    if (mode==2){ b->x = 3.5f*BW_TILE; b->y = ENT_DOORY;
+        if (S->ent_chap==2){ S->ent_lux = b->x + 36; S->ent_luy = b->y - 30; } }   // DEEPER DOORS (feat 11): Lumen waits at the threshold
     else if (mode==3){ plat_enter(pi); }
     else if (mode==4){ craft_enter(pi); }
     else if (mode==5){ tank_enter(pi); }
-    else if (mode==6){ cas_enter(pi); }
+    else if (mode==6){ S->cas_shuffle = bw_cas_shuffle_req[pi]; bw_cas_shuffle_req[pi]=0; cas_enter(pi); }
     else if (mode==7){ crt_enter(pi); }
     else if (mode==8){ war_enter(pi); }
     else { b->x = b->bw_x; b->y = b->bw_y; }
     b->in_bw = 1;   // the DEV stays parked at the gate in the mall
-    if (mode==2){ char *q=S->note; q=sappend(q, "ENTRANCES. A COZY HOTEL. "); q=sappend(q, lbl_int()); q=sappend(q, " OPENS DOORS + DRAWERS. MIND THE ZIP BUG."); *q=0; }
+    if (mode==2 && S->ent_chap==2){ char *q=S->note; q=sappend(q, "DEEPER DOORS. LUMEN COMES WITH YOU. "); q=sappend(q, lbl_int()); q=sappend(q, " OPENS DOORS + DRAWERS."); *q=0; }
+    else if (mode==2){ char *q=S->note; q=sappend(q, "ENTRANCES. A COZY HOTEL. "); q=sappend(q, lbl_int()); q=sappend(q, " OPENS DOORS + DRAWERS. MIND THE ZIP BUG."); *q=0; }
     else if (mode==3){ char *q=S->note; q=sappend(q, "LEVEL "); q=sapp_int(q, S->plat_lvl); q=sappend(q, " - "); q=sappend(q, REGION_NAME[S->plat_region]); q=sappend(q, ". "); q=sappend(q, lbl_fire()); q=sappend(q, " JUMPS. STOMP BUGS!"); *q=0; }
     else if (mode==4){ char *q=S->note; q=sappend(q, "BUDDY CRAFT. "); q=sappend(q, lbl_int()); q=sappend(q, " GATHERS + RESTS. "); q=sappend(q, lbl_fire()); q=sappend(q, " SWINGS. "); q=sappend(q, lbl_wall()); q=sappend(q, " CRAFTS."); *q=0; }
     else if (mode==5){ char *q=S->note; q=sappend(q, "TANK RESCUE. "); q=sappend(q, lbl_fire()); q=sappend(q, " FIRES THE CANNON. FREE CAPTIVES, DROP AT PADS."); *q=0; }
+    else if (mode==6 && S->cas_shuffle){ char *q=S->note; q=sappend(q, "CASTLE SHUFFLE! THE TREASURES HAVE MOVED. FIND THE KEY, ESCAPE!"); *q=0; }
     else if (mode==6){ char *q=S->note; q=sappend(q, "CASTLE! RUN INTO THINGS TO TAKE OR FIGHT. FIND THE KEY, ESCAPE!"); *q=0; }
     else if (mode==7){ char *q=S->note; q=sappend(q, "THE WAITING ROOM. PICK YOUR COLOUR!"); *q=0; }
-    else if (mode==8){ char *q=S->note; q=sappend(q, "WAR! TAP A REGION TO INVADE IT. CONQUER ALL EIGHT!"); *q=0; }
+    else if (mode==8){ char *q=S->note; q=sappend(q, "WAR! "); q=sappend(q, hint_dev()==DEV_PAD? "PICK" : lbla(H_POINT)); q=sappend(q, " A REGION TO INVADE IT. CONQUER ALL EIGHT!"); *q=0; }
+    else if (mode==1 && bw_chapter_done(b)) scpy(S->note, "PATCH DAY, EVERY DAY. THE VILLAGE REMEMBERS YOU.", 72);
+    else if (mode==1 && bw_story_complete(b)) scpy(S->note, "BACK TO THE STORY. PATCHINA HAS A NEW LIST.", 72);
     else if (mode==1 && b->story_bits==(1<<0)) scpy(S->note, "STORY MODE. PATCH VILLAGE LIES NORTH-WEST.", 72);
     else if (mode==1) scpy(S->note, "BACK TO THE STORY. THE MEADOW REMEMBERS.", 72);
     else scpy(S->note, "BANZAI WORLD. WATCH FOR HACKERS.", 72);
@@ -927,7 +1011,14 @@ static void bw_gate_draw(int pi, int vx, int vy, int vw2, int vh2){
         if (bwgate_sel[pi]==r){ rect_fill(x+10, ry-3, w-20, 15, COL(70,58,30)); draw_text(x+16, ry, ">", 1, COL(255,220,90)); }
         draw_text(x+30, ry, nm, 1, bwgate_sel[pi]==r? COL(255,244,210) : COL(170,180,170));
     }
-    draw_text_center(x+w/2, y+h-16, DESC[bwgate_sel[pi]%3], 1, COL(150,170,190));
+    { const char *dsc = DESC[bwgate_sel[pi]%3];
+      // THE REBUILDING (feat 14): the gate keeps its shipped three
+      // rows, but STORY MODE's description turns for a finished
+      // story — the chapter advertises itself here, not on a new row
+      if (bwgate_sel[pi]==0 && b->story_started && bw_story_complete(b))
+          dsc = bw_chapter_done(b)? "PATCH DAY, EVERY DAY. THE VILLAGE STANDS TALL AGAIN."
+                                  : "THE VILLAGE IS REBUILDING. PATCHINA HAS A NEW LIST.";
+      draw_text_center(x+w/2, y+h-16, dsc, 1, COL(150,170,190)); }
     if (mobile_ui() && !pad_mode() && pi==G.my_id)
         draw_text_center(x+w/2, y+h-30, "TAP A MODE TO PLAY", 1, COL(120,132,150));
     else { char buf[64]; char *q=buf; q=sappend(q, lbl_fire()); q=sappend(q, " - GO IN    "); q=sappend(q, lbl_exit()); q=sappend(q, " - STAY"); *q=0;
@@ -966,10 +1057,26 @@ static void arc_gate_try(int pi){
     if (b->fainted){ spawn_floater(p->x, p->y-24, "YOUR BUDDY FAINTED - REVIVE IT FIRST", COL(255,150,150)); sfx(16); return; }
     arcgate[pi]=1; arcgate_sel[pi]=0; sfx(19);
 }
+// CASTLE SHUFFLE (v1.25 feat 7): once the buddy has escaped the
+// castle once (cas_best > 0), the CASTLE cabinet's panel — and only
+// that panel — offers a third row, PLAY SHUFFLE, between PLAY
+// CLASSIC and LEAVE. Every other panel, and CASTLE before the
+// first clear, is the shipped two rows.
+// DEEPER DOORS (v1.25 feat 11): the same courtesy at the ENTRANCES
+// cabinet — once the buddy has got out of Entrances once
+// (ent_done > 0), its panel offers CHAPTER 1 / DEEPER DOORS /
+// LEAVE. The two unlocks are independent; each panel checks its
+// own buddy's own record.
+static int arc_gate_rows(int pi){
+    if (arc_cab[pi]%7==4 && G.bud[pi].cas_best>0) return 3;
+    if (arc_cab[pi]%7==0 && G.bud[pi].ent_done>0) return 3;
+    return 2;
+}
 static void arc_gate_draw(int pi, int vx, int vy, int vw2, int vh2){
     Buddy *b=&G.bud[pi];
     int cab = arc_cab[pi]%7;
-    int w = vw2<340? vw2-16 : 320, h = 132;
+    int rows = arc_gate_rows(pi);
+    int w = vw2<340? vw2-16 : 320, h = rows==3? 152 : 132;
     int x = vx + (vw2-w)/2, y = vy + (vh2-h)/2;
     if (y < vy+4) y = vy+4;
     rect_fill(x, y, w, h, COL(14,16,30)); rect_line(x, y, w, h, COL(120,240,255));
@@ -984,9 +1091,11 @@ static void arc_gate_draw(int pi, int vx, int vy, int vw2, int vh2){
         "A CASTLE TO PLUNDER! 13 TREASURES, ONE KEY, ONE GATE.",
         "GRAND PRIX! 4 RACES, 8 REGIONS, 2 CUPS. RANK BY POINTS.",
         "A TAP-FIRST RTS. HARVEST BITS, RAISE BUDDIES, CONQUER 8 REGIONS." };
-    for (int r=0;r<2;r++){
+    for (int r=0;r<rows;r++){
         int ry = y + 52 + r*20;
-        const char *nm = r==0? "PLAY" : "LEAVE";
+        const char *nm = rows==3? (cab==0? (r==0? "CHAPTER 1" : r==1? "DEEPER DOORS" : "LEAVE")   // DEEPER DOORS (feat 11)
+                                          : (r==0? "PLAY CLASSIC" : r==1? "PLAY SHUFFLE" : "LEAVE"))   // CASTLE SHUFFLE (feat 7)
+                                : (r==0? "PLAY" : "LEAVE");
         if (arcgate_sel[pi]==r){ rect_fill(x+10, ry-3, w-20, 15, COL(30,60,80)); draw_text(x+16, ry, ">", 1, COL(140,255,255)); }
         draw_text(x+30, ry, nm, 1, arcgate_sel[pi]==r? COL(235,255,255) : COL(170,180,190));
     }
@@ -997,20 +1106,29 @@ static void arc_gate_draw(int pi, int vx, int vy, int vw2, int vh2){
       draw_text_center(x+w/2, y+h-30, buf, 1, COL(120,132,150)); }
 }
 static void arc_gate_pick(int pi){
-    if (arcgate_sel[pi]==0){
+    int rows = arc_gate_rows(pi);
+    if (arcgate_sel[pi]==0 || (arcgate_sel[pi]==1 && rows==3)){
         int cab = arc_cab[pi]%7;
         arcgate[pi]=0;
         bw_arc_src[pi]=1; bw_arc_cab[pi]=cab;
+        // both pending requests are cabinet-specific (feat 11):
+        // while only CASTLE had a third row, setting the shuffle
+        // request on any 3-row pick was safe; with ENTRANCES
+        // offering one too, an unguarded request would leak a
+        // stale shuffle into a later Castle entry
+        bw_cas_shuffle_req[pi] = (cab==4 && arcgate_sel[pi]==1 && rows==3)? 1 : 0;   // CASTLE SHUFFLE (feat 7)
+        bw_ent_ch2_req[pi] = (cab==0 && arcgate_sel[pi]==1 && rows==3)? 1 : 0;       // DEEPER DOORS (feat 11)
         bw_enter_mode(pi, ARC_MODE[cab]);
     } else { arcgate[pi]=0; sfx(6); }
 }
 static void arc_gate_tap(int pi, int vx, int vy, int vw2, int vh2){
-    int w = vw2<340? vw2-16 : 320, h = 132;
+    int rows = arc_gate_rows(pi);
+    int w = vw2<340? vw2-16 : 320, h = rows==3? 152 : 132;
     int x = vx + (vw2-w)/2, y = vy + (vh2-h)/2;
     if (y < vy+4) y = vy+4;
     IN.tapped = 0;
     if (IN.tap_x<x || IN.tap_x>=x+w || IN.tap_y<y || IN.tap_y>=y+h){ arcgate[pi]=0; sfx(6); return; }
-    for (int r=0;r<2;r++){
+    for (int r=0;r<rows;r++){
         int ry = y + 52 + r*20;
         if (IN.tap_y>=ry-4 && IN.tap_y<=ry+15){ arcgate_sel[pi]=r; arc_gate_pick(pi); return; }
     }
@@ -1029,6 +1147,23 @@ static void p1_view_rect(int *x, int *y, int *w, int *h){
         if (vp1first){ *y=0; *h=seam; } else { *y=seam; *h=VH-seam; }
     }
 }
+// the acting player's OWN view rectangle (v1.25 feat 13): view 0
+// is p1_view_rect above; view 1 is the complementary half, computed
+// exactly as coop_render computes it. Solo / no second player, every
+// pi gets view 0's answer — so P1's callers see no change at all.
+static void pi_view_rect(int pi, int *x, int *y, int *w, int *h){
+    if (pi==G.my_id || G.p2_slot<0){ p1_view_rect(x, y, w, h); return; }
+    if (vsplit_f <= 0.02f && !vsplit){ *x=0; *y=0; *w=VW; *h=VH; return; }
+    if (vorient){
+        int seam = vp1first? VW - (int)((VW/2)*vsplit_f) : (int)((VW/2)*vsplit_f);
+        *y=0; *h=VH;
+        if (vp1first){ *x=seam; *w=VW-seam; } else { *x=0; *w=seam; }
+    } else {
+        int seam = vp1first? VH - (int)((VH/2)*vsplit_f) : (int)((VH/2)*vsplit_f);
+        *x=0; *w=VW;
+        if (vp1first){ *y=seam; *h=VH-seam; } else { *y=0; *h=seam; }
+    }
+}
 static void bw_exit(int pi, int fainted){
     BwSim *S = &BWS[pi];
     Player *p=&G.p[pi]; Buddy *b=&G.bud[pi];
@@ -1037,9 +1172,10 @@ static void bw_exit(int pi, int fainted){
     else { b->bw_x = b->x; b->bw_y = b->y; }
     S->bat.active = 0;
     S->bw_menu = 0;
+    mus_bw_note(pi, 0.0f);   // feat 15: the danger stays behind the gate
     b->in_bw = 0;
     if (S->from_arcade){ int cb2 = S->arc_cab%7; p->x = ARC_SX[cb2]; p->y = ARC_CY + ARC_ROWY[cb2] + 66; }   // back to your cabinet, whichever row it stands in
-    else { p->x = BW_SX; p->y = MALL_CY+96; }
+    else { p->x = BW_SX; p->y = MALL_CY+136; }
     S->from_arcade = 0;
     p->aim = -PI/2;
     b->x = p->x - 30; b->y = p->y + 10;
@@ -1148,12 +1284,49 @@ static void bw_meet_bitling(int pi){
         scpy(S->note, "BITLING: BEEP. (IT SEEMS LOST, AND HAPPY ABOUT IT.)", 72); S->note_t=3.4f;
     }
 }
+// Duster's distance from the buddy (feat 14) — defined here, below
+// BwSim; -1 while the escort is not placed.
+static float bw_duster_dist(Buddy *b){
+    BwSim *S = &BWS[b - G.bud];
+    if (!S->ch2_esc_on) return -1;
+    float dx=b->x-S->ch2_esc_x, dy=b->y-S->ch2_esc_y;
+    return fsqrt(dx*dx + dy*dy);
+}
 static void bw_talk(int pi, int npc){
     BwSim *S = &BWS[pi]; Buddy *b=&G.bud[pi];
     sfx(6);
     S->grace_t = 4.0f;   // a conversation is a breather (Nov 4): with hunters about, nobody should get jumped mid-dialogue or while opening the quest log right after
     if (npc==0){   // Elder Patchina
-        if (bw_qstate(b,0)==1){
+        // THE REBUILDING (v1.25 feat 14): the post-game chapter is
+        // Patchina's new list, and her door is shut until the story
+        // is complete — every arm here is gated on it, and the
+        // shipped chain below is word-for-word untouched. The chain
+        // auto-advances: the escort's finish arms the rematch, the
+        // rematch's win arms the festival report.
+        if (bw_story_complete(b) && bw_qstate3(b,10)==0){
+            bw_qset3(b,10,1); S->ch2_race_t = 120; S->ch2_race_on = 1;   // she is the start line
+            scpy(S->note, "PATCHINA: THE CIDER IS ON THE LAKE ICE, AND THE ICE IS MELTING. RACE!", 72); S->note_t=5.0f;
+        } else if (bw_story_complete(b) && bw_qstate3(b,10)==1){
+            S->ch2_race_t = 120; S->ch2_race_on = 1;   // the run restarts at her door, at a full clock
+            scpy(S->note, "PATCHINA: AGAIN, DEAR. THE ICE IS PATIENT. THE CIDER IS NOT. RUN!", 72); S->note_t=4.5f;
+        } else if (bw_story_complete(b) && bw_qstate3(b,11)==0){
+            bw_qset3(b,11,1); S->ch2_esc_on = 1; S->ch2_esc_x = CH2_DUSTER_X; S->ch2_esc_y = CH2_DUSTER_Y;
+            S->ch2_wp_on = 0; S->ch2_path_t = 0; S->ch2_stall = 0; S->ch2_base = 1e9f;
+            scpy(S->note, "PATCHINA: WALK DUSTER TO THE SERVER FARM, DEAR. SMALL LEGS, BIG JOB.", 72); S->note_t=4.5f;
+        } else if (bw_story_complete(b) && bw_qstate3(b,11)==1){
+            scpy(S->note, "PATCHINA: DUSTER FOLLOWS YOUR HEELS. THE FARM, DEAR. EAST-NORTH-EAST.", 72); S->note_t=4.0f;
+        } else if (bw_story_complete(b) && bw_qstate3(b,12)==1){
+            scpy(S->note, "PATCHINA: IT CAME BACK WRONG, DEAR. FINISH IT PROPERLY.", 72); S->note_t=4.0f;
+        } else if (bw_story_complete(b) && bw_qstate3(b,13)==1){
+            bw_qset3(b,13,2); b->xp += 60;
+            b->items[2] += 2; if (b->items[2]>9) b->items[2]=9;
+            S->ch2_fest_t = 24;
+            scpy(S->note, "PATCH DAY! THE VILLAGE DANCES IN THE LANTERN LIGHT. +60 XP.", 72); S->note_t=5.0f;
+        } else if (bw_chapter_done(b)){
+            S->ch2_fest_t = 10;   // the day is re-celebrated, never re-paid
+            scpy(S->note, "PATCHINA: EVERY DAY IS A LITTLE PATCH DAY NOW, DEAR.", 72); S->note_t=4.0f;
+        }
+        else if (bw_qstate(b,0)==1){
             bw_qset(b,0,2); bw_qset(b,1,1); bw_qset(b,2,1); bw_qset2(b,9,1);
             b->items[0] += 2; if (b->items[0]>9) b->items[0]=9;
             scpy(S->note, "PATCHINA: BONK 3 HACKERS AT THE SERVER FARM, DEAR.", 72); S->note_t=4.5f;
@@ -1171,7 +1344,14 @@ static void bw_talk(int pi, int npc){
             scpy(S->note, "PATCHINA: THE FARM, DEAR. EAST-NORTH-EAST. MIND THE RACKS.", 72); S->note_t=4.0f;
         }
     } else if (npc==1){   // Mop
-        if (bw_qstate_x(b,4)==1 && bw_tools_found(b)>=3){
+        // THE REBUILDING (feat 14): two gated flavour arms — the
+        // escort in progress, and the festival he mopped. Twice.
+        if (bw_qstate3(b,11)==1){
+            scpy(S->note, "MOP: DUSTER MEANS WELL. IT ALSO MEANS SLOWLY.", 72); S->note_t=3.6f;
+        } else if (bw_chapter_done(b)){
+            scpy(S->note, "MOP: I MOPPED THE FESTIVAL. TWICE.", 72); S->note_t=3.6f;
+        }
+        else if (bw_qstate_x(b,4)==1 && bw_tools_found(b)>=3){
             bw_qset_x(b,4,2); b->xp += 40;
             b->items[2] += 2; if (b->items[2]>9) b->items[2]=9;
             scpy(S->note, "MOP: MY TOOLS! COOKIES FOR YOU. +40 XP.", 72); S->note_t=4.0f;
@@ -1190,7 +1370,14 @@ static void bw_talk(int pi, int npc){
             scpy(S->note, "MOP: I PATCH MY SOCKS WITH OLD CODE. SLIGHTLY CURSED.", 72); S->note_t=3.6f;
         }
     } else {   // Glitch, the lake hermit
-        if (bw_qstate(b,2)==1){
+        // THE REBUILDING (feat 14): the race's far end, and the
+        // hermit's review of the festival he did not attend.
+        if (bw_qstate3(b,10)==2 && bw_qstate3(b,11)==0){
+            scpy(S->note, "GLITCH: FAST FEET. PATCHINA HAS MORE LIST, I EXPECT.", 72); S->note_t=4.0f;
+        } else if (bw_chapter_done(b)){
+            scpy(S->note, "GLITCH: I DANCED AT PATCH DAY. THE ICE REMEMBERS.", 72); S->note_t=3.6f;
+        }
+        else if (bw_qstate(b,2)==1){
             bw_qset(b,2,2);
             b->items[1] += 3; if (b->items[1]>9) b->items[1]=9;
             scpy(S->note, "GLITCH: COMPANY! TAKE THESE. +3 ENERGY DRINKS.", 72); S->note_t=4.0f;
@@ -1293,9 +1480,77 @@ static void bw_fill_p1(BwIn *bin, float dt){
     if (G.touch_ctl==0 && IN.tapped && !S->bat.active && !S->craft_menu && !S->log_open && !S->bw_menu && b->bw_mode!=8) bin->interact = 1;
 }
 
+// THE REBUILDING (feat 14): Duster's pathfinding. Greedy steering
+// wedges in this meadow — the forest is per-seed, tree tiles form
+// alcoves and slots at step scale, and every greedy variant (axis
+// slides, diagonals, compass sidesteps) eventually 2-cycles inside
+// one. So when the escort stalls, Duster paths on the TILE grid:
+// a bounded breadth-first search (41x41 tiles around Duster, tile
+// centres tested with the same point collision the buddy uses)
+// toward whichever visited tile lies closest to the real target,
+// and it follows the path's second tile centre as a waypoint
+// until the greedy steering takes over again. Bounded loops only;
+// the scratch is reused per call and each call finishes inside one
+// player's update, so split-screen escorts never see each other.
+#define CH2_BFS_W 41
+static short ch2_bfs_par[CH2_BFS_W*CH2_BFS_W];
+static short ch2_bfs_q[CH2_BFS_W*CH2_BFS_W];
+static void bw_ch2_repath(Buddy *b, BwSim *S, float tx, float ty){
+    int stx = bw_tileof(S->ch2_esc_x), sty = bw_tileof(S->ch2_esc_y);
+    int ox = stx - CH2_BFS_W/2, oy = sty - CH2_BFS_W/2;
+    int n = CH2_BFS_W*CH2_BFS_W;
+    for (int i=0;i<n;i++) ch2_bfs_par[i] = -2;              // -2 unvisited, -3 blocked
+    int qh = 0, qt = 0;
+    int s0 = (sty-oy)*CH2_BFS_W + (stx-ox);
+    ch2_bfs_par[s0] = -1; ch2_bfs_q[qt++] = (short)s0;      // the start tile counts as walkable: Duster is standing on it
+    static const int D4[4][2] = {{1,0},{-1,0},{0,1},{0,-1}};
+    while (qh<qt){
+        int cur = ch2_bfs_q[qh++];
+        int cx = ox + cur%CH2_BFS_W, cy = oy + cur/CH2_BFS_W;
+        for (int k=0;k<4;k++){
+            int nx2 = cx + D4[k][0], ny2 = cy + D4[k][1];
+            int lx = nx2-ox, ly = ny2-oy;
+            if (lx<0 || ly<0 || lx>=CH2_BFS_W || ly>=CH2_BFS_W) continue;
+            int ni = ly*CH2_BFS_W + lx;
+            if (ch2_bfs_par[ni]!=-2) continue;
+            float wx = nx2*BW_TILE + BW_TILE/2, wy = ny2*BW_TILE + BW_TILE/2;
+            if (bw_solid_b(b, wx, wy)){ ch2_bfs_par[ni] = -3; continue; }
+            ch2_bfs_par[ni] = (short)cur; ch2_bfs_q[qt++] = (short)ni;
+        }
+    }
+    // the goal is not always reachable inside one window (and the
+    // buddy may hug a tree, making their own tile's centre solid):
+    // path to the visited tile closest to the target instead
+    int best = -1; float bd = 1e18f;
+    for (int i=0;i<n;i++){
+        if (ch2_bfs_par[i]<-1) continue;
+        int cx = ox + i%CH2_BFS_W, cy = oy + i/CH2_BFS_W;
+        float wx = cx*BW_TILE + BW_TILE/2, wy = cy*BW_TILE + BW_TILE/2;
+        float ddx = tx-wx, ddy = ty-wy, dd = ddx*ddx + ddy*ddy;
+        if (dd<bd){ bd = dd; best = i; }
+    }
+    if (best<0 || best==s0){ S->ch2_wp_on = 0; return; }
+    int hops = 0; for (int c = best; c!=s0 && c>=0; c = ch2_bfs_par[c]) hops++;
+    int up = hops>2? hops-2 : 0, node = best;
+    while (up-->0) node = ch2_bfs_par[node];
+    S->ch2_wp_x = (ox + node%CH2_BFS_W)*BW_TILE + BW_TILE/2;
+    S->ch2_wp_y = (oy + node/CH2_BFS_W)*BW_TILE + BW_TILE/2;
+    S->ch2_wp_on = 1; S->ch2_stall = 0; S->ch2_base = 1e9f;
+}
+
 static void bw_update(int pi, float dt, const BwIn *in){
+    g_dev_ctx = dev_of(pi);   // v1.25: notes composed in this sim name its owner's controls
     BwSim *S = &BWS[pi];
     Buddy *b=&G.bud[pi];
+    // ADAPTIVE MUSIC (v1.25 feat 15): this world's danger, pushed to
+    // the music piece — BwSim lives here, after music.c in the unity
+    // build, so the flag flows downhill through mus_bw_note. A battle
+    // running is danger; in Story Mode a hunter's alert is danger
+    // before the battle starts. Free Play hackers never alert, so
+    // there only a battle fills the Sheep in.
+    { float dgr = S->bat.active? 1.0f : 0.0f;
+      if (!dgr) for (int i=0;i<BW_ROAMN;i++) if (S->roam[i].alert>0){ dgr = 1.0f; break; }
+      mus_bw_note(pi, dgr); }
     if (b->mv_t>0) b->mv_t-=dt;
     // the Start-menu (Daniel, Nov 6): Start/P used to dump you out of
     // the minigame; now it opens a menu — RESUME / CONTROLS / LEAVE —
@@ -1395,6 +1650,14 @@ static void bw_update(int pi, float dt, const BwIn *in){
             float dx=b->x-BW_SITE_XY[4][0], dy=b->y-BW_SITE_XY[4][1];
             if (dx*dx+dy*dy < 30*30){ bw_boss_start(pi, 3); return; }
         }
+        // THE REBUILDING (feat 14): the rematch waits at the farm's
+        // centre aisle while quest 12 is active — gated on the quest,
+        // never on story bit 16 (the original Raid is long down for
+        // anyone who can reach this fight).
+        if (bw_qstate3(b,12)==1){
+            float dx=b->x-BW_SITE_XY[1][0], dy=b->y-BW_SITE_XY[1][1];
+            if (dx*dx+dy*dy < 40*40){ bw_boss_start(pi, 4); return; }
+        }
     }
     bw_roam_refresh(b);
     for (int i=0;i<BW_ROAMN;i++){
@@ -1450,6 +1713,116 @@ static void bw_update(int pi, float dt, const BwIn *in){
             }
         }
     }
+    // THE REBUILDING (v1.25 feat 14): the chapter's three clocks —
+    // the cider run, Duster's heels, and Patch Day. Story mode only,
+    // and battles never reach this code (bw_update returns inside
+    // the battle), so a hacker ambush pauses every clock for free.
+    if (b->bw_mode==1){
+        if (S->ch2_fest_t>0) S->ch2_fest_t -= dt;
+        if (S->ch2_race_on && bw_qstate3(b,10)==1){
+            if (bw_site_at_xy(b, b->x, b->y)==2){
+                bw_qset3(b,10,2); b->xp += 40; S->ch2_race_on = 0; S->ch2_race_t = 0;
+                scpy(S->note, "CIDER SAVED! STILL COLD. PATCHINA WILL BE GLAD. +40 XP.", 72); S->note_t=4.5f;
+            } else {
+                S->ch2_race_t -= dt;
+                if (S->ch2_race_t<=0){ S->ch2_race_t = 0; S->ch2_race_on = 0;
+                    scpy(S->note, "THE CIDER SANK. PATCHINA BREWS MORE — START AGAIN AT HER DOOR.", 72); S->note_t=4.2f; }
+            }
+        }
+        if (bw_qstate3(b,11)==1 && S->ch2_esc_on){
+            // Duster's heels: hurry at 320 when far behind, keep the
+            // buddy's own pace when close, wait at heel distance. One
+            // waypoint is taught: while Duster is still west of the
+            // farm ridge and the buddy is through at the farm, the
+            // farm pass mouth is its target — the pass the help signs
+            // teach — until it is through, then the buddy again.
+            float tx = b->x, ty = b->y; int to_pass = 0;
+            if (S->ch2_esc_x < 1750 && bw_site_at_xy(b, b->x, b->y)==1){ tx = 1762; ty = -1900; to_pass = 1; }
+            // pathing: a reached waypoint hands steering back to the
+            // greedy; a stall (no real progress for half a second)
+            // asks the tile grid for a new one
+            if (S->ch2_wp_on){
+                float wx = S->ch2_wp_x - S->ch2_esc_x, wy = S->ch2_wp_y - S->ch2_esc_y;
+                if (wx*wx + wy*wy < 16*16){ S->ch2_wp_on = 0; S->ch2_stall = 0; S->ch2_base = 1e9f; }
+            }
+            float etx = S->ch2_wp_on? S->ch2_wp_x : tx, ety = S->ch2_wp_on? S->ch2_wp_y : ty;
+            float dx = etx - S->ch2_esc_x, dy = ety - S->ch2_esc_y;
+            float d = fsqrt(dx*dx + dy*dy);
+            float db = bw_duster_dist(b);
+            if (d > 44){
+                if (d < S->ch2_base - 2){ S->ch2_base = d; S->ch2_stall = 0; }
+                else S->ch2_stall += dt;
+                S->ch2_path_t -= dt;
+                if (S->ch2_stall > 0.45f && S->ch2_path_t <= 0){
+                    bw_ch2_repath(b, S, tx, ty);
+                    S->ch2_path_t = 0.6f;
+                    etx = S->ch2_wp_on? S->ch2_wp_x : tx; ety = S->ch2_wp_on? S->ch2_wp_y : ty;
+                    dx = etx - S->ch2_esc_x; dy = ety - S->ch2_esc_y; d = fsqrt(dx*dx + dy*dy);
+                }
+            } else { S->ch2_stall = 0; S->ch2_base = d; }
+            if (d > 4){
+                float sp = db > 260? 320.0f : BUD_SPD[b->species%BUDN] + 24.0f;
+                float step = sp*dt;
+                float want = (to_pass || S->ch2_wp_on)? d : d - 30; if (want < 0) want = 0;
+                if (step > want) step = want;
+                if (step > 0){
+                    float ox = S->ch2_esc_x, oy = S->ch2_esc_y;
+                    float nx = ox + dx/d*step, ny = oy + dy/d*step;
+                    // the meadow grows where it likes: if worldgen
+                    // put a tree on Duster's post, it squeezes out
+                    // (a destination-only check from inside a tree
+                    // tile can never pass — the buddy escapes that
+                    // trap by being walked around, a bot cannot)
+                    if (bw_solid_b(b, ox, oy)){ S->ch2_esc_x = nx; S->ch2_esc_y = ny; }
+                    else {
+                        // an aimed step counts only if it MEANINGFULLY
+                        // closes the distance — when the target runs
+                        // level, the free axis offers a micro-step that
+                        // would otherwise mask a full wedge forever
+                        float need = step*0.3f;
+                        int moved = 0;
+                        if (!bw_solid_b(b, nx, ny)){ float cdx = etx-nx, cdy = ety-ny;
+                            if (fsqrt(cdx*cdx+cdy*cdy) < d - need){ S->ch2_esc_x = nx; S->ch2_esc_y = ny; moved = 1; } }
+                        if (!moved && !bw_solid_b(b, nx, oy)){ float cdx = etx-nx, cdy = ety-oy;
+                            if (fsqrt(cdx*cdx+cdy*cdy) < d - need){ S->ch2_esc_x = nx; moved = 1; } }
+                        if (!moved && !bw_solid_b(b, ox, ny)){ float cdx = etx-ox, cdy = ety-ny;
+                            if (fsqrt(cdx*cdx+cdy*cdy) < d - need){ S->ch2_esc_y = ny; moved = 1; } }
+                        if (!moved){
+                            // wedged in a thicket corner: the compass
+                            // — any clear step that closes the distance,
+                            // else a sidestep. The sidestep prefers the
+                            // PERPENDICULAR: stepping back the way it
+                            // came just re-aims at the same blocked
+                            // edge next frame and 2-cycles forever (a
+                            // level run at a tree tile's east edge did
+                            // exactly that — jittering in place at heel
+                            // distance while the buddy waited).
+                            static const float C8[8][2] = {{1,0},{-1,0},{0,1},{0,-1},{0.7071f,0.7071f},{0.7071f,-0.7071f},{-0.7071f,0.7071f},{-0.7071f,-0.7071f}};
+                            static const int ORDH[8] = {2,3,5,7,1,4,6,0};   // running level: S,N,SW,NW,W,SE,NE,E
+                            static const int ORDV[8] = {0,1,6,7,3,4,5,2};   // running vertical: E,W,NE,NW,N,SE,SW,S
+                            const int *ord = (dx*dx >= dy*dy)? ORDH : ORDV;
+                            float bd = d; int bi = -1, si = -1;
+                            for (int i=0;i<8;i++){
+                                float cx2 = ox + C8[i][0]*step, cy2 = oy + C8[i][1]*step;
+                                if (bw_solid_b(b, cx2, cy2)) continue;
+                                { float cdx = etx-cx2, cdy = ety-cy2; float cd = fsqrt(cdx*cdx+cdy*cdy);
+                                  if (cd < bd){ bd = cd; bi = i; } }
+                            }
+                            if (bi<0) for (int k=0;k<8;k++){ int i = ord[k];
+                                float cx2 = ox + C8[i][0]*step, cy2 = oy + C8[i][1]*step;
+                                if (!bw_solid_b(b, cx2, cy2)){ si = i; break; } }
+                            int pick = bi>=0? bi : si;
+                            if (pick>=0){ S->ch2_esc_x = ox + C8[pick][0]*step; S->ch2_esc_y = oy + C8[pick][1]*step; }
+                        }
+                    }
+                }
+            }
+            if (bw_site_at_xy(b, b->x, b->y)==1 && bw_duster_dist(b) < 170){
+                bw_qset3(b,11,2); bw_qset3(b,12,1); b->xp += 50;   // the escort's finish arms the rematch
+                scpy(S->note, "DUSTER SETS TO WORK. THEN — A RATTLING IN THE RACKS. +50 XP.", 72); S->note_t=4.5f;
+            }
+        }
+    }
     if (in->exit_){ bw_exit(pi, 0); return; }   // pad: Back or Start; keys: Esc/P
     if (in->interact){
         int npc = bw_npc_near(b, 46);
@@ -1482,12 +1855,27 @@ static void bw_draw_tent(float wx, float wy);
 // Tiles: 0 floor, 1 wall, 2 door (closed), 3 bush (hide in it),
 // 4 drawer, 5 shelf, 6 tent, 7 the EXIT door, 8 the lobby door home.
 #define ENT_STRIDE 15        // room width in tiles (was 12 — bigger rooms, longer runs to the door and the bushes: Daniel, Nov 5)
-static u32 ent_rnd(Buddy *b, int k, int salt){ return hash2(k*31+7, salt*131+3, (u32)b->bw_seed ^ 0xE77u); }
+static int ent_duet_door(int pi, int k);   // DEEPER DOORS (v1.25 feat 11): defined with the door machinery below
+static void ent_plate_pos(int pi, int k, int which, float *px, float *py);
+static u32 ent_rnd(Buddy *b, int k, int salt){
+    // DEEPER DOORS (v1.25 feat 11): a Chapter 2 run re-deals the
+    // hotel from the same seed — the chapter constant mixes into
+    // the seed word, so every derived fact (door rows, locks,
+    // dupes, furniture, keys) deals fresh while Chapter 1's deal
+    // is bit-for-bit the shipped one (its word never sees the XOR).
+    u32 sd = (u32)b->bw_seed ^ 0xE77u;
+    if (BWS[b - G.bud].ent_chap==2) sd ^= 0xDEE9u;
+    return hash2(k*31+7, salt*131+3, sd);
+}
+// the run's exit room: 51 for Chapter 1, 40 (a landing — tent,
+// confetti and all) for DEEPER DOORS (v1.25 feat 11)
+static int ent_final_room(BwSim *S){ return S->ent_chap==2? 40 : 51; }
 static int ent_room_of(float x){ int k = (int)(x / (ENT_STRIDE*BW_TILE)) + 1; return k<1? 1 : k; }
 static float ent_room_x0(int k){ return (float)((k-1)*ENT_STRIDE*BW_TILE); }   // left wall face
 static int ent_in_chase_seg(int k){ for (int d=0; d<5; d++){ int s=k-d; if (s>=19 && s%30==19) return 1; } return 0; }   // Inspector segments: rooms 19-23, 49-53, 79-83 — at least 30 doors apart, five doors long (Daniel, Nov 6)
 static int ent_door_locked(int pi, int k){
     Buddy *b=&G.bud[pi]; BwSim *S=&BWS[pi];
+    if (ent_duet_door(pi, k)) return 0;   // DEEPER DOORS (feat 11): the duet is the lock — mechanics don't stack
     if (S->ent_sub) return ent_rnd(b, k, 2400) % 5 == 0 && k>=3;
     if (k<3 || k==25 || k==50 || k==51) return 0;   // 25 is the Library: the fuses are its lock
     if (ent_in_chase_seg(k)) return 0;
@@ -1505,6 +1893,28 @@ static int ent_door_ly(Buddy *b, int k){
     return ROWS[ent_rnd(b, k, 350) % 5];
 }
 static int ent_doory(Buddy *b, int k){ return ent_door_ly(b, k)*BW_TILE + 24; }
+// DEEPER DOORS (v1.25 feat 11): a duet door opens for two friends
+// at once — the buddy on one brass plate, Lumen on the other.
+// Door 4 is always one (the tutorial); beyond it, one door in
+// four by the hash, never out of a landing (landings stay pure
+// rest, the exclusion painted dupes use) and never inside the
+// Inspector's segment (chase doors fly open — a duet door there
+// would lie).
+static int ent_duet_door(int pi, int k){
+    BwSim *S=&BWS[pi]; Buddy *b=&G.bud[pi];
+    if (S->ent_chap!=2 || S->ent_sub) return 0;
+    if (k==4) return 1;
+    if (k<5 || k%10==0 || ent_in_chase_seg(k)) return 0;
+    return ent_rnd(b, k, 4500) % 4 == 0;
+}
+// a duet door's two brass plates flank its doorway on the room
+// side: one north of the door row, one south, a short step west
+// of the wall — near enough to see the door, far enough to stand
+static void ent_plate_pos(int pi, int k, int which, float *px, float *py){
+    Buddy *b=&G.bud[pi];
+    *px = ent_room_x0(k) + (ENT_STRIDE-1)*BW_TILE - 16;
+    *py = ent_doory(b, k) + (which? 58 : -58);
+}
 // painted doors share the real door's row set, so row alone tells
 // you nothing: 1-2 dupes, never on the real row
 static int ent_dupe_n(Buddy *b, int k){ return ent_dupe_room(b, k)? 1 + (int)(ent_rnd(b, k, 307) % 2) : 0; }
@@ -1584,7 +1994,7 @@ static int ent_tile(int pi, int tx, int ty){
     Buddy *b=&G.bud[pi]; BwSim *S=&BWS[pi];
     if (tx<0 || ty<0 || ty>=ENT_ROWS) return 1;
     int k = tx/ENT_STRIDE + 1, lx = tx%ENT_STRIDE, ly = ty;
-    if (!S->ent_sub && k==51 && lx==ENT_STRIDE/2 && ly==ENT_ROWS-1) return 7;
+    if (!S->ent_sub && k==ent_final_room(S) && lx==ENT_STRIDE/2 && ly==ENT_ROWS-1) return 7;
     if (ly==0 || ly==ENT_ROWS-1) return 1;
     if (lx==0 || lx==ENT_STRIDE-1){
         if (lx==0 && k==1 && ly==ENT_DOOR_LY) return 8;   // the stairs home: always the middle of room 1's west wall
@@ -1599,7 +2009,7 @@ static int ent_tile(int pi, int tx, int ty){
             && (ly==ent_dupe_ly_i(b, k, 0) || (ent_dupe_n(b, k)>1 && ly==ent_dupe_ly_i(b, k, 1)))) return 2;
         return 1;
     }
-    if (!S->ent_sub && k==25 && lx==ENT_STRIDE-2 && ly==ENT_ROWS-2) return 9;   // the tall bookcase (the secret is behind it)
+    if (!S->ent_sub && k==25 && S->ent_chap!=2 && lx==ENT_STRIDE-2 && ly==ENT_ROWS-2) return 9;   // the tall bookcase (the secret is behind it) — Chapter 1's only (feat 11)
     return ent_furn(pi, tx, ty);
 }
 static int ent_solid(int pi, float x, float y){
@@ -1633,6 +2043,7 @@ static void ent_reset(int pi){
     S->ent_t = 0; S->ent_grace = 0; S->ent_zpass = 0; S->ent_typs = 0;
     S->ent_sub = 0; S->ent_door_sub = 0; S->ent_passes = 1; S->ent_tamb = 7; S->ent_zt = 0;
     S->ent_chase = 0; S->ent_noise = 0; S->ent_loot_n = 0; S->ent_finished = 0;
+    S->ent_chap = 1; S->ent_lux = 0; S->ent_luy = 0; S->ent_duet_t = 0;   // DEEPER DOORS (feat 11): bw_enter_mode applies the chapter after this reset
     S->ent_ix = 0; S->ent_iy = 0; S->ent_istun = 0; S->ent_bbx = 0; S->ent_bby = 0;
     S->ent_fn = 0; S->ent_mt = 0; S->ent_mstep = 0;
     S->ent_rvx = 0; S->ent_rvy = 0;
@@ -1677,7 +2088,7 @@ static void ent_room_setup(int pi, int k){
         }
     }
     if (S->ent_ev) return;
-    if (k==25){
+    if (k==25 && S->ent_chap!=2){   // the Library is Chapter 1's set piece (feat 11): Deeper room 25 is a quiet breather
         S->ent_ev = 6;
         if (!S->ent_libdone) S->ent_fuse_mask = 0;
         S->ent_bbx = ent_room_x0(25) + (ENT_STRIDE/2)*BW_TILE + 24; S->ent_bby = 1.6f*BW_TILE;
@@ -1706,17 +2117,23 @@ static void ent_enter_room(int pi, int k){
     S->ent_room = k;
     ent_room_setup(pi, k);
     if (S->ent_sub){ if (k > b->ent_sub_best) b->ent_sub_best = k; return; }
-    if (k > b->ent_best) b->ent_best = k;
-    if (k==51 && !S->ent_finished){
-        S->ent_finished = 1; b->ent_done++;
-        buddy_award_xp(pi, 20);   // v1.19: a completed Entrances run pays the buddy, on top of the quest XP
-        scpy(S->note, b->active? "YOU MADE IT OUT! EVERY ENTRANCE, CLEARED! +20 BUDDY XP" : "YOU MADE IT OUT! EVERY ENTRANCE, CLEARED!", 72); S->note_t = 4.5f;
+    // DEEPER DOORS (feat 11): each chapter keeps its own records —
+    // a Deeper run never moves Chapter 1's best or done counts
+    if (S->ent_chap==2){ if (k > b->ent2_best) b->ent2_best = k; }
+    else if (k > b->ent_best) b->ent_best = k;
+    if (k==ent_final_room(S) && !S->ent_finished){
+        S->ent_finished = 1;
+        if (S->ent_chap==2) b->ent2_done++; else b->ent_done++;
+        buddy_award_xp(pi, 20);   // v1.19: a completed Entrances run pays the buddy, on top of the quest XP (Chapter 2 pays the same terms, feat 11)
+        scpy(S->note, S->ent_chap==2? (b->active? "YOU MADE IT OUT! EVERY DEEPER DOOR, CLEARED! +20 BUDDY XP" : "YOU MADE IT OUT! EVERY DEEPER DOOR, CLEARED!")
+                                    : (b->active? "YOU MADE IT OUT! EVERY ENTRANCE, CLEARED! +20 BUDDY XP" : "YOU MADE IT OUT! EVERY ENTRANCE, CLEARED!"), 72); S->note_t = 4.5f;
         do_save(); sfx(11);
     }
-    else if (k==25){ scpy(S->note, "ENTRANCE 25: THE LIBRARY. SNEAK. FIND 5 FUSES.", 72); S->note_t = 3.6f; }
-    else if (k==51){ scpy(S->note, "THE EXIT ROOM. GO HOME PROUD, OR KEEP GOING.", 72); S->note_t = 3.4f; }
+    else if (k==25 && S->ent_chap!=2){ scpy(S->note, "ENTRANCE 25: THE LIBRARY. SNEAK. FIND 5 FUSES.", 72); S->note_t = 3.6f; }
+    else if (k==ent_final_room(S)){ scpy(S->note, "THE EXIT ROOM. GO HOME PROUD, OR KEEP GOING.", 72); S->note_t = 3.4f; }
+    else if (S->ent_chap==2 && k==4){ scpy(S->note, "A DUET DOOR AHEAD. TWO PLATES, TWO FRIENDS.", 72); S->note_t = 3.2f; }
     else if (k%10==0){ scpy(S->note, "A SAFE LANDING. THE TENT RESTS AND SAVES.", 72); S->note_t = 3.0f; }
-    else if (S->ent_dark && S->ent_ev!=1 && S->ent_ev!=2){ scpy(S->note, "IT IS DARK IN HERE. LISTEN FOR A PSST.", 72); S->note_t = 2.8f; }
+    else if (S->ent_dark && S->ent_ev!=1 && S->ent_ev!=2){ scpy(S->note, S->ent_chap==2? "IT IS DARK IN HERE. LUMEN GLOWS. LISTEN FOR A PSST." : "IT IS DARK IN HERE. LISTEN FOR A PSST.", 72); S->note_t = 2.8f; }
 }
 static void ent_bonk(int pi, float frac, float kx){
     BwSim *S=&BWS[pi]; Buddy *b=&G.bud[pi];
@@ -1779,6 +2196,36 @@ static void ent_update(int pi, float dt, const BwIn *in){
     int rk = ent_room_of(b->x);
     if (rk != S->ent_room) ent_enter_room(pi, rk);
     int room = S->ent_room;
+    // DEEPER DOORS (feat 11): Lumen follows the buddy, and a duet
+    // door opens when two friends stand on its plates together
+    if (S->ent_chap==2){
+        float txp = b->x - 26, typ = b->y - 22, cap = 340;   // his hover point: just behind the shoulder
+        int duet = ent_duet_door(pi, room) && room > S->ent_door_upto;
+        float pax=0, pay=0, pbx=0, pby=0; int onplate = -1;
+        if (duet){
+            ent_plate_pos(pi, room, 0, &pax, &pay);
+            ent_plate_pos(pi, room, 1, &pbx, &pby);
+            float dax=b->x-pax, day=b->y-pay, dbx=b->x-pbx, dby=b->y-pby;
+            if (dax*dax+day*day < 22*22) onplate = 0;
+            else if (dbx*dbx+dby*dby < 22*22) onplate = 1;
+            if (onplate>=0){ txp = onplate? pax : pbx; typ = onplate? pay : pby; cap = 420; }   // called to his plate, he hurries
+        }
+        float ldx = txp - S->ent_lux, ldy = typ - S->ent_luy;
+        float ldl = fsqrt(ldx*ldx + ldy*ldy);
+        if (ldl > 1){ float step = cap*dt; if (step > ldl) step = ldl; S->ent_lux += ldx/ldl*step; S->ent_luy += ldy/ldl*step; }
+        if (duet && onplate>=0){
+            float ox = onplate? pax : pbx, oy = onplate? pay : pby;
+            float odx = S->ent_lux - ox, ody = S->ent_luy - oy;
+            if (odx*odx + ody*ody < 16*16){
+                S->ent_duet_t += dt;
+                if (S->ent_duet_t >= 0.6f){
+                    S->ent_duet_t = 0; S->ent_door_upto = room;
+                    scpy(S->note, "TOGETHER! THE DUET DOOR OPENS.", 72); S->note_t = 2.6f; sfx(19); sfx(11);
+                }
+            } else if (S->ent_duet_t > 0) S->ent_duet_t -= dt*2;
+        } else if (S->ent_duet_t > 0) S->ent_duet_t -= dt*2;
+        if (S->ent_duet_t < 0) S->ent_duet_t = 0;
+    }
     // ambient dread: now and then the hotel reminds you it is a hotel
     S->ent_tamb -= dt;
     if (S->ent_tamb<=0){
@@ -2012,6 +2459,7 @@ static void ent_update(int pi, float dt, const BwIn *in){
         float dx=b->x-doorx, dy=b->y-doory;
         int upto = S->ent_sub? S->ent_door_sub : S->ent_door_upto;
         if (dx*dx+dy*dy < 54*54 && room > upto){
+            if (ent_duet_door(pi, room)){ scpy(S->note, "A DUET DOOR. IT OPENS FOR TWO FRIENDS AT ONCE - STAND ON A PLATE!", 72); S->note_t = 2.6f; sfx(16); return; }
             if (!S->ent_sub && room==25 && !S->ent_libdone){ scpy(S->note, "IT NEEDS 5 FUSES BEFORE IT BUDGES. SHHH.", 72); S->note_t = 2.4f; sfx(16); return; }
             if (ent_door_locked(pi, room)){
                 if (S->ent_key){ S->ent_key = 0; if (S->ent_sub) S->ent_door_sub = room; else S->ent_door_upto = room; scpy(S->note, "UNLOCKED!", 72); S->note_t = 1.6f; sfx(19); }
@@ -2051,12 +2499,12 @@ static void ent_update(int pi, float dt, const BwIn *in){
                 bw_exit(pi, 0); return;
             }
         }
-        if (!S->ent_sub && room==51){
-            float ex = ent_room_x0(51) + (ENT_STRIDE/2)*BW_TILE + 24, ey = (ENT_ROWS-1)*BW_TILE + 24;
+        if (!S->ent_sub && room==ent_final_room(S)){
+            float ex = ent_room_x0(room) + (ENT_STRIDE/2)*BW_TILE + 24, ey = (ENT_ROWS-1)*BW_TILE + 24;
             float edx=b->x-ex, edy=b->y-ey;
             if (edx*edx+edy*edy < 58*58){ bw_exit(pi, 0); return; }
         }
-        if (!S->ent_sub && room==25){   // the tall bookcase, and what is behind it
+        if (!S->ent_sub && room==25 && S->ent_chap!=2){   // the tall bookcase, and what is behind it (Chapter 1's secret, feat 11)
             float bx2 = ent_room_x0(25) + (ENT_STRIDE-2)*BW_TILE + 24, by2 = (ENT_ROWS-2)*BW_TILE + 24;
             float ddx=b->x-bx2, ddy=b->y-by2;
             if (ddx*ddx+ddy*ddy < 58*58){
@@ -2110,11 +2558,15 @@ static void ent_update(int pi, float dt, const BwIn *in){
 
 
 // --- ENTRANCES drawing ---
-static void ent_draw_door(int x, int y, const char *plate, int fake){
+static void ent_draw_door(int x, int y, const char *plate, int fake, int duet){
     rect_fill(x+6, y+2, BW_TILE-12, BW_TILE-2, COL(104,72,40));
     rect_line(x+6, y+2, BW_TILE-12, BW_TILE-2, COL(56,36,20));
     rect_fill(x+10, y+20, BW_TILE-20, 3, COL(84,56,30));
     disc_fill(x+BW_TILE-13, y+26, 2, COL(230,196,90));
+    if (duet){   // DEEPER DOORS (feat 11): a double door — centre seam, a knob for each friend
+        rect_fill(x+BW_TILE/2-1, y+3, 2, BW_TILE-5, COL(56,36,20));
+        disc_fill(x+BW_TILE/2-6, y+26, 2, COL(230,196,90));
+    }
     rect_fill(x+13, y+6, BW_TILE-26, 11, COL(198,164,84));
     draw_text_center(x+BW_TILE/2, y+8, plate, 1, COL(40,30,10));
     // painted doors used to wear a red plate and a crack — a free
@@ -2137,15 +2589,18 @@ static void bw_render_ent(int pi){
         int k = tx>=0? tx/ENT_STRIDE + 1 : 1, lx = tx>=0? tx%ENT_STRIDE : 0;
         u32 h = hash2(tx, ty, (u32)b->bw_seed ^ 0x7A55u);
         if (t==1){ if (S->ent_sub){ rect_fill(x, y, BW_TILE+1, BW_TILE+1, COL(50,50,56)); rect_fill(x, y, BW_TILE+1, 7, COL(72,72,78)); rect_fill(x, y+BW_TILE-5, BW_TILE+1, 5, COL(36,36,40)); }
+                   else if (S->ent_chap==2){ rect_fill(x, y, BW_TILE+1, BW_TILE+1, COL(24,40,48)); rect_fill(x, y, BW_TILE+1, 7, COL(40,62,70)); rect_fill(x, y+BW_TILE-5, BW_TILE+1, 5, COL(17,29,35)); }   // DEEPER DOORS (feat 11): the same hotel, one floor of mood down
                    else { rect_fill(x, y, BW_TILE+1, BW_TILE+1, COL(47,37,54)); rect_fill(x, y, BW_TILE+1, 7, COL(68,54,72)); rect_fill(x, y+BW_TILE-5, BW_TILE+1, 5, COL(33,26,39)); }
                    // a panel seam, wandering per tile (glow-up)
-                   rect_fill(x + 6 + (int)((h>>8)%28), y+8, 1, BW_TILE-14, S->ent_sub? COL(41,41,45) : COL(37,28,43));
+                   rect_fill(x + 6 + (int)((h>>8)%28), y+8, 1, BW_TILE-14, S->ent_sub? COL(41,41,45) : S->ent_chap==2? COL(19,32,38) : COL(37,28,43));
                    continue; }
         // floor: lamplit wood, a warmer checker on landings, confetti past the end
         { u32 base = S->ent_sub? (((tx+ty)&1)==0? COL(72,72,68) : COL(65,65,62))
+                              : S->ent_chap==2? ((k%10==0)? (((tx+ty)&1)==0? COL(74,74,52) : COL(67,67,47))
+                                                           : (((tx+ty)&1)==0? COL(52,68,60) : COL(47,62,55)))
                               : (k%10==0)? (((tx+ty)&1)==0? COL(100,76,47) : COL(92,70,42))
                               : (((tx+ty)&1)==0? COL(84,62,41) : COL(77,57,37));
-          if (!S->ent_sub && k==25) base = ((tx+ty)&1)==0? COL(80,55,45) : COL(74,50,42);
+          if (!S->ent_sub && k==25 && S->ent_chap!=2) base = ((tx+ty)&1)==0? COL(80,55,45) : COL(74,50,42);
           rect_fill(x, y, BW_TILE+1, BW_TILE+1, col_shade(base, 0.94f + (float)((h>>20)%12)*0.01f));
           rect_fill(x, y+BW_TILE-2, BW_TILE+1, 2, COL(70,52,36));
           // a welcome mat in front of every door (glow-up): the hotel
@@ -2155,18 +2610,21 @@ static void bw_render_ent(int pi){
                     || ent_tile(pi, tx+1, ty)==7 || ent_tile(pi, tx-1, ty)==7 || ent_tile(pi, tx, ty+1)==8 || ent_tile(pi, tx, ty-1)==8;
               if (nd){ rect_fill(x+11, y+31, 26, 11, COL(112,44,44)); rect_line(x+11, y+31, 26, 11, COL(84,32,32)); }
           } }
-        if (k==51){ static const u32 CONFC[4] = { COL(255,120,150), COL(120,220,255), COL(255,214,64), COL(150,255,150) };
+        if (k==ent_final_room(S)){ static const u32 CONFC[4] = { COL(255,120,150), COL(120,220,255), COL(255,214,64), COL(150,255,150) };
             for (int c2=0;c2<3;c2++){ u32 hh = hash2(tx*3+c2, ty*5-c2, 0xC04Fu); pset(x + (int)(hh%40) + 4, y + (int)((hh>>6)%40) + 4, CONFC[hh%4]); } }
         if (t==2 || t==7 || t==8){
             int door = (lx==ENT_STRIDE-1)? k : k-1;
+            int duet = (t==2 && lx==ENT_STRIDE-1 && ent_duet_door(pi, door));   // DEEPER DOORS (feat 11)
             char plate[8];
             if (t==8) scpy(plate, S->ent_sub? "UP" : "OUT", 8);
             else if (t==7) scpy(plate, "EXIT", 8);
-            else if (!S->ent_sub && door+1==51) scpy(plate, "EXIT", 8);
+            else if (!S->ent_sub && door+1==ent_final_room(S)) scpy(plate, "EXIT", 8);
+            else if (duet) scpy(plate, "DUET", 8);
             else if (S->ent_sub){ char *q=plate; q=sappend(q, "B"); q=sapp_int(q, door+1); *q=0; }
+            else if (S->ent_chap==2){ char *q=plate; q=sappend(q, "D"); q=sapp_int(q, door+1); *q=0; }
             else { char *q=plate; q=sapp_int(q, door+1); *q=0; }
             int fake = (t==2 && lx==ENT_STRIDE-1 && !S->ent_sub && ent_dupe_room(b, k) && (ty==ent_dupe_ly_i(b, k, 0) || (ent_dupe_n(b, k)>1 && ty==ent_dupe_ly_i(b, k, 1))));
-            ent_draw_door(x, y, plate, fake);
+            ent_draw_door(x, y, plate, fake, duet);
             if (t==2 && lx==ENT_STRIDE-1 && door>=1 && ty==ent_door_ly(b, door) && !S->ent_dupe_used){
                 // the guiding moths hover at the REAL door — the hotel
                 // is a kind place, if you look
@@ -2211,6 +2669,25 @@ static void bw_render_ent(int pi){
             if (S->ent_fuse_mask>>i & 1) continue;
             int x=SX(ent_room_x0(25) + ENT_FUSE_TX[i]*BW_TILE + 24), y=SY(ENT_FUSE_TY[i]*BW_TILE + 24);
             disc_fill(x, y, 6, COL(60,120,60)); rect_fill(x-3, y-6, 6, 12, COL(120,255,140)); disc_fill(x, y-8, 2, COL(220,255,220));
+        }
+    }
+    // DEEPER DOORS (feat 11): an unopened duet door's brass plates,
+    // glowing under whoever is holding them, and the charge pip at
+    // the door while the two of them stand together
+    if (S->ent_chap==2 && ent_duet_door(pi, room) && room > S->ent_door_upto){
+        for (int pl=0; pl<2; pl++){
+            float wx, wy; ent_plate_pos(pi, room, pl, &wx, &wy);
+            int x=SX(wx), y=SY(wy), held = 0;
+            { float dx=b->x-wx, dy=b->y-wy; if (dx*dx+dy*dy < 22*22) held = 1; }
+            if (!held){ float dx=S->ent_lux-wx, dy=S->ent_luy-wy; if (dx*dx+dy*dy < 16*16) held = 1; }
+            if (held) glow_ellipse(x, y, 20, 12, COL(255,190,90), 60);
+            disc_fill(x, y, 11, COL(150,116,52)); disc_fill(x, y, 8, held? COL(230,196,90) : COL(178,146,74));
+            disc_fill(x, y, 3, COL(120,90,40));
+        }
+        if (S->ent_duet_t > 0){
+            int dx2 = SX(ent_room_x0(room) + (ENT_STRIDE-1)*BW_TILE + 24), dy2 = SY(ent_doory(b, room));
+            int rr = 3 + (int)(S->ent_duet_t/0.6f * 6);
+            disc_fill(dx2, dy2, rr+3, COL(255,214,64)); disc_fill(dx2, dy2, rr, COL(104,72,40));
         }
     }
     // chase fires, licking at the carpet (only ever in Inspector rooms)
@@ -2265,6 +2742,20 @@ static void bw_render_ent(int pi){
             bw_draw_big_hacker(S->ent_bbx, S->ent_bby, 3, 0);
             if (S->ent_bbcharge>0) draw_text_center(SX(S->ent_bbx), SY(S->ent_bby)-40, "!!", 2, COL(255,92,80));
         }
+        if (S->ent_chap==2 && ((S->ent_luy < b->y) == (pass==0))){
+            // DEEPER DOORS (feat 11): LUMEN, the lantern buddy — a
+            // small warm pal with beating wings; in a dark room his
+            // halo swells, because there the light is his
+            int x=SX(S->ent_lux), y=SY(S->ent_luy) + (int)(fsin(G.anim_t*2.6f)*3);
+            int lmdark = S->ent_dark;
+            glow_ellipse(x, y, lmdark? 32 : 20, lmdark? 21 : 13, COL(255,176,84), lmdark? 95 : 55);
+            int flap = (int)(fsin(G.anim_t*18)*2);
+            ellipse_fill(x-8, y-5-flap, 5, 3, COL(240,230,200));
+            ellipse_fill(x+8, y-5-flap, 5, 3, COL(240,230,200));
+            disc_fill(x, y, 8, COL(255,196,92));
+            disc_fill(x, y-1, 5, COL(255,224,150));
+            disc_fill(x-3, y-2, 1, COL(60,40,16)); disc_fill(x+3, y-2, 1, COL(60,40,16));
+        }
         if (pass==0) draw_buddy(b);
     }
     ui_vignette(vx, vy, vw2, vh2);
@@ -2276,7 +2767,7 @@ static void bw_render_ent(int pi){
     // and every lamp breathes a little — worse when something screams
     {
         int bx=SX(b->x), by=SY(b->y);
-        int dark = S->ent_dark || (!S->ent_sub && room==25);
+        int dark = S->ent_dark || (!S->ent_sub && room==25 && S->ent_chap!=2);
         int landing = S->ent_sub? (room%20==0) : (room%10==0);
         float fl = 1.0f + 0.045f*fsin(G.anim_t*13.7f)*fsin(G.anim_t*7.9f+1.3f);
         if ((S->ent_ev==1 || S->ent_ev==2 || S->ent_ev==7) && S->ent_phase==1) fl *= ((int)(G.anim_t*11)%2)? 0.70f : 1.12f;
@@ -2285,6 +2776,7 @@ static void bw_render_ent(int pi){
         else if (dark){ rin = 56; amax = 208; }
         else if (S->ent_sub){ rin = 102; amax = 152; }
         else { rin = 118; amax = 130; }
+        if (dark && S->ent_chap==2){ rin += 64; if (amax>168) amax = 168; }   // DEEPER DOORS (feat 11): Lumen's glow carries the dark rooms; the drawer lantern still stacks on top
         rin = (int)((rin + S->ent_lant*36) * fl); if (rin<28) rin=28;
         int rout = rin + (dark? 74 : 96);
         for (int cy=vy; cy<vy+vh2; cy+=16) for (int cx=vx; cx<vx+vw2; cx+=16){
@@ -2327,14 +2819,15 @@ static void bw_render_ent(int pi){
     { float f = b->energy/BUD_ENERGY_MAX; if (f<0) f=0;
       rect_fill(vx+14, vy+36, 120, 4, COL(40,30,40)); rect_fill(vx+14, vy+36, (int)(120*f), 4, COL(120,200,255));
       draw_text(vx+138, vy+35, "ENERGY", 1, COL(170,220,255)); }
-    { char buf[72]; char *q=buf; if (S->ent_sub){ q=sappend(q, "FLOOR B-"); q=sapp_int(q, room); } else { q=sappend(q, "ENTRANCE "); q=sapp_int(q, room); }
+    { char buf[72]; char *q=buf; if (S->ent_sub){ q=sappend(q, "FLOOR B-"); q=sapp_int(q, room); } else if (S->ent_chap==2){ q=sappend(q, "DEEPER "); q=sapp_int(q, room); } else { q=sappend(q, "ENTRANCE "); q=sapp_int(q, room); }
       rect_fill(vx+vw2-158, vy+8, 150, 46, COL(20,26,20)); rect_line(vx+vw2-158, vy+8, 150, 46, COL(198,164,84));
       draw_text(vx+vw2-150, vy+13, buf, 1, COL(255,244,210));
       q=buf; q=sappend(q, "BITS "); q=sapp_int(q, S->ent_bits); q=sappend(q, " - STICKS "); q=sapp_int(q, S->ent_sticks); *q=0;
       draw_text(vx+vw2-150, vy+25, buf, 1, COL(230,240,230));
-      q=buf; if (S->ent_sub){ q=sappend(q, "BEST B-"); q=sapp_int(q, b->ent_sub_best); } else { q=sappend(q, "BEST ROOM "); q=sapp_int(q, b->ent_best); }
+      q=buf; if (S->ent_sub){ q=sappend(q, "BEST B-"); q=sapp_int(q, b->ent_sub_best); } else if (S->ent_chap==2){ q=sappend(q, "BEST "); q=sapp_int(q, b->ent2_best); } else { q=sappend(q, "BEST ROOM "); q=sapp_int(q, b->ent_best); }
       if (S->ent_key) q=sappend(q, " - KEY!");
-      if (!S->ent_sub && b->ent_done>0){ q=sappend(q, " - OUT x"); q=sapp_int(q, b->ent_done); }
+      if (!S->ent_sub && S->ent_chap==2){ if (b->ent2_done>0){ q=sappend(q, " - OUT x"); q=sapp_int(q, b->ent2_done); } }
+      else if (!S->ent_sub && b->ent_done>0){ q=sappend(q, " - OUT x"); q=sapp_int(q, b->ent_done); }
       *q=0;
       draw_text(vx+vw2-150, vy+37, buf, 1, S->ent_key? COL(255,214,64) : COL(170,200,170)); }
     if (S->ent_ev==6){
@@ -2354,11 +2847,19 @@ static void bw_render_ent(int pi){
       if (S->ent_ev==5 && S->ent_phase==1) hint = "RUN! FOLLOW THE MOTHS!";
       else if (hidden) hint = S->ent_sub? "HIDING IN THE VENT. VERY SNEAKY." : "HIDING IN THE BUSH. VERY SNEAKY.";
       else if (S->ent_ev==6) hint = (room==25 && !S->ent_libdone)? "STAND STILL TO BE QUIET. FUSES GLOW GREEN." : (room==25? "THE LIBRARY DOOR IS OPEN." : "IT HEARS FOOTSTEPS. STAND STILL TO BE QUIET.");
-      else if (!S->ent_sub && room==25 && (b->x-(ent_room_x0(25)+(ENT_STRIDE-2)*BW_TILE+24))*(b->x-(ent_room_x0(25)+(ENT_STRIDE-2)*BW_TILE+24)) + (b->y-((ENT_ROWS-2)*BW_TILE+24))*(b->y-((ENT_ROWS-2)*BW_TILE+24)) < 58*58)
+      else if (S->ent_chap==2 && ent_duet_door(pi, room) && room > S->ent_door_upto){
+          // DEEPER DOORS (feat 11): the duet hints outrank the plain
+          // OPEN THE DOOR line below — Interact does not open these
+          float pax, pay, pbx, pby; ent_plate_pos(pi, room, 0, &pax, &pay); ent_plate_pos(pi, room, 1, &pbx, &pby);
+          float dax=b->x-pax, day=b->y-pay, dbx=b->x-pbx, dby=b->y-pby;
+          if (dax*dax+day*day < 22*22 || dbx*dbx+dby*dby < 22*22) hint = "HOLD STILL - TWO FRIENDS, ONE DOOR";
+          else if (dx*dx+dy*dy < 90*90) hint = "STAND ON A PLATE - LUMEN TAKES THE OTHER";
+      }
+      else if (!S->ent_sub && room==25 && S->ent_chap!=2 && (b->x-(ent_room_x0(25)+(ENT_STRIDE-2)*BW_TILE+24))*(b->x-(ent_room_x0(25)+(ENT_STRIDE-2)*BW_TILE+24)) + (b->y-((ENT_ROWS-2)*BW_TILE+24))*(b->y-((ENT_ROWS-2)*BW_TILE+24)) < 58*58)
           hint = S->ent_libdone? key_prompt(ehb, lbl_int(), "BEHIND THE BOOKCASE...") : "A TALL BOOKCASE. IT WILL NOT BUDGE... YET.";
       else if (ent_door_locked(pi, room) && dx*dx+dy*dy < 54*54) hint = S->ent_key? key_prompt(ehb, lbl_int(), "UNLOCK IT!") : "LOCKED - THE KEY IS IN THIS ROOM";
       else if (dx*dx+dy*dy < 54*54 && room > (S->ent_sub? S->ent_door_sub : S->ent_door_upto)) hint = key_prompt(ehb, lbl_int(), "OPEN THE DOOR");
-      else if (!S->ent_sub && room==51) hint = "THE EXIT DOOR IS IN THE SOUTH WALL";
+      else if (!S->ent_sub && room==ent_final_room(S)) hint = "THE EXIT DOOR IS IN THE SOUTH WALL";
       else if (room==1 && b->x < 90) hint = key_prompt(ehb, lbl_int(), S->ent_sub? "UP THE STAIRS" : "BACK TO THE MALL");
       if (hint){ int hw2 = text_w(hint, 1);
       rect_fill(vx + vw2/2 - hw2/2 - 6, vy + vh2-22, hw2+12, 14, COL(20,26,20));
@@ -2370,7 +2871,7 @@ static void bw_render_ent(int pi){
 // --- drawing -------------------------------------------------------------------
 static void bw_draw_big_hacker(float wx, float wy, int boss, int named){
     int x=SX(wx), y=SY(wy); if (x<-70||x>clip_x1+70||y<-90||y>clip_y1+70) return;
-    int raid = boss==1, hoard = boss==3;
+    int raid = boss==1 || boss==4, hoard = boss==3;   // boss 4 (feat 14) is the RAID, reassembled — drawn as itself
     shadow_ellipse(x, y+14, 24, 5);
     circle_fill(x, y, 21, OUTLINE); circle_fill(x, y, 19, raid? COL(44,52,92) : hoard? COL(66,52,26) : COL(30,30,38));
     rect_fill(x-13, y-8, 26, 15, COL(16,20,30)); rect_line(x-13, y-8, 26, 15, OUTLINE);
@@ -2639,6 +3140,12 @@ static void bw_draw_objects(int pi, int pass){
             if ((wy < b->y) != (pass==0)) continue;
             bw_draw_big_hacker(wx, wy, bs==0? 1 : bs==1? 2 : 3, 1);
         }
+        // THE REBUILDING (feat 14): the rematch, reassembled and
+        // waiting at the farm for exactly as long as quest 12 is owed
+        if (bw_qstate3(b,12)==1){
+            float wx = BW_SITE_XY[1][0], wy = BW_SITE_XY[1][1] + 10;
+            if ((wy < b->y) == (pass==0)) bw_draw_big_hacker(wx, wy, 4, 1);
+        }
         // help signs: a post, a board, and something scratched on it
         for (int i=0;i<6;i++){
             float wx=BW_HSIGN_XY[i][0], wy=BW_HSIGN_XY[i][1];
@@ -2675,11 +3182,79 @@ static void bw_draw_objects(int pi, int pass){
             circle_fill(x, y-15, 6, OUTLINE); circle_fill(x, y-15, 5, COL(242,204,164));
             if (i!=1){ tri_fill(x-4, y-11, x, y-4, x+4, y-11, COL(238,238,240)); }   // the beard (Mop is beardless, the scandal)
             pset(x-2, y-16, OUTLINE); pset(x+2, y-16, OUTLINE);
-            int questy = (i==0 && (bw_qstate(b,0)==1 || (bw_qstate(b,1)==2 && bw_qstate2(b,8)==0)))
+            int questy = (i==0 && (bw_qstate(b,0)==1 || (bw_qstate(b,1)==2 && bw_qstate2(b,8)==0)
+                      || (bw_story_complete(b) && bw_qstate3(b,10)==0) || (bw_qstate3(b,10)==2 && bw_qstate3(b,11)==0) || bw_qstate3(b,13)==1))
                       || (i==1 && ((bw_qstate_x(b,4)==1 && bw_tools_found(b)>=3) || (bw_qstate_x(b,4)==2 && bw_qstate2(b,7)==0)))
                       || (i==2 && (bw_qstate(b,2)==1 || (bw_qstate2(b,7)==1 && ((b->story_bits2>>10)&1)) || (bw_qstate2(b,6)==1 && bw_lakekills(b)>=2) || (bw_qstate(b,2)==2 && bw_qstate2(b,6)==0)));
             if (questy) draw_text_center(x, y-34 - (int)(fsin(G.anim_t*4)*1.5f), "!", 2, COL(255,214,64));
             draw_text_center(x, y+16, NPC_NAME[i], 1, COL(255,246,220));
+        }
+        // Duster, the sweep-bot (feat 14): at its post, or at the
+        // buddy's heels, for exactly as long as the escort is owed —
+        // Bitling's shape in work clothes, brush and all
+        if (bw_qstate3(b,11)==1 && S->ch2_esc_on){
+            float wx=S->ch2_esc_x, wy=S->ch2_esc_y;
+            if ((wy < b->y) == (pass==0)){
+                int x=SX(wx), y=SY(wy);
+                if (x>-40 && x<clip_x1+40 && y>-50 && y<clip_y1+40){
+                    int bob = (int)(fsin(G.anim_t*5.0f + 1.3f)*1.5f);
+                    shadow_ellipse(x, y+9, 9, 3);
+                    rect_fill(x-7, y-4+bob, 14, 12, COL(150,144,132)); rect_line(x-7, y-4+bob, 14, 12, OUTLINE);
+                    circle_fill(x, y-8+bob, 6, COL(150,144,132)); circle_fill(x, y-8+bob, 6, OUTLINE);
+                    disc_fill(x-2, y-8+bob, 1, COL(255,190,80)); disc_fill(x+2, y-8+bob, 1, COL(255,190,80));
+                    line_thick(x-6, y+8+bob, x+6, y+8+bob, 2, COL(196,158,102));   // the brush, sweeping
+                    draw_text_center(x, y+16, "DUSTER", 1, COL(255,246,220));
+                }
+            }
+        }
+        // PATCH DAY dressing (feat 14): bunting over the village
+        // green — up while the festival runs, and up for good once
+        // the chapter is done (the village keeps the day). Villagers
+        // and confetti only while the celebration clock runs.
+        if (S->ch2_fest_t>0 || bw_chapter_done(b)){
+            static const float BUNT[2][4] = { { -2700, -1470, -2500, -1470 }, { -2500, -1470, -2600, -1290 } };
+            static const u32 PENN[4] = { COL(255,120,150), COL(255,214,64), COL(120,220,255), COL(150,255,150) };
+            if (pass==0) for (int s2=0;s2<2;s2++){
+                float ax=BUNT[s2][0], ay=BUNT[s2][1], bx2=BUNT[s2][2], by2=BUNT[s2][3];
+                int px0=SX(ax), py0=SY(ay);
+                if (px0<-340||px0>clip_x1+340||py0<-80||py0>clip_y1+80) continue;
+                for (int sg=0; sg<8; sg++){
+                    float t0=sg/8.0f, t1=(sg+1)/8.0f;
+                    int x0=SX(ax+(bx2-ax)*t0), y0=SY(ay+(by2-ay)*t0 + fsin(t0*3.14159f)*14);
+                    int x1=SX(ax+(bx2-ax)*t1), y1=SY(ay+(by2-ay)*t1 + fsin(t1*3.14159f)*14);
+                    line_thick(x0, y0, x1, y1, 1, COL(90,70,50));
+                    if (sg%2==0){ float tm=(t0+t1)/2; int mx=SX(ax+(bx2-ax)*tm), my=SY(ay+(by2-ay)*tm + fsin(tm*3.14159f)*14);
+                        tri_fill(mx-4, my, mx+4, my, mx, my+9, PENN[(sg/2 + s2)%4]); }
+                }
+            }
+            if (S->ch2_fest_t>0){
+                static const float VIL[4][2] = { { -2780, -1330 }, { -2420, -1440 }, { -2660, -1220 }, { -2560, -1580 } };
+                static const u32 VROBE[4] = { COL(178,84,84), COL(84,140,178), COL(190,150,60), COL(120,170,110) };
+                for (int i=0;i<4;i++){
+                    float wx=VIL[i][0], wy=VIL[i][1];
+                    if ((wy < b->y) != (pass==0)) continue;
+                    int x=SX(wx), y=SY(wy); if (x<-40||x>clip_x1+40||y<-60||y>clip_y1+40) continue;
+                    int bob = (int)(fsin(G.anim_t*3 + i*1.7f)*1.5f);
+                    shadow_ellipse(x, y+10, 11, 3);
+                    tri_fill(x-9, y+10+bob, x, y-12+bob, x+9, y+10+bob, VROBE[i]);
+                    line_thick(x-9, y+10+bob, x, y-12+bob, 1, OUTLINE); line_thick(x, y-12+bob, x+9, y+10+bob, 1, OUTLINE);
+                    circle_fill(x, y-15+bob, 6, OUTLINE); circle_fill(x, y-15+bob, 5, COL(242,204,164));
+                    pset(x-2, y-16+bob, OUTLINE); pset(x+2, y-16+bob, OUTLINE);
+                }
+                if (pass==0){
+                    // confetti over the green — deterministic pieces
+                    // from the hash and the clock, no stored particles
+                    static const u32 CONFC[4] = { COL(255,120,150), COL(120,220,255), COL(255,214,64), COL(150,255,150) };
+                    for (int i=0;i<42;i++){
+                        u32 h = hash2(i, 7, 0xFE57u);
+                        int wx = -2850 + (int)(h % 500);
+                        int wy = -1650 + (int)((G.anim_t*(26 + (float)((h>>8)%20)) + (float)(h>>16)) ) % 500;
+                        int x = SX(wx) + (int)(fsin(G.anim_t*2 + i)*4), y = SY(wy);
+                        if (x<0||x>clip_x1||y<0||y>clip_y1) continue;
+                        rect_fill(x, y, 3, 2, CONFC[h%4]);
+                    }
+                }
+            }
         }
     }
 }
@@ -2718,6 +3293,17 @@ static int bw_quest_target(Buddy *b, float *tx, float *ty){
             if (d<bd){ bd=d; best=i; } }
         if (best>=0){ *tx=BW_HSIGN_XY[best][0]; *ty=BW_HSIGN_XY[best][1]; return 1; }
     }
+    // THE REBUILDING (feat 14): the chapter's errands point too —
+    // after every main-story arm, since they can only be active
+    // once the whole list above is done
+    if (bw_qstate3(b,10)==1){ *tx=BW_SITE_XY[2][0]; *ty=BW_SITE_XY[2][1]; return 1; }   // the cider waits on the lake ice
+    if (bw_qstate3(b,11)==1){
+        BwSim *S = &BWS[b - G.bud];
+        if (S->ch2_esc_on && bw_duster_dist(b) > 120){ *tx=S->ch2_esc_x; *ty=S->ch2_esc_y; return 1; }   // fetch Duster first
+        *tx=BW_SITE_XY[1][0]; *ty=BW_SITE_XY[1][1]; return 1;   // then the farm
+    }
+    if (bw_qstate3(b,12)==1){ *tx=BW_SITE_XY[1][0]; *ty=BW_SITE_XY[1][1]; return 1; }   // the racks are rattling
+    if (bw_qstate3(b,13)==1){ *tx=BW_NPC_XY[0][0]; *ty=BW_NPC_XY[0][1]; return 1; }   // home for Patch Day
     return 0;
 }
 static void bw_draw_minimap(int pi){
@@ -2803,5 +3389,21 @@ static void bw_draw_note(int pi){
     }
     if (l2[0]){ draw_text(bx+10, by+8, l1, 1, COL(255,250,235)); draw_text(bx+10, by+24, l2, 1, COL(255,250,235)); }
     else draw_text(bx+10, by+16, l1, 1, COL(255,250,235));
+}
+// THE REBUILDING (feat 14): the cider run's countdown — the one
+// piece of chapter HUD. A gold-rimmed pill at the top centre of
+// the view (the minimap owns the corner, the note owns the
+// bottom), drawn while a run is live and never otherwise.
+static void bw_draw_ch2_hud(int pi){
+    BwSim *S = &BWS[pi];
+    Buddy *b=&G.bud[pi];
+    if (!S->ch2_race_on || b->bw_mode!=1) return;
+    int vx=G.view_x0, vy=G.view_y0, vw2=G.view_w>0? G.view_w : VW;
+    int t = (int)(S->ch2_race_t + 0.999f); if (t<0) t=0;
+    char buf[24]; char *q=buf; q=sappend(q, "CIDER RUN "); q=sapp_int(q, t/60); q=sappend(q, ":"); if (t%60<10) q=sappend(q, "0"); q=sapp_int(q, t%60); *q=0;
+    int hw2 = text_w(buf, 2);
+    rect_fill(vx + vw2/2 - hw2/2 - 8, vy + 10, hw2+16, 24, COL(12,14,20));
+    rect_line(vx + vw2/2 - hw2/2 - 8, vy + 10, hw2+16, 24, COL(198,164,84));
+    draw_text_center(vx + vw2/2, vy + 16, buf, 2, COL(255,214,64));
 }
 

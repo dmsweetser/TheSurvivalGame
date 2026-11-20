@@ -62,15 +62,17 @@ async function poll(call, fn, want, timeout = 10000, step = 200) {
   await sleep(150);
   await key('KeyE', 300);
   ok((await call('dbg_mall')) === 1, 'entered the mall');
-  const stations = [[-225, 0, 'Bounty'], [75, 2, 'Bank'], [225, 3, 'Buddies']];
+  // v1.25 MALL ENLARGEMENT: the north counters stand at MALL_SX {-315,-105,105,315},
+  // disc row MALL_CY-148 = -6148; station 0 is THE COUNTER now (audit naming fix)
+  const stations = [[-315, 0, 'Counter'], [105, 2, 'Bank'], [315, 3, 'Buddies']];
   for (const [sx, si, nm] of stations) {
-    ok(await walkTo(sx, -6108, 14), `walked to the ${nm} counter`);
+    ok(await walkTo(sx, -6148, 14), `walked to the ${nm} counter`);
     await key('KeyE', 300);
     ok((await state()) === 2 && (await call('dbg_station')) === si, `${nm} panel opens`, `${await state()}/${await call('dbg_station')}`);
     await key('Escape', 300);
     ok((await state()) === 1, `${nm} panel closes`);
   }
-  ok(await walkTo(-170, -5908, 14), 'walked to the Bug Bowl counter');
+  ok(await walkTo(-180, -5868, 14), 'walked to the Bug Bowl counter');   // BOWL_SX -180, south disc row MALL_CY+132
   await key('KeyE', 300);
   ok((await state()) === 2 && (await call('dbg_station')) === 4, 'bowling view opens');
   await key('Escape', 300);
@@ -82,7 +84,7 @@ async function poll(call, fn, want, timeout = 10000, step = 200) {
   await call('dbg_tp', 60, -6030);
   await sleep(500);
   await cv.screenshot({ path: __dirname + '/mall-north.png' });
-  ok(await walkTo(0, -5850, 10), 'walked to the exit mat');
+  ok(await walkTo(0, -5810, 10), 'walked to the exit mat');
   await key('KeyE', 300);
   ok((await call('dbg_mall')) === 0, 'exit mat leaves the mall');
   await page.close();
@@ -135,9 +137,20 @@ async function poll(call, fn, want, timeout = 10000, step = 200) {
   ok((await call2('dbg_mall')) === 1, 'P1 entered the mall too');
   const split2 = await poll(call2, 'dbg_split', v => v === 0, 6000);
   ok(split2 === 0, 'both inside together: one merged view', split2);
-  // P2 strolls north to the Bank and opens her panel in her half
-  await hold(1, 12, 1150);                                     // up to the counter line
-  await hold(1, 15, 380);                                      // right toward the Bank (the Gallery is gone)
+  // P2 strolls north to the Bank and opens her panel in her half.
+  // Position-polled walks, not fixed durations: P2's pad walk is
+  // ~150px/s, and the ENLARGEMENT (v1.25) lengthened this route past
+  // what the old timed holds could reach — poll dbg_p2x/dbg_p2y to
+  // the Bank disc (105, MALL_CY-148, r64) instead.
+  const holdUntil = async (bi, fn, ms = 9000) => {
+    await page2.evaluate(([p, b]) => window.__btn(p, b, true), [1, bi]);
+    const t0 = Date.now();
+    while (Date.now() - t0 < ms && !fn(await call2('dbg_p2x'), await call2('dbg_p2y'))) await sleep(80);
+    await page2.evaluate(([p, b]) => window.__btn(p, b, false), [1, bi]);
+    await sleep(100);
+  };
+  await holdUntil(12, (x, y) => y <= -6100);                   // up to the counter line
+  await holdUntil(15, (x, y) => x >= 85);                      // right toward the Bank (the Gallery is gone)
   let split3 = 0;
   for (let i = 0; i < 8 && split3 !== 1; i++) {
     await btn(1, 1, 140);                                      // interact
@@ -148,14 +161,20 @@ async function poll(call, fn, want, timeout = 10000, step = 200) {
   const cv2 = await page2.$('canvas');
   await cv2.screenshot({ path: __dirname + '/mall-split.png' });
   await btn(1, 8, 160);                                        // Back closes P2's panel
+  // The enlarged Mall outgrew one fit-view vertically (spawn to
+  // counter row is 306px now), so the pair stays distance-split
+  // until P2 strolls back into fitting range — the merge below then
+  // proves the PANEL stopped forcing the split, as before.
+  await holdUntil(13, (x, y) => y >= -5900);                   // P2 south, back toward P1
   const split4 = await poll(call2, 'dbg_split', v => v === 0, 6000);
   ok(split4 === 0, 'panel closed: merged again', split4);
-  // P2 heads out alone: pin to the west wall along the counter line
-  // (known x), walk the measured distance back to the carpet, then
-  // straight down it to the exit mat
-  await hold(1, 14, 1600);                                     // west wall: x = -284 for sure
-  await hold(1, 15, 1420);                                     // ~284px east: the carpet, x ~ 0
-  await hold(1, 13, 1250);                                     // down the carpet to the mat
+  // P2 heads out alone: pin to the west wall (known x), walk back
+  // to the carpet, then straight down it to the
+  // exit mat — position-polled like the Bank leg (the timed version
+  // fell short of the enlarged room's mat at MALL_CY+168..+212)
+  await holdUntil(14, (x, y) => x <= -380);                    // west wall: the clamp, x = -384
+  await holdUntil(15, (x, y) => x >= -6);                      // east: the carpet, x ~ 0
+  await holdUntil(13, (x, y) => y >= -5820);                   // down the carpet onto the mat
   let p2out = 0;
   for (let i = 0; i < 8 && !p2out; i++) {
     await btn(1, 1, 140);                                      // interact
@@ -170,10 +189,10 @@ async function poll(call, fn, want, timeout = 10000, step = 200) {
   { const t0 = Date.now(); let on = false;
     while (Date.now() - t0 < 8000 && !on) {
       const x = await call2('dbg_px'), y = await call2('dbg_py');
-      if (Math.abs(x - 0) <= 10 && Math.abs(y - -5850) <= 10) { on = true; break; }
+      if (Math.abs(x - 0) <= 10 && Math.abs(y - -5810) <= 10) { on = true; break; }
       const keys = [];
       if (x < -10) keys.push('ArrowRight'); else if (x > 10) keys.push('ArrowLeft');
-      if (y < -5860) keys.push('ArrowDown'); else if (y > -5840) keys.push('ArrowUp');
+      if (y < -5820) keys.push('ArrowDown'); else if (y > -5800) keys.push('ArrowUp');
       for (const k of keys) await page2.keyboard.down(k);
       await sleep(90);
       for (const k of keys) await page2.keyboard.up(k);

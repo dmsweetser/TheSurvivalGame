@@ -40,6 +40,14 @@ int  plat_net_send(const u8 *data, int len, int dest); // dest: -1 broadcast (ho
 int  plat_net_recv(u8 *buf, int cap, int *src);        // returns len or 0
 // time in seconds (monotonic) and a "quit" flag for native builds
 double plat_now(void);
+// the local civil date as a day number (days since 1970-01-01, local
+// time) — the WEEKLY CHALLENGE's only clock (v1.25 feat 6). plat_now
+// is monotonic and never learns the date; this one does nothing else.
+int plat_daynum(void);
+// the local time of day as minutes since midnight (0..1440, seconds
+// folded in as a fraction) — the LIVING SKY's only clock (v1.25 feat
+// 12). Cosmetic only: nothing but colour ever reads it.
+float plat_minutes(void);
 // where friends point a browser to join this machine's game
 // ("192.168.1.42:8379"), or 0 on builds that cannot host
 const char *plat_join_addr(void);
@@ -249,6 +257,15 @@ static void line_thick(int x0, int y0, int x1, int y1, int r, u32 c){
 static u32 col_shade(u32 c, float f){
     int r=(int)(COL_R(c)*f), g=(int)(COL_G(c)*f), b=(int)(COL_B(c)*f);
     return COL(iclamp(r,0,255), iclamp(g,0,255), iclamp(b,0,255));
+}
+// linear mix toward another colour, f in 0..1 (v1.25 feat 12: the
+// sky tints; generally useful)
+static u32 col_mix(u32 a, u32 b, float f){
+    if (f<=0.0f) return a; if (f>=1.0f) return b;
+    int r=(int)(COL_R(a) + (COL_R(b)-COL_R(a))*f);
+    int g=(int)(COL_G(a) + (COL_G(b)-COL_G(a))*f);
+    int bl=(int)(COL_B(a) + (COL_B(b)-COL_B(a))*f);
+    return COL(iclamp(r,0,255), iclamp(g,0,255), iclamp(bl,0,255));
 }
 static void pset_blend(int x, int y, u32 c, int alpha){   // alpha 0..255
     if (x<clip_x0 || x>=clip_x1 || y<clip_y0 || y>=clip_y1 || alpha<=0) return;

@@ -76,7 +76,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   await btn(1, 1, 180); await sleep(500);
 
   // P1 to the Arcade (east-wall door strip), then the kart cabinet
-  await call('dbg_tp', 230, -5976);
+  await call('dbg_tp', 350, -5976);
   await key('KeyE', 200);
   ok((await poll('dbg_inarcade', v => v === 1, 5000)) === 1, 'P1 entered the Arcade');
   await call('dbg_tp', 256, -11898);
@@ -90,7 +90,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   ok((await call('dbg_bwstate2')) === 0, 'P2 is NOT in the race yet');
 
   // P2 must choose the cart on their own side: Arcade door, cabinet, PLAY
-  await call('dbg_tp2', 230, -5976);
+  await call('dbg_tp2', 350, -5976);
   await btn(1, 1, 180); await sleep(400);
   await call('dbg_tp2', 256, -11898);
   await sleep(250);

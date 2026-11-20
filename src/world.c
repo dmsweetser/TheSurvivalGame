@@ -13,20 +13,118 @@
 // No bugs inside. Ever. House rules.
 // ---------------------------------------------------------------------------
 #define MALL_CY (-6000)
-static const int MALL_SX[4] = { -225, -75, 75, 225 };   // station counter centres
-static const char *MALL_STATION[5] = { "BUG BOUNTY", "WHALES ONLY", "BUG BANK", "BANZAI BUDDIES", "BUG BOWL" };
-#define BOWL_SX (-170)                                   // the lanes counter, south-west
+static const int MALL_SX[4] = { -315, -105, 105, 315 };   // station counter centres
+static const char *MALL_STATION[9] = { "THE COUNTER", "WHALES ONLY", "BUG BANK", "BANZAI BUDDIES", "BUG BOWL", "TROPHY CASE", "CHALLENGE BOARD", "BOUNTY BOARD", "PHOTO BOOTH" };
+#define BOWL_SX (-180)                                   // the lanes counter, south-west
+#define CASE_SX 340                                       // TROPHY CASE (v1.25 feat 4): the glass case at the south wall's east end, past the Banzai gate — clear of the entry-mat <-> gate corridor
+#define BOARD_SX (-330)                                  // CHALLENGE BOARD (v1.25 feat 6): the south wall's west end, the case's mirror bookend — west of the bowl there is no door, mat or through-route to block
+#define BOUNTY_WX (-366)                                 // BOUNTY BOARD (v1.25 feat 8): a WANTED board flush on the WEST wall (the south and north walls are full; the east carries the Arcade) — no floor footprint, no collision box, nothing in any corridor
+#define BOUNTY_WY (MALL_CY+8)
+/* v1.25 MALL ENLARGEMENT (Daniel, Nov 19): the interior grew +100 a side and
+ * +40 north/south, symmetric about (0, MALL_CY), so the room centre — and the
+ * save/load resume point — never moved. Station 0 is THE COUNTER now (the
+ * static-text audit's naming collision: the elite BOUNTY BOARD is the only
+ * live "Bounty" left). The Hat Portrait Booth left the Banzai Buddies panel
+ * for its own station (index 8): a freestanding island fixture west-centre.
+ * BOOTH_SX/BOOTH_CY are the body centre; the interact disc sits 20 px south
+ * of the body face, like the other fixtures. Disc separations were checked
+ * against every other disc — no overlaps. */
+#define BOOTH_SX (-232)
+#define BOOTH_CY (MALL_CY - 30)
+#define BOOTH_DY (MALL_CY + 20)
+// ---------------------------------------------------------------------------
+// THE LIVING SKY (v1.25 feature 12): a day/night tint over the
+// overworld and Banzai World's outdoors, plus signature weather in
+// three regions. Spec: hidden_files/v125-feat12-spec.md.
+// The driver is the device's local wall clock (plat_minutes /
+// plat_daynum — the same trust the Weekly Challenge already makes),
+// so the feature is STATELESS: nothing saved, nothing synced, two
+// loads at the same moment always agree. Colour only — no spawn,
+// difficulty, movement or record anywhere reads this module.
+// ---------------------------------------------------------------------------
+static float tod_test_min = -1.0f;   // test-only pin (dbg_todset); never saved
+static int   tod_test_day = -1;      // test-only pin (dbg_todday); never saved
+static void tod_test_set_min(float m){ tod_test_min = m; }
+static void tod_test_set_day(int d){ tod_test_day = d; }
+static float tod_minutes(void){
+    if (tod_test_min >= 0.0f) return tod_test_min;
+    float m = plat_minutes();
+    if (m < 0.0f) m = 0.0f; if (m >= 1440.0f) m = 1439.99f;
+    return m;
+}
+static int tod_daynum(void){ return tod_test_day >= 0? tod_test_day : plat_daynum(); }
+static float tod_smooth(float p){ return p*p*(3.0f - 2.0f*p); }   // smoothstep, bounded input
+// darkness 0..1: night plateau 19:30-04:30, dawn ramp 04:30-06:30,
+// day until 17:30, dusk ramp 17:30-19:30
+static float tod_darkf(void){
+    float m = tod_minutes();
+    if (m < 270.0f) return 1.0f;
+    if (m < 390.0f) return 1.0f - tod_smooth((m - 270.0f)/120.0f);
+    if (m < 1050.0f) return 0.0f;
+    if (m < 1170.0f) return tod_smooth((m - 1050.0f)/120.0f);
+    return 1.0f;
+}
+// warmth 0..1: a bell over each ramp (peaks mid-dawn / mid-dusk,
+// where darkf crosses 0.5), zero at noon and at deep night
+static float tod_warmf(void){
+    float m = tod_minutes();
+    if (m >= 270.0f && m < 390.0f) return fsin(PI * (m - 270.0f)/120.0f);
+    if (m >= 1050.0f && m < 1170.0f) return fsin(PI * (m - 1050.0f)/120.0f);
+    return 0.0f;
+}
+// a sky colour under the living sky: warmed at the ramps, cooled
+// toward night blue after dark. Skies may go deeper than the ground
+// tint — a sky is not a readability surface.
+static u32 tod_sky(u32 c){
+    float dk = tod_darkf(), wf = tod_warmf();
+    if (wf > 0.001f) c = col_mix(c, COL(255,166,88), 0.22f*wf);
+    if (dk > 0.001f) c = col_mix(c, COL(16,20,50), 0.62f*dk);
+    return c;
+}
+// the tint itself, laid over one rendered view (clip bounds): warm
+// first, then the night — capped at 96/255 so the world cools, it
+// never hides. Interiors never reach this call (render early-outs).
+static void tod_apply_tint(void){
+    float dk = tod_darkf(), wf = tod_warmf();
+    int x0 = clip_x0, y0 = clip_y0, w = clip_x1 - clip_x0, h = clip_y1 - clip_y0;
+    if (w <= 0 || h <= 0) return;
+    if (wf > 0.004f) blend_rect(x0, y0, w, h, COL(255,146,54), (int)(38.0f*wf));
+    if (dk > 0.004f) blend_rect(x0, y0, w, h, COL(10,14,38), (int)(96.0f*dk));
+}
+// --- regional weather: kinds are a region's signature; the state is
+// a pure hash of (epoch, region). Epochs are 3-hour blocks of local
+// time, so weather is a slow fact about the day. 0 none, 1 rain,
+// 2 snow, 3 shimmer.
+static const int WX_KIND[NREGIONS] = { 0, 0, 0, 3, 2, 0, 1, 0 };   // Badlands shimmer, Frozen snow, Jungle rain
+static int wx_epoch_now(void){ return tod_daynum()*8 + (int)(tod_minutes()/180.0f); }
+static int wx_state(int region, int epoch){
+    if (region < 0 || region >= NREGIONS || WX_KIND[region]==0) return 0;
+    int v = (int)((hash2(epoch, region*7 + 1, 0x5EEDu) >> 8) % 4);
+    return v < 2? 0 : v - 1;   // {0,1 -> quiet, 2 -> light, 3 -> steady}
+}
 static int station_at(Player *p){
     if (!p->in_mall) return -1;
     for (int s=0;s<4;s++){
-        float dx=p->x - MALL_SX[s], dy=p->y - (MALL_CY-108);
+        float dx=p->x - MALL_SX[s], dy=p->y - (MALL_CY-148);
         if (dx*dx + dy*dy < 64*64) return s;
     }
-    { float dx=p->x - BOWL_SX, dy=p->y - (MALL_CY+92);   // the bowling counter
+    { float dx=p->x - BOWL_SX, dy=p->y - (MALL_CY+132);   // the bowling counter
       if (dx*dx + dy*dy < 64*64) return 4; }
+    { float dx=p->x - CASE_SX, dy=p->y - (MALL_CY+132);   // the trophy case
+      if (dx*dx + dy*dy < 64*64) return 5; }
+    { float dx=p->x - BOARD_SX, dy=p->y - (MALL_CY+132);   // the challenge board
+      if (dx*dx + dy*dy < 64*64) return 6; }
+    { float dx=p->x - BOUNTY_WX, dy=p->y - BOUNTY_WY;   // the bounty board, west wall
+      if (dx*dx + dy*dy < 60*60) return 7; }
+    { float dx=p->x - BOOTH_SX, dy=p->y - BOOTH_DY;   // the photo booth island
+      // feat 9's rule rides along: the booth poses you WITH your buddy,
+      // so it answers only a player whose buddy is here and healthy —
+      // behind the Banzai menu, the booth rows simply didn't exist
+      // for anyone else, and the fixture keeps that shape.
+      if (dx*dx + dy*dy < 56*56 && G.bud[p-G.p].active && !G.bud[p-G.p].fainted) return 8; }
     return -1;
 }
-#define BW_SX 185                                    // the Banzai World door, south-east
+#define BW_SX 215                                    // the Banzai World door, south-east
 // ---------------------------------------------------------------------------
 // THE ARCADE (Daniel, Nov 10): a whole room of its own off the mall's
 // east wall. The Banzai World gate keeps STORY MODE and FREE PLAY;
@@ -51,6 +149,8 @@ static const char *ARC_NAME[7] = { "ENTRANCES", "SUPER BUDDY RUN", "BUDDY CRAFT"
 static const int ARC_MODE[7] = { 2, 3, 4, 5, 6, 7, 8 };         // the bw_mode each cabinet launches
 static int arcgate[MAXP], arcgate_sel[MAXP], arc_cab[MAXP];   // the cabinet panel (per player)
 static int bw_arc_src[MAXP], bw_arc_cab[MAXP];         // pending arcade origin for bw_enter_mode
+static int bw_cas_shuffle_req[MAXP];                   // CASTLE SHUFFLE (v1.25 feat 7): the cabinet panel's pending mode-6 request
+static int bw_ent_ch2_req[MAXP];                       // DEEPER DOORS (v1.25 feat 11): the cabinet panel's pending mode-2 chapter request
 static int cabinet_at(Player *p){
     if (!p->in_arcade) return -1;
     for (int s=0;s<7;s++){
@@ -60,7 +160,7 @@ static int cabinet_at(Player *p){
     return -1;
 }
 static int arcade_door_at(Player *p){   // the mall's east-wall door
-    return p->in_mall && !p->in_arcade && p->x>192 && p->y>MALL_CY-14 && p->y<MALL_CY+66;
+    return p->in_mall && !p->in_arcade && p->x>312 && p->y>MALL_CY-14 && p->y<MALL_CY+66;
 }
 static int arcade_exit_at(Player *p){   // the arcade's west-wall mat
     return p->in_arcade && p->x<-300 && p->y>ARC_CY-14 && p->y<ARC_CY+66;
@@ -75,7 +175,7 @@ static void arcade_enter(int pi){
 static void arcade_exit(int pi){
     Player *p=&G.p[pi];
     p->in_arcade=0; p->station=-1;
-    p->x=196; p->y=MALL_CY+24; p->aim=PI;
+    p->x=316; p->y=MALL_CY+24; p->aim=PI;
     splat(p->x, p->y, COL(140,240,255), 10, 90);
     sfx(19);
 }
@@ -83,9 +183,14 @@ static void arc_gate_try(int pi);                      // cabinet checks + panel
 static void arc_gate_draw(int pi, int vx, int vy, int vw2, int vh2);   // ditto
 static void arc_gate_tap(int pi, int vx, int vy, int vw2, int vh2);    // ditto
 static void arc_gate_pick(int pi);                     // ditto
+static int arc_gate_rows(int pi);                      // CASTLE SHUFFLE (feat 7): 3 rows at the unlocked CASTLE panel, else 2
 static void draw_arcade(void);                         // ditto (with the mall art)
 static void bw_gate_try(int pi);                     // gate checks + mode panel, below
 static void bw_enter_mode(int pi, int mode);         // defined with Banzai World, below
+static int bw_qstate_g(Buddy *b, int q);             // ditto: any story quest's state, 0-9 (TROPHY CASE reads it)
+static int crt_medal_count(Buddy *b, int tier);      // defined with the Cart medal table, below
+static int plat_medal_count(Buddy *b, int tier);     // defined with the Run medal table, below
+static int topper_refresh(int pi, int announce);     // HAT TOPPERS (feat 5): defined beside draw_hat, below
 static void ent_reset(int pi);
 static int ent_solid(int pi, float x, float y);
 static void bw_render_ent(int pi);
@@ -127,7 +232,7 @@ static void bw_battle_tap(int pi, int vx, int vy, int vw2, int vh2);   // ditto
 static void bw_render(int pi);                       // ditto
 static int bw_door_at(Player *p){
     if (!p->in_mall) return 0;
-    float dx=p->x - BW_SX, dy=p->y - (MALL_CY+92);
+    float dx=p->x - BW_SX, dy=p->y - (MALL_CY+132);
     // 100, not 64: the gate block itself holds you ~69 units off the
     // door point from the south and the west — at 64 the two most
     // natural approaches (up the door column from the entrance, east
@@ -137,12 +242,12 @@ static int bw_door_at(Player *p){
     return dx*dx + dy*dy < 100*100;
 }
 static int on_exit_mat(Player *p){
-    return p->in_mall && p->x>-40 && p->x<40 && p->y>MALL_CY+128 && p->y<MALL_CY+172;
+    return p->in_mall && p->x>-40 && p->x<40 && p->y>MALL_CY+168 && p->y<MALL_CY+212;
 }
 static void mall_enter(int pi){
     Player *p=&G.p[pi];
     p->in_mall=1; p->in_arcade=0; p->bean_jet=0; p->on_wall=-1; p->station=-1;
-    p->x=0; p->y=MALL_CY+118; p->aim=-PI/2;
+    p->x=0; p->y=MALL_CY+158; p->aim=-PI/2;
     splat(p->x, p->y, COL(255,214,120), 10, 90);
     sfx(19);
 }
@@ -154,11 +259,13 @@ static void mall_exit(int pi){
     sfx(19);
 }
 // what INTERACT would do right here (the HUD hint). neutral=1 swaps the
-// key name for a plain INTERACT (P2's half of a co-op screen)
+// key name for a plain INTERACT — retained for any future shared-screen
+// line; both current callers pass 0 and let the view's device context
+// name the viewing player's own control (v1.25).
 static const char *interact_prompt(Player *p, char *buf, int neutral){
     char *q=buf;
     if (!p->alive) return 0;
-    const char *key = neutral? "INTERACT" : (pad_mode()? "B" : (IN.touch_seen? "TAP" : key_name(G.bind[ACT_INTERACT])));
+    const char *key = neutral? "INTERACT" : lbla(H_INT);
     { Player *down = downed_near(p);
       if (down){ q=sappend(q, key); q=sappend(q, " - REVIVE "); q=sappend(q, down->name);
                  q=sappend(q, " - "); q=sapp_int(q, revive_price(down)); q=sappend(q, " KG");
@@ -197,11 +304,11 @@ static const char *interact_prompt(Player *p, char *buf, int neutral){
 }
 // mall interior collision: stay in the room, don't walk through counters
 static void mall_collide(Player *p){
-    if (p->x < -284) p->x = -284; if (p->x > 284) p->x = 284;
-    if (p->y < MALL_CY-164) p->y = MALL_CY-164;
-    if (p->y > MALL_CY+158) p->y = MALL_CY+158;
+    if (p->x < -384) p->x = -384; if (p->x > 384) p->x = 384;
+    if (p->y < MALL_CY-204) p->y = MALL_CY-204;
+    if (p->y > MALL_CY+198) p->y = MALL_CY+198;
     // the Banzai World gate against the south wall (east twin of the bowl)
-    { float hx=52, hy0=MALL_CY+118, hy1=MALL_CY+150, rad=11;
+    { float hx=52, hy0=MALL_CY+158, hy1=MALL_CY+190, rad=11;
       if (p->x > BW_SX-hx-rad && p->x < BW_SX+hx+rad && p->y > hy0-rad && p->y < hy1+rad){
           float dyr = (hy1+rad) - p->y, dyl = p->y - (hy0-rad);
           float dxr = (BW_SX+hx+rad) - p->x, dxl = p->x - (BW_SX-hx-rad);
@@ -211,7 +318,7 @@ static void mall_collide(Player *p){
           else if (side==2) p->x = BW_SX+hx+rad; else p->x = BW_SX-hx-rad;
       } }
     // the bowling counter against the south wall
-    { float hx=52, hy0=MALL_CY+118, hy1=MALL_CY+150, rad=11;
+    { float hx=52, hy0=MALL_CY+158, hy1=MALL_CY+190, rad=11;
       if (p->x > BOWL_SX-hx-rad && p->x < BOWL_SX+hx+rad && p->y > hy0-rad && p->y < hy1+rad){
           float dyr = (hy1+rad) - p->y, dyl = p->y - (hy0-rad);
           float dxr = (BOWL_SX+hx+rad) - p->x, dxl = p->x - (BOWL_SX-hx-rad);
@@ -220,8 +327,46 @@ static void mall_collide(Player *p){
           if (side==0) p->y = hy1+rad; else if (side==1) p->y = hy0-rad;
           else if (side==2) p->x = BOWL_SX+hx+rad; else p->x = BOWL_SX-hx-rad;
       } }
+    // the trophy case against the south wall (v1.25 feat 4): a
+    // narrower box than the bowl counter's, tucked east of the
+    // Banzai gate's box (ends x 278) so the entry-mat <-> gate
+    // corridor west of it stays walkable end to end
+    { float hx=28, hy0=MALL_CY+158, hy1=MALL_CY+190, rad=11;
+      if (p->x > CASE_SX-hx-rad && p->x < CASE_SX+hx+rad && p->y > hy0-rad && p->y < hy1+rad){
+          float dyr = (hy1+rad) - p->y, dyl = p->y - (hy0-rad);
+          float dxr = (CASE_SX+hx+rad) - p->x, dxl = p->x - (CASE_SX-hx-rad);
+          float m=dyr; int side=0;
+          if (dyl<m){ m=dyl; side=1; } if (dxr<m){ m=dxr; side=2; } if (dxl<m){ side=3; }
+          if (side==0) p->y = hy1+rad; else if (side==1) p->y = hy0-rad;
+          else if (side==2) p->x = CASE_SX+hx+rad; else p->x = CASE_SX-hx-rad;
+      } }
+    // the challenge board against the south wall's west end
+    // (v1.25 feat 6): the case's mirror — a box in the same idiom,
+    // west of the bowling counter's box (starts x -233), against
+    // the west wall. Nothing routes past it; it guards no corridor.
+    { float hx=26, hy0=MALL_CY+158, hy1=MALL_CY+190, rad=11;
+      if (p->x > BOARD_SX-hx-rad && p->x < BOARD_SX+hx+rad && p->y > hy0-rad && p->y < hy1+rad){
+          float dyr = (hy1+rad) - p->y, dyl = p->y - (hy0-rad);
+          float dxr = (BOARD_SX+hx+rad) - p->x, dxl = p->x - (BOARD_SX-hx-rad);
+          float m=dyr; int side=0;
+          if (dyl<m){ m=dyl; side=1; } if (dxr<m){ m=dxr; side=2; } if (dxl<m){ side=3; }
+          if (side==0) p->y = hy1+rad; else if (side==1) p->y = hy0-rad;
+          else if (side==2) p->x = BOARD_SX+hx+rad; else p->x = BOARD_SX-hx-rad;
+      } }
+    // the photo booth island, west-centre (v1.25 MALL ENLARGEMENT):
+    // a freestanding box in the same idiom — the lanes around it stay
+    // wide (107 px west to the clamp, ~80 px north to the counters)
+    { float hx=34, hy0=BOOTH_CY-34, hy1=BOOTH_CY+30, rad=11;
+      if (p->x > BOOTH_SX-hx-rad && p->x < BOOTH_SX+hx+rad && p->y > hy0-rad && p->y < hy1+rad){
+          float dyr = (hy1+rad) - p->y, dyl = p->y - (hy0-rad);
+          float dxr = (BOOTH_SX+hx+rad) - p->x, dxl = p->x - (BOOTH_SX-hx-rad);
+          float m=dyr; int side=0;
+          if (dyl<m){ m=dyl; side=1; } if (dxr<m){ m=dxr; side=2; } if (dxl<m){ side=3; }
+          if (side==0) p->y = hy1+rad; else if (side==1) p->y = hy0-rad;
+          else if (side==2) p->x = BOOTH_SX+hx+rad; else p->x = BOOTH_SX-hx-rad;
+      } }
     for (int s=0;s<4;s++){
-        float hx=58, hy0=MALL_CY-158, hy1=MALL_CY-126, rad=11;
+        float hx=58, hy0=MALL_CY-198, hy1=MALL_CY-166, rad=11;
         if (p->x > MALL_SX[s]-hx-rad && p->x < MALL_SX[s]+hx+rad && p->y > hy0-rad && p->y < hy1+rad){
             // push out the shallow way (almost always south, off the counter front)
             float dyr = (hy1+rad) - p->y, dyl = p->y - (hy0-rad);
@@ -369,6 +514,14 @@ static void place_wall(int pi){
     }
 }
 
+// ---------------------------------------------------------------------------
+// COMFORT (v1.25 feature 2): screen shake. Big hits raise G.shake
+// through this one gate — with the player's shake toggle off, the
+// value never rises and nothing anywhere shakes. render_world turns
+// a live value into a camera jitter (see shk_off_x below).
+// ---------------------------------------------------------------------------
+static void fx_shake(float v){ if (G.shake_on && v>G.shake) G.shake=v; }
+
 static void player_fire(Player *p, int pi, float dt){
     if (p->in_mall){ p->fire_cd = 0; return; }   // house rules: no shooting in the mall
     p->fire_cd -= dt;
@@ -410,7 +563,7 @@ static void player_fire(Player *p, int pi, float dt){
         fire_proj(pi, w, mx, my, ang, dmg, -1);
     }
     sfx(w==0?1 : w==1?2 : w==2?3 : 4);
-    if (w==3){ G.shake = 2.0f; }
+    if (w==3) fx_shake(2.0f);
 }
 
 // one damage tick of every live beam: same cone test the held beam used
@@ -743,7 +896,16 @@ static void update_bugs(float dt){
         // that buddy and keeps coming for it until one of them is
         // down (the same rule the retired robot clones used to get).
         int tp=-1; float td=1e18f;
-        if (b->btarget>=0 && G.bud[b->btarget].active && G.bud[b->btarget].hp>0 && !G.bud[b->btarget].fainted){
+        // the buddy quarry counts only while the buddy is IN THE
+        // FIELD: when its owner steps into the Mall (or the buddy
+        // is in Banzai World) the bug falls back to hunting players
+        // — and freezes with the rest while everybody shops (the
+        // shield doctrine above). Without this, a buddy-tagged bug
+        // — above all the named elite (feat 8) — measured its
+        // "left behind" distance to the buddy's Mall position and
+        // was culled the moment the party went shopping.
+        if (b->btarget>=0 && G.bud[b->btarget].active && G.bud[b->btarget].hp>0 && !G.bud[b->btarget].fainted
+            && !G.bud[b->btarget].in_bw && !G.p[b->btarget].in_mall){
             float dx=G.bud[b->btarget].x-b->x, dy=G.bud[b->btarget].y-b->y;
             td=dx*dx+dy*dy; tp=-2;   // tp -2: the quarry is a buddy (index in btarget)
         } else {
@@ -1044,7 +1206,7 @@ static void buddy_special(int pi, int bi){
     } else if (b->species==5){     // OVERFLOW: the sink gives everything back
         spawn_floater(b->x, b->y-24, "OVERFLOW!", COL(170,220,255));
         splat(b->x, b->y, COL(120,190,255), 20, 140);
-        if (G.shake<2) G.shake=2;
+        fx_shake(2.0f);
         for (int j=0;j<MAXBUGS;j++) if (G.bugs[j].alive){
             float dx=G.bugs[j].x-b->x, dy=G.bugs[j].y-b->y;
             if (dx*dx+dy*dy < 106*106){ if (G.bugs[j].alive) G.bugs[j].bp_t = 0.5f; buddy_hit(pi, j, buddy_dmg(b)*1.6f, 230); }
@@ -1053,7 +1215,7 @@ static void buddy_special(int pi, int bi){
     } else {                       // STOMP: the ground itself objects
         spawn_floater(b->x, b->y-24, "STOMP!", COL(255,210,150));
         splat(b->x, b->y+8, COL(190,160,120), 16, 130);
-        if (G.shake<2) G.shake=2;
+        fx_shake(2.0f);
         for (int j=0;j<MAXBUGS;j++) if (G.bugs[j].alive){
             float dx=G.bugs[j].x-b->x, dy=G.bugs[j].y-b->y;
             if (dx*dx+dy*dy < 74*74){ G.bugs[j].bp_t = 0.7f; buddy_hit(pi, j, buddy_dmg(b)*2.0f, 160); }
@@ -1188,7 +1350,7 @@ static void buddy_move4(int pi, int bi){
                 drops++;
             }
         }
-        if (G.shake<2) G.shake=2;
+        fx_shake(2.0f);
         spawn_floater(b->x, b->y-24, "AVALANCHE!", COL(225,220,205));
         sfx(7);
     } else if (b->species==5){     // EVERYTHING: including the sink
@@ -1211,7 +1373,7 @@ static void buddy_move4(int pi, int bi){
             float along = rx*ux + ry*uy, side = -rx*uy + ry*ux;
             if (along>0 && along<145 && side>-34 && side<34) buddy_hit(pi, j, buddy_dmg(b)*2.4f, 380);
         }
-        if (G.shake<3) G.shake=3;
+        fx_shake(3.0f);
         splat(b->x + ux*70, b->y + uy*70, COL(170,140,100), 14, 120);
         spawn_floater(b->x, b->y-26, "TIMBER!", COL(255,220,170));
         sfx(7);
@@ -1374,7 +1536,7 @@ static void update_sim(float dt){
     }
     // autosave
     G.autosave_t -= dt;
-    if (G.autosave_t<=0){ G.autosave_t=5.0f; if (G.state==GS_PLAY||G.state==GS_STORE) do_save(); }
+    if (G.autosave_t<=0){ G.autosave_t=5.0f; if (G.state==GS_PLAY||G.state==GS_STORE){ for (int i=0;i<MAXP;i++) if (G.p[i].connected) topper_refresh(i, 1); do_save(); } }
 }
 
 // ---------------------------------------------------------------------------
@@ -1548,8 +1710,9 @@ static void draw_bug_sprite(Bug *b){
     // a determined little mouth
     line_thick(hx-3, hy+r/4+2, hx, hy+r/4, 1, dark);
     line_thick(hx, hy+r/4, hx+3, hy+r/4+2, 1, dark);
-    // hp bar on big bugs
-    if (b->maxhp>=40 && b->hp<b->maxhp){
+    // hp bar on big bugs — and on elites always (feat 8: the bar is
+    // the hunt's progress, visible from the first sighting)
+    if ((b->maxhp>=40 && b->hp<b->maxhp) || (b->elite && b->hp>0)){
         int wpx = r*2;
         rect_fill(x-r, y-r-10, wpx, 3, COL(40,30,40));
         rect_fill(x-r, y-r-10, (int)(wpx*b->hp/b->maxhp), 3, COL(120,230,90));
@@ -1589,10 +1752,110 @@ static int hat_across_c(int n, int row, int cap, int rowcap){
     return base + (row<extra? 1:0);
 }
 static int hat_across(int n, int row){ return hat_across_c(n, row, HAT_VIS_MAX, 30); }
+// HAT TOPPERS (v1.25 feat 5): derive the earned set from the same
+// records the Trophy Case reads, so a plaque and its topper can
+// never disagree. Returns the newly-earned mask. The BOWL PIN is
+// the one non-derivable topper (the lanes keep only a house best,
+// so nobody can be credited after the fact); mall.c awards it at
+// the bowl finalize site. Everything else derives here.
+static int topper_derive(Buddy *b, Player *p){
+    int m = 0;
+    if (b->cas_best > 0) m |= TOP_BIT(TOP_CROWN);                    // escaped CASTLE once
+    if (b->war_prog >= 8) m |= TOP_BIT(TOP_CAP);                     // WAR! campaign conquered
+    { int home = b->crt_cupbest % 8, far = b->crt_cupbest / 8;       // a Grand Prix cup won
+      if (home==1 || far==1) m |= TOP_BIT(TOP_FLAG); }
+    if (b->story_bits & (1<<17)) m |= TOP_BIT(TOP_MEDAL);            // ZERO-DAY ZED defeated
+    if (crt_medal_count(b,3) + plat_medal_count(b,3) > 0) m |= TOP_BIT(TOP_GOLD);   // any gold medal
+    if (!G.zen_run && p->heaviest >= TOP_ANVIL_KG) m |= TOP_BIT(TOP_ANVIL);         // carried a Legacy-System hat (records rule: no Zen)
+    if (G.fs_state==2) m |= TOP_BIT(TOP_HARDHAT);                    // FIRST SHIFT complete (slot-level, like the case's row)
+    return m;
+}
+static int topper_refresh(int pi, int announce){
+    Player *p=&G.p[pi]; Buddy *b=&G.bud[pi];
+    if (!b->active){ p->top_worn = 0; return 0; }
+    int before = b->top_earned;
+    b->top_earned |= topper_derive(b, p);
+    int fresh = b->top_earned & ~before;
+    if (b->top_worn<1 || b->top_worn>TOP_N || !(b->top_earned & TOP_BIT(b->top_worn))) b->top_worn = 0;
+    p->top_worn = b->top_worn;   // the render mirror draw_hat reads
+    if (fresh && announce && (pi==G.my_id || pi==G.p2_slot)){
+        int slot = 0;
+        for (int id=1; id<=TOP_N; id++) if (fresh & TOP_BIT(id)){
+            char buf[24]; char *q=buf; q=sappend(q, TOP_NAME[id]); q=sappend(q, " EARNED!"); *q=0;
+            spawn_floater(p->x, p->y-46-(slot++)*10, buf, COL(255,205,40));
+        }
+        sfx(11);
+    }
+    return fresh;
+}
+// one topper, drawn upward from (cx, base): chunky pixel art in the
+// game's palette language, ~16 px wide at reading zoom. Eddie Mode
+// restyles the stack UNDER it; the trophy itself never changes.
+static void draw_topper(int id, int cx, int base, float z){
+    int u = (z>=0.9f)? 2 : 1;
+    switch (id){
+    case TOP_CROWN:   // gold band, three points, red gem
+        rect_fill(cx-4*u, base-2*u, 8*u, 2*u, COL(255,205,40));
+        rect_fill(cx-4*u, base-2*u, 8*u, u, COL(255,225,110));
+        tri_fill(cx-4*u, base-2*u, cx-3*u, base-5*u, cx-2*u, base-2*u, COL(255,205,40));
+        tri_fill(cx-u, base-2*u, cx, base-6*u, cx+u, base-2*u, COL(255,205,40));
+        tri_fill(cx+2*u, base-2*u, cx+3*u, base-5*u, cx+4*u, base-2*u, COL(255,205,40));
+        circle_fill(cx, base-u, u, COL(230,60,70));
+        break;
+    case TOP_CAP:     // a general's peaked cap: olive dome, gold band, black brim
+        ellipse_fill(cx, base-2*u, 4*u, 2*u, COL(88,96,52));
+        rect_fill(cx-4*u, base-2*u, 8*u, u, COL(255,205,40));
+        rect_fill(cx-4*u, base-u, 8*u, u, COL(30,30,34));
+        circle_fill(cx, base-3*u, u, COL(255,205,40));
+        break;
+    case TOP_FLAG:    // a pole with a waving checker flag
+        rect_fill(cx-u/2, base-7*u, u, 7*u, COL(140,140,150));
+        for (int fx=0; fx<3; fx++) for (int fy=0; fy<2; fy++){
+            u32 c = ((fx+fy)&1)? COL(30,30,34) : COL(240,240,245);
+            rect_fill(cx + u/2 + fx*2*u - (fy? u/2 : 0), base-7*u + fy*2*u, 2*u, 2*u, c);
+        }
+        break;
+    case TOP_MEDAL:   // a medal: ribbon V over a gold disc
+        line_thick(cx-2*u, base-6*u, cx, base-2*u, u, COL(200,50,60));
+        line_thick(cx+2*u, base-6*u, cx, base-2*u, u, COL(60,90,200));
+        circle_fill(cx, base-2*u, 2*u, COL(255,205,40));
+        circle_fill(cx, base-2*u, u, COL(255,225,110));
+        break;
+    case TOP_PIN:     // a bowling pin: white silhouette, red neck stripe
+        circle_fill(cx, base-2*u, 2*u, COL(245,245,248));
+        rect_fill(cx-u, base-5*u, 2*u, 3*u, COL(245,245,248));
+        circle_fill(cx, base-5*u, u, COL(245,245,248));
+        rect_fill(cx-u, base-4*u, 2*u, u, COL(220,50,60));
+        break;
+    case TOP_GOLD:    // a gold star: two triangles and a bright core
+        tri_fill(cx-3*u, base-u, cx, base-6*u, cx+3*u, base-u, COL(255,205,40));
+        tri_fill(cx-3*u, base-4*u, cx, base+u, cx+3*u, base-4*u, COL(255,205,40));
+        circle_fill(cx, base-2*u, u, COL(255,225,110));
+        break;
+    case TOP_ANVIL:   // dark iron: horn, waist, base, one highlight
+        rect_fill(cx-4*u, base-5*u, 7*u, 2*u, COL(105,105,120));
+        tri_fill(cx+3*u, base-5*u, cx+5*u, base-4*u, cx+3*u, base-3*u, COL(105,105,120));
+        rect_fill(cx-u, base-3*u, 2*u, u, COL(85,85,100));
+        rect_fill(cx-3*u, base-2*u, 6*u, 2*u, COL(95,95,110));
+        rect_fill(cx-4*u, base-5*u, 3*u, u, COL(170,170,185));
+        break;
+    case TOP_HARDHAT: // a builder's helmet: yellow dome, wide brim
+        ellipse_fill(cx, base-u, 4*u, 3*u, COL(255,190,40));
+        rect_fill(cx-5*u, base-u, 10*u, u, COL(240,170,30));
+        rect_fill(cx-u, base-4*u, 2*u, u, COL(255,205,70));
+        break;
+    }
+}
 static void draw_hat(Player *p, int x, int y){
     // the carcass stack on the player's head, growing through tier shapes
     int n = p->stack_n;
-    if (n<=0) return;
+    int worn = (p->top_worn>=1 && p->top_worn<=TOP_N)? p->top_worn : 0;   // HAT TOPPERS (feat 5)
+    if (n<=0){
+        // a worn topper sits on the bare head: banking the whole
+        // hat must not un-wear the trophy
+        if (worn) draw_topper(worn, x, y-13, G.zoom>0.01f? G.zoom : 1.0f);
+        return;
+    }
     g_gold_carcass = (p->whale_on & 1) != 0;   // Whales Only: golden hat
     // (The Psychic Hat Stand that once floated the pile beside its
     // owner — bonus height and all — was removed with the Gallery
@@ -1632,7 +1895,7 @@ static void draw_hat(Player *p, int x, int y){
         }
     }
     int top_y = hy2 - 16 - rows*stepy;
-    if (vis_n>=19){ // CROWN: a golden bug reigns
+    if (vis_n>=19 && !worn){ // CROWN: a golden bug reigns (a worn topper takes the perch instead)
         draw_carcass(hx2+top_sway, top_y-4, 7, 1, 0);
         tri_fill(hx2-6+top_sway, top_y-12, hx2+top_sway, top_y-18, hx2+6+top_sway, top_y-12, COL(255,205,40));
     }
@@ -1640,11 +1903,12 @@ static void draw_hat(Player *p, int x, int y){
         int hw = maxa*stepx/2 + 8;
         line_thick(hx2-hw, hy2-14, hx2-hw, top_y, 1, COL(120,120,130));
         line_thick(hx2+hw, hy2-14, hx2+hw, top_y, 1, COL(120,120,130));
-        if (((int)(G.anim_t*2))%2) circle_fill(hx2+top_sway, top_y-14, 3, COL(255,60,60));
+        if (((int)(G.anim_t*2))%2) circle_fill(hx2+top_sway, top_y-14 - (worn? 16:0), 3, COL(255,60,60));
     }
+    if (worn) draw_topper(worn, hx2+top_sway, top_y+2, z);   // HAT TOPPERS: the trophy rides the sway
     if (n>=4){ // weight label (the REAL weight, stand or no stand)
         char b[20]; fmt_int(b, "", (int)p->carried, "KG");
-        draw_text_center(hx2, top_y - (vis_n>=19? 26:12), b, 1, COL(255,240,180));
+        draw_text_center(hx2, top_y - (vis_n>=19? 26:12) - (worn? 15:0), b, 1, COL(255,240,180));
     }
     g_gold_carcass = 0;
 }
@@ -2209,7 +2473,7 @@ static void draw_store_building(void){
     // "we buy" board on the wall — two lines, so the whole phrase fits
     rect_fill(cx-52, y0+42, 104, 24, COL(250,242,218)); rect_line(cx-52, y0+42, 104, 24, wood_d);
     draw_text_center(cx, y0+45, "WE BUY BUGS", 1, COL(90,60,30));
-    draw_text_center(cx, y0+55, "MALL: 5 SHOPS", 1, COL(90,60,30));
+    draw_text_center(cx, y0+55, "MALL: 9 STOPS", 1, COL(90,60,30));
     // counter, crates of stock, a sack, and the golden scale
     int cy=SY(-26);
     rect_fill(cx-62, cy-8, 17, 17, wood); rect_line(cx-62, cy-8, 17, 17, OUTLINE);
@@ -2226,7 +2490,7 @@ static void draw_store_building(void){
       line_thick(gx+11, cy-12, gx+7, cy-6, 1, COL(198,164,84)); line_thick(gx+11, cy-12, gx+15, cy-6, 1, COL(198,164,84));
       ellipse_fill(gx-9, cy-5, 6, 2, COL(216,180,80)); ellipse_fill(gx+11, cy-5, 6, 2, COL(216,180,80));
       disc_fill(gx-9, cy-8, 3, COL(98,192,92)); }
-    draw_text_center(cx-14, cy-6, pad_mode()? "B" : key_name(G.bind[ACT_INTERACT]), 1, COL(255,255,255));
+    draw_text_center(cx-14, cy-6, lbla(H_INT), 1, COL(255,255,255));
     // welcome rug in front of the counter
     int ry=SY(-14);
     rect_fill(cx-34, ry, 68, 9, COL(178,60,54)); rect_line(cx-34, ry, 68, 9, COL(120,40,38));
@@ -2465,7 +2729,7 @@ static void draw_mall(void){
     int gw = (int)(VW/cz/64) + 4, gh = (int)(VH/cz/64) + 4, ts = (int)(64*cz) + 1;
     for (int gy=gy0; gy<gy0+gh; gy++) for (int gx=gx0; gx<gx0+gw; gx++){
         float wx = gx*64+32, wy = gy*64+32;
-        if (wx<-330 || wx>330 || wy<MALL_CY-230 || wy>MALL_CY+230) continue;
+        if (wx<-450 || wx>450 || wy<MALL_CY-270 || wy>MALL_CY+270) continue;
         u32 c = col_shade(((gx+gy)&1)? COL(124,94,62) : COL(116,88,58),
                           0.96f + hash_f(gx, gy, 91)*0.07f);
         { Player *vp = &G.p[G.view_pi>=0? G.view_pi : 0];
@@ -2478,7 +2742,7 @@ static void draw_mall(void){
         rect_fill(tx, tyy+ts-2, ts, 1, col_shade(c, 0.88f));   // plank seam
     }
     // the red carpet: entrance to counters
-    { int cx0=SX(-37), cy0=SY(MALL_CY-118), cw=(int)(74*cz), ch=(int)(272*cz);
+    { int cx0=SX(-37), cy0=SY(MALL_CY-158), cw=(int)(74*cz), ch=(int)(352*cz);
       rect_fill(cx0, cy0, cw, ch, COL(148,46,50));
       rect_line(cx0, cy0, cw, ch, COL(198,164,84));
       rect_line(cx0+3, cy0+3, cw-6, ch-6, COL(120,36,40)); }
@@ -2486,50 +2750,50 @@ static void draw_mall(void){
     // used to hang on the north wall — where the HUD's zone pill slid
     // in front of it every time you walked north. Down here, under
     // your feet as you come in, nothing can cover it.
-    draw_text_center(SX(0), SY(MALL_CY+58), "THE BUG MALL", 2, COL(255,220,130));
+    draw_text_center(SX(0), SY(MALL_CY+78), "THE BUG MALL", 2, COL(255,220,130));
     // room walls: wood panelling with a gold chair rail, door gap south
     { u32 wallc = COL(84,58,38);
-      rect_fill(SX(-308), SY(MALL_CY-192), (int)(616*cz), (int)(26*cz), wallc);
-      rect_fill(SX(-308), SY(MALL_CY-170), (int)(616*cz), 2, COL(198,164,84));
-      rect_fill(SX(-308), SY(MALL_CY+162), (int)(268*cz), (int)(26*cz), wallc);
-      rect_fill(SX(40), SY(MALL_CY+162), (int)(268*cz), (int)(26*cz), wallc);
-      rect_fill(SX(-308), SY(MALL_CY+162), (int)(616*cz), 2, COL(198,164,84));
-      rect_fill(SX(-308), SY(MALL_CY-192), (int)(24*cz), (int)(380*cz), wallc);
-      rect_fill(SX(284), SY(MALL_CY-192), (int)(24*cz), (int)(380*cz), wallc); }
+      rect_fill(SX(-408), SY(MALL_CY-232), (int)(816*cz), (int)(26*cz), wallc);
+      rect_fill(SX(-408), SY(MALL_CY-210), (int)(816*cz), 2, COL(198,164,84));
+      rect_fill(SX(-408), SY(MALL_CY+202), (int)(368*cz), (int)(26*cz), wallc);
+      rect_fill(SX(40), SY(MALL_CY+202), (int)(368*cz), (int)(26*cz), wallc);
+      rect_fill(SX(-408), SY(MALL_CY+202), (int)(816*cz), 2, COL(198,164,84));
+      rect_fill(SX(-408), SY(MALL_CY-232), (int)(24*cz), (int)(460*cz), wallc);
+      rect_fill(SX(384), SY(MALL_CY-232), (int)(24*cz), (int)(460*cz), wallc); }
     // exit mat
-    { int mx0=SX(-38), my0=SY(MALL_CY+132), mw=(int)(76*cz), mh=(int)(34*cz);
+    { int mx0=SX(-38), my0=SY(MALL_CY+172), mw=(int)(76*cz), mh=(int)(34*cz);
       rect_fill(mx0, my0, mw, mh, COL(52,96,60)); rect_line(mx0, my0, mw, mh, COL(198,164,84));
-      draw_text_center(SX(0), SY(MALL_CY+143), "EXIT", 2, COL(240,255,240)); }
+      draw_text_center(SX(0), SY(MALL_CY+183), "EXIT", 2, COL(240,255,240)); }
     // the Banzai World gate, south-east: a grass patch, a red torii,
     // and a sign. Through it, you play as your buddy.
     { int cx = SX(BW_SX);
-      int gx0=SX(BW_SX-56), gy0=SY(MALL_CY+110), gw=(int)(112*cz), gh=(int)(48*cz);
+      int gx0=SX(BW_SX-56), gy0=SY(MALL_CY+150), gw=(int)(112*cz), gh=(int)(48*cz);
       rect_fill(gx0, gy0, gw, gh, COL(86,150,66)); rect_line(gx0, gy0, gw, gh, COL(60,110,48));
-      for (int gt=0; gt<7; gt++){ int tx2 = SX(BW_SX-48 + (gt*37)%96), ty2 = SY(MALL_CY+118 + (gt*23)%34);
+      for (int gt=0; gt<7; gt++){ int tx2 = SX(BW_SX-48 + (gt*37)%96), ty2 = SY(MALL_CY+158 + (gt*23)%34);
           line_thick(tx2, ty2, tx2-1, ty2-4, 1, COL(60,120,45)); line_thick(tx2+3, ty2, tx2+4, ty2-3, 1, COL(60,120,45)); }
       // torii: two posts and two lintels, vermilion
-      int px1=SX(BW_SX-26), px2=SX(BW_SX+26), py0=SY(MALL_CY+118), py1=SY(MALL_CY+152);
+      int px1=SX(BW_SX-26), px2=SX(BW_SX+26), py0=SY(MALL_CY+158), py1=SY(MALL_CY+192);
       rect_fill(px1-3, py0, 6, py1-py0, COL(196,64,44)); rect_line(px1-3, py0, 6, py1-py0, OUTLINE);
       rect_fill(px2-3, py0, 6, py1-py0, COL(196,64,44)); rect_line(px2-3, py0, 6, py1-py0, OUTLINE);
       rect_fill(px1-10, py0-4, (px2-px1)+20, 6, COL(196,64,44)); rect_line(px1-10, py0-4, (px2-px1)+20, 6, OUTLINE);
       rect_fill(px1-6, py0+8, (px2-px1)+12, 4, COL(170,52,38));
-      int sx0=SX(BW_SX-52), sy0=SY(MALL_CY+96), sw=(int)(104*cz), sh=(int)(13*cz);
+      int sx0=SX(BW_SX-52), sy0=SY(MALL_CY+136), sw=(int)(104*cz), sh=(int)(13*cz);
       rect_fill(sx0, sy0, sw, sh, COL(46,40,34)); rect_line(sx0, sy0, sw, sh, COL(198,164,84));
       draw_text_center(cx, sy0+3, "BANZAI WORLD", 1, COL(255,240,210)); }
     // the Arcade door, east wall: a dark opening in the panelling, a
     // violet mat, and a buzzing cyan sign. The games live through here.
-    { int dx0=SX(266), dy0=SY(MALL_CY+2), dw=(int)(18*cz), dh=(int)(44*cz);
+    { int dx0=SX(386), dy0=SY(MALL_CY+2), dw=(int)(18*cz), dh=(int)(44*cz);
       rect_fill(dx0, dy0, dw, dh, COL(16,12,26)); rect_line(dx0, dy0, dw, dh, COL(120,240,255));
-      int mx0=SX(214), my0=SY(MALL_CY+8), mw=(int)(50*cz), mh=(int)(34*cz);
+      int mx0=SX(334), my0=SY(MALL_CY+8), mw=(int)(50*cz), mh=(int)(34*cz);
       rect_fill(mx0, my0, mw, mh, COL(74,40,110)); rect_line(mx0, my0, mw, mh, COL(120,240,255));
-      int sx0=SX(196), sy0=SY(MALL_CY-26), sw=(int)(76*cz), sh=(int)(13*cz);
+      int sx0=SX(316), sy0=SY(MALL_CY-26), sw=(int)(76*cz), sh=(int)(13*cz);
       rect_fill(sx0, sy0, sw, sh, COL(24,20,36)); rect_line(sx0, sy0, sw, sh, COL(120,240,255));
-      draw_text_center(SX(234), sy0+3, "ARCADE", 1, COL(160,255,255)); }
+      draw_text_center(SX(354), sy0+3, "ARCADE", 1, COL(160,255,255)); }
     // (two potted shrubs stood here while the Gallery slot was empty;
     // Whales Only took the counter over on Nov 2 and the shrubs went)
     // hanging lanterns down the carpet
     for (int i=0;i<3;i++){
-        int lx=SX(-150 + i*150), ly=SY(MALL_CY-30);
+        int lx=SX(-200 + i*200), ly=SY(MALL_CY-30);
         glow_ellipse(lx, ly, (int)(30*cz), (int)(20*cz), COL(255,190,100), 52);   // v1.22: the lanterns cast light now
         disc_fill(lx, ly, 13, COL(255,196,96));
         disc_fill(lx, ly, 8, COL(255,226,150));
@@ -2541,13 +2805,13 @@ static void draw_mall(void){
         int cx = SX(MALL_SX[s]);
         // warm light pooled on the floorboards in front of the
         // counter (the glow-up's answer to the old head halos)
-        { int py2 = SY(MALL_CY-112);
+        { int py2 = SY(MALL_CY-152);
           ellipse_fill(cx, py2, (int)(58*cz), (int)(17*cz), COL(140,110,70));
           ellipse_fill(cx, py2, (int)(40*cz), (int)(11*cz), COL(152,122,78)); }
         // keeper first, so the counter hides his lower half; his
         // head rides well clear of the counter top
-        draw_keeper(s, MALL_SX[s], MALL_CY-176);
-        int x0=SX(MALL_SX[s]-60), y0=SY(MALL_CY-158), cw=(int)(120*cz), ch=(int)(34*cz);
+        draw_keeper(s, MALL_SX[s], MALL_CY-216);
+        int x0=SX(MALL_SX[s]-60), y0=SY(MALL_CY-198), cw=(int)(120*cz), ch=(int)(34*cz);
         shadow_ellipse(cx, y0+ch+2, cw/2, 4);
         rect_fill(x0, y0, cw, ch, COL(122,80,44)); rect_line(x0, y0, cw, ch, OUTLINE);
         rect_fill(x0, y0, cw, 6, COL(150,104,58));
@@ -2563,37 +2827,152 @@ static void draw_mall(void){
     // the bowling counter, south-west: a keeper, three pins, and a
     // little lane rug pointing at the real lanes (behind the counter)
     { int cx = SX(BOWL_SX);
-      { int rx0=SX(BOWL_SX-24), ry0=SY(MALL_CY+26), rw=(int)(48*cz), rh=(int)(82*cz);
+      { int rx0=SX(BOWL_SX-24), ry0=SY(MALL_CY+66), rw=(int)(48*cz), rh=(int)(82*cz);
         rect_fill(rx0, ry0, rw, rh, COL(216,186,130)); rect_line(rx0, ry0, rw, rh, COL(150,120,80));
-        for (int pn=0;pn<3;pn++){ int px2 = SX(BOWL_SX + (pn-1)*13), py2 = SY(MALL_CY+40);
+        for (int pn=0;pn<3;pn++){ int px2 = SX(BOWL_SX + (pn-1)*13), py2 = SY(MALL_CY+80);
             ellipse_fill(px2, py2, 3, 5, COL(245,242,238)); rect_fill(px2-3, py2-2, 6, 2, COL(200,60,50)); } }
-      draw_keeper(4, BOWL_SX, MALL_CY+100);
-      int x0=SX(BOWL_SX-52), y0=SY(MALL_CY+118), cw=(int)(104*cz), ch=(int)(34*cz);
+      draw_keeper(4, BOWL_SX, MALL_CY+140);
+      int x0=SX(BOWL_SX-52), y0=SY(MALL_CY+158), cw=(int)(104*cz), ch=(int)(34*cz);
       shadow_ellipse(cx, y0+ch+2, cw/2, 4);
       rect_fill(x0, y0, cw, ch, COL(122,80,44)); rect_line(x0, y0, cw, ch, OUTLINE);
       rect_fill(x0, y0+ch-6, cw, 6, COL(150,104,58));
       rect_fill(x0, y0+ch-10, cw, 4, COL(80,130,220));         // bowling blue stripe
       draw_carcass(cx-30, y0+16, 8, 1, 0.6f);                  // the house ball: a carcass, of course
       { int sw2 = text_w(MALL_STATION[4], 2) + 16;
-        int sx0 = cx - sw2/2, sy0 = SY(MALL_CY+68);
+        int sx0 = cx - sw2/2, sy0 = SY(MALL_CY+108);
         rect_fill(sx0, sy0, sw2, 20, COL(94,60,32)); rect_line(sx0, sy0, sw2, 20, OUTLINE);
         rect_line(sx0+2, sy0+2, sw2-4, 16, COL(198,164,84));
         draw_text_center(cx, sy0+3, MALL_STATION[4], 2, COL(255,220,130)); } }
+    // the TROPHY CASE (v1.25 feat 4), at the south wall's east
+    // end, past the Banzai gate: a glass case on a wooden base. No
+    // keeper — nobody sells anything here; the plaques are the
+    // staff. Three little medals sit on the shelf whether or not
+    // the viewer has earned any: they are the shape of the promise.
+    // (The name board is size 1, like the gate's sign: at size 2 it
+    // would run past the east wall from this corner spot.)
+    { int cx = SX(CASE_SX);
+      { int py2 = SY(MALL_CY+152);
+        ellipse_fill(cx, py2, (int)(46*cz), (int)(14*cz), COL(140,110,70));
+        ellipse_fill(cx, py2, (int)(32*cz), (int)(9*cz), COL(152,122,78)); }
+      int x0=SX(CASE_SX-38), y0=SY(MALL_CY+158), cw=(int)(76*cz), ch=(int)(34*cz);
+      shadow_ellipse(cx, y0+ch+2, cw/2, 4);
+      rect_fill(x0, y0, cw, ch, COL(122,80,44)); rect_line(x0, y0, cw, ch, OUTLINE);
+      rect_fill(x0, y0+ch-6, cw, 6, COL(150,104,58));
+      rect_fill(x0, y0+8, cw, 4, COL(198,164,84));          // the case's gold stripe
+      // a tiny gold cup lettered on the base front
+      { int ux=cx, uy=y0+19;
+        rect_fill(ux-4, uy, 8, 6, COL(250,200,50)); rect_line(ux-4, uy, 8, 6, COL(150,110,20));
+        rect_fill(ux-6, uy+1, 2, 3, COL(250,200,50)); rect_fill(ux+4, uy+1, 2, 3, COL(250,200,50));
+        rect_fill(ux-1, uy+6, 2, 3, COL(250,200,50)); rect_fill(ux-3, uy+9, 6, 2, COL(250,200,50)); }
+      // the glass cabinet on the base's north edge: pale glass, a
+      // bright frame, one shelf, three medal discs, a travelling glint
+      { int gx0=SX(CASE_SX-32), gy0=SY(MALL_CY+138), gw=(int)(64*cz), gh=(int)(22*cz);
+        rect_fill(gx0, gy0, gw, gh, COL(196,228,238)); rect_line(gx0, gy0, gw, gh, COL(240,250,255));
+        rect_line(gx0+2, gy0+2, gw-4, gh-4, COL(150,190,205));
+        rect_fill(gx0+3, gy0+gh-8, gw-6, 2, COL(122,80,44));
+        static const u32 MCC[3] = { COL(250,200,50), COL(205,212,220), COL(198,124,64) };
+        for (int mi=0; mi<3; mi++){ int mx = gx0 + gw*(mi+1)/4, my = gy0+gh-11;
+            disc_fill(mx, my, 4, COL(90,80,60)); disc_fill(mx, my, 3, MCC[mi]); }
+        { int glx = gx0 + (int)(G.anim_t*14.0f) % (gw>8? gw-8 : 8);
+          line_thick(glx, gy0+3, glx+5, gy0+gh-4, 1, COL(255,255,255)); } }
+      { int sw2 = text_w(MALL_STATION[5], 1) + 16;
+        int sx0 = cx - sw2/2, sy0 = SY(MALL_CY+108);
+        rect_fill(sx0, sy0, sw2, 15, COL(94,60,32)); rect_line(sx0, sy0, sw2, 15, OUTLINE);
+        rect_line(sx0+2, sy0+2, sw2-4, 11, COL(198,164,84));
+        draw_text_center(cx, sy0+3, MALL_STATION[5], 1, COL(255,220,130)); } }
+    // the CHALLENGE BOARD (v1.25 feat 6), at the south wall's
+    // west end — the case's mirror bookend: a cork notice board
+    // on a wooden base. This week's card is pinned centre; the
+    // pin is amber while the week is open and green once it is
+    // done. Last week's card hangs askew beside it.
+    { int cx = SX(BOARD_SX);
+      { int py2 = SY(MALL_CY+152);
+        ellipse_fill(cx, py2, (int)(46*cz), (int)(14*cz), COL(140,110,70));
+        ellipse_fill(cx, py2, (int)(32*cz), (int)(9*cz), COL(152,122,78)); }
+      int x0=SX(BOARD_SX-38), y0=SY(MALL_CY+158), cw=(int)(76*cz), ch=(int)(34*cz);
+      shadow_ellipse(cx, y0+ch+2, cw/2, 4);
+      rect_fill(x0, y0, cw, ch, COL(122,80,44)); rect_line(x0, y0, cw, ch, OUTLINE);
+      rect_fill(x0, y0+ch-6, cw, 6, COL(150,104,58));
+      rect_fill(x0, y0+8, cw, 4, COL(64,96,120));          // the board's steel-blue stripe
+      // the board itself on the base's north edge: cork, a dark
+      // top rail lettered with its name (a hanging sign here
+      // would run into Bug Bowl's — the board is wide and flat,
+      // so the name rides the rail instead), this week's paper
+      // card, last week's askew beside it
+      { int gx0=SX(BOARD_SX-32), gy0=SY(MALL_CY+132), gw=(int)(64*cz), gh=(int)(28*cz);
+        rect_fill(gx0, gy0, gw, gh, COL(166,124,82)); rect_line(gx0, gy0, gw, gh, COL(94,60,32));
+        rect_fill(gx0, gy0, gw, 9, COL(48,40,34));
+        draw_text_center(gx0+gw/2, gy0+1, MALL_STATION[6], 1, COL(255,220,130));
+        rect_fill(gx0+gw/2-11, gy0+12, 22, 13, COL(238,230,205)); rect_line(gx0+gw/2-11, gy0+12, 22, 13, COL(190,180,150));
+        rect_fill(gx0+gw/2-8, gy0+18, 16, 2, COL(150,140,120));
+        rect_fill(gx0+gw/2-8, gy0+22, 11, 2, COL(150,140,120));
+        rect_fill(gx0+5, gy0+14, 12, 9, COL(210,200,168));
+        { int done = G.wk_week!=0 && G.wk_done_week==G.wk_week;
+          disc_fill(gx0+gw/2, gy0+13, 3, done? COL(90,190,110) : COL(230,160,40)); } } }
+    // the BOUNTY BOARD (v1.25 feat 8), hanging on the WEST wall —
+    // the one wall with nothing on it (south and north are full,
+    // the east carries the Arcade). A hanging sign in the Arcade
+    // sign's idiom: no floor footprint, no collision box, nothing
+    // in any corridor. The poster names the current bounty in-world;
+    // its pin is amber while the elite is at large, red while loose.
+    { int cx = SX(BOUNTY_WX), cy = SY(BOUNTY_WY-30);
+      { int py2 = SY(BOUNTY_WY+8);
+        ellipse_fill(cx, py2, (int)(44*cz), (int)(13*cz), COL(140,110,70));
+        ellipse_fill(cx, py2, (int)(30*cz), (int)(8*cz), COL(152,122,78)); }
+      int bw2=(int)(118*cz), bh2=(int)(44*cz);
+      int x0=cx-bw2/2, y0=cy-bh2/2;
+      shadow_ellipse(cx, y0+bh2+3, bw2/2, 4);
+      rect_fill(x0, y0, bw2, bh2, COL(94,60,32)); rect_line(x0, y0, bw2, bh2, OUTLINE);
+      rect_fill(x0+3, y0+3, bw2-6, 11, COL(46,40,34));
+      draw_text_center(cx, y0+5, "WANTED", 1, COL(255,220,130));
+      rect_fill(x0+5, y0+17, bw2-10, bh2-22, COL(238,230,205)); rect_line(x0+5, y0+17, bw2-10, bh2-22, COL(190,180,150));
+      { const char *nm = (G.net_mode==NET_CLIENT)? "" : ELITE_NAME[bn_name_idx(G.bn_serial)];
+        if (nm[0]) draw_text_center(cx, y0+24, nm, 1, COL(150,50,40)); }
+      disc_fill(x0+bw2-9, y0+8, 3, (G.net_mode!=NET_CLIENT && G.bn_live)? COL(220,60,50) : COL(230,160,40)); }
+    // the PHOTO BOOTH (feat 9, given its own fixture by the v1.25
+    // MALL ENLARGEMENT): a freestanding curtained booth standing
+    // island-style west-centre — the Arcade's island-row precedent.
+    // A plum curtain in a dark frame, a gold valance, a hanging
+    // sign, and a little camera glyph on the front so the fixture
+    // reads at a glance. The interact disc sits just south of the
+    // body, where the shopper stands.
+    { int cx = SX(BOOTH_SX);
+      { int py2 = SY(BOOTH_DY);
+        ellipse_fill(cx, py2, (int)(46*cz), (int)(14*cz), COL(140,110,70));
+        ellipse_fill(cx, py2, (int)(32*cz), (int)(9*cz), COL(152,122,78)); }
+      int x0=SX(BOOTH_SX-34), y0=SY(BOOTH_CY-34), cw=(int)(68*cz), ch=(int)(64*cz);
+      shadow_ellipse(cx, y0+ch+2, cw/2, 4);
+      rect_fill(x0, y0, cw, ch, COL(58,30,52)); rect_line(x0, y0, cw, ch, OUTLINE);
+      for (int cs2=0; cs2<6; cs2++){   // curtain folds: plum stripes with a darker seam
+          int fx0 = x0 + (int)((6+cs2*10)*cz);
+          rect_fill(fx0, y0+8, (int)(5*cz), ch-8, (cs2&1)? COL(96,44,84) : COL(112,54,98));
+      }
+      rect_fill(x0, y0, cw, 8, COL(198,164,84)); rect_line(x0, y0, cw, 8, OUTLINE);   // the gold valance
+      // the camera glyph on the curtain: a dark body, a gold lens
+      { int kx=cx, ky=y0+(int)(34*cz);
+        rect_fill(kx-9, ky-6, 18, 12, COL(24,20,36)); rect_line(kx-9, ky-6, 18, 12, COL(198,164,84));
+        rect_fill(kx-3, ky-9, 6, 3, COL(24,20,36));
+        disc_fill(kx, ky, 4, COL(150,200,230)); disc_fill(kx, ky, 2, COL(240,250,255)); }
+      { int sw2 = text_w(MALL_STATION[8], 1) + 16;
+        int sx0 = cx - sw2/2, sy0 = SY(BOOTH_CY-58);
+        rect_fill(sx0, sy0, sw2, 15, COL(94,60,32)); rect_line(sx0, sy0, sw2, 15, OUTLINE);
+        rect_line(sx0+2, sy0+2, sw2-4, 11, COL(198,164,84));
+        draw_text_center(cx, sy0+3, MALL_STATION[8], 1, COL(255,220,130)); } }
     // (the Gallery's display pedestals — "yesterday's legends" —
     // went out with the Gallery itself on Nov 2)
     // the bank's vault door, gleaming behind the counter, beside
     // the keeper (it used to sit dead centre — where he now stands)
-    { int vx=SX(MALL_SX[2]+44), vy=SY(MALL_CY-176);
+    { int vx=SX(MALL_SX[2]+44), vy=SY(MALL_CY-216);
       circle_fill(vx, vy, 15, COL(120,124,134)); circle_out(vx, vy, 15, COL(198,164,84));
       circle_out(vx, vy, 9, COL(90,94,104));
       for (int k=0;k<4;k++){ float a=k*TAU/4 + G.anim_t*0.1f;
           line_thick(vx, vy, vx+(int)(fcos(a)*7), vy+(int)(fsin(a)*7), 2, COL(198,164,84)); } }
     // the buddy pen: a little fence in front of the Banzai counter
     for (int fx2=MALL_SX[3]-56; fx2<=MALL_SX[3]+56; fx2+=14){
-        int px=SX(fx2), py=SY(MALL_CY-92);
+        int px=SX(fx2), py=SY(MALL_CY-132);
         rect_fill(px-2, py-10, 4, 12, COL(150,110,64)); rect_line(px-2, py-10, 4, 12, OUTLINE);
     }
-    rect_fill(SX(MALL_SX[3]-58), SY(MALL_CY-100), (int)(116*cz), 3, COL(150,110,64));
+    rect_fill(SX(MALL_SX[3]-58), SY(MALL_CY-140), (int)(116*cz), 3, COL(150,110,64));
     ui_vignette(clip_x0, clip_y0, clip_x1-clip_x0, clip_y1-clip_y0);
     // entities: buddies, then shoppers, then the usual sparkle
     for (int i=0;i<MAXP;i++) if (G.bud[i].active){
@@ -2748,7 +3127,24 @@ static void draw_arcade(void){
         if (q->y>ARC_CY-300 && q->y<ARC_CY+430) draw_text_center(SX(q->x), SY(q->y), q->text, 1, q->col);
     }
 }
+// COMFORT (v1.25 feature 2): the shake consumer. render_world adds
+// this jitter to the camera for one render and takes it back off
+// before returning — gameplay, culling and the net snapshot never
+// see it. Exported read-only for the test rig (dbg_shkoff).
+static float shk_off_x=0, shk_off_y=0;
 static void render_world(void){
+    // screen shake: a live G.shake (raised by fx_shake, decayed by
+    // the frame loop) becomes a small deterministic jitter, capped
+    // at ~5 px — a thump, not a strobe. Play states only: the menu,
+    // pause and game-over backdrops hold still. With the toggle off
+    // fx_shake never raises the value, so this stays exactly 0.
+    shk_off_x = 0; shk_off_y = 0;
+    if (G.shake_on && G.shake>0.05f && (G.state==GS_PLAY || G.state==GS_STORE)){
+        float m = G.shake>3? 3 : G.shake;
+        shk_off_x = fsin(G.anim_t*47.0f)*m*1.6f;
+        shk_off_y = fcos(G.anim_t*59.0f)*m*1.6f;
+        G.camx += shk_off_x; G.camy += shk_off_y;
+    }
     // camera zoom: the bigger your hat, the wider your view of the world
     // (in a split-screen pass the caller owns cam/zoom — cam_lock — and
     // view_pi says whose hat would set the zoom)
@@ -2758,8 +3154,8 @@ static void render_world(void){
       if (G.zoom<0.01f) G.zoom=1.0f;
       G.zoom += (zt-G.zoom)*0.045f; }
     { Player *viewp=&G.p[G.view_pi>=0? G.view_pi : 0];
-      if (viewp->in_arcade){ draw_arcade(); return; }
-      if (viewp->in_mall){ draw_mall(); return; } }
+      if (viewp->in_arcade){ draw_arcade(); G.camx-=shk_off_x; G.camy-=shk_off_y; return; }
+      if (viewp->in_mall){ draw_mall(); G.camx-=shk_off_x; G.camy-=shk_off_y; return; } }
     float cz = G.zoom>0.01f? G.zoom : 1.0f;
     // ground: 64px checker tiles tinted by zone band
     int tlx = (int)(G.camx - (VW/2)/cz) - 64, tly = (int)(G.camy - (VH/2)/cz) - 64;
@@ -3007,8 +3403,28 @@ static void render_world(void){
         if (frac<0.99f){ rect_fill(x-14, y-hh-pile_h-8, 28, 3, COL(40,30,40));
             rect_fill(x-14, y-hh-pile_h-8, (int)(28*frac), 3, COL(255,170,80)); }
     }
-    // bugs
-    for (int i=0;i<MAXBUGS;i++) if (G.bugs[i].alive) draw_bug_sprite(&G.bugs[i]);
+    // bugs (feat 8: an elite wears its name over the sprite — drawn
+    // here, after the sprite, so Eddie Mode's early return inside
+    // draw_bug_sprite gets the same plate)
+    for (int i=0;i<MAXBUGS;i++) if (G.bugs[i].alive){
+        Bug *b=&G.bugs[i];
+        draw_bug_sprite(b);
+        if (b->elite){
+            int x=SX(b->x), y=SY(b->y);
+            if (x>-70 && x<VW+70 && y>-70 && y<VH+70){
+                int r=(int)(bug_radius(b->w)*(G.zoom>0.01f? G.zoom : 1.0f)); if (r<3) r=3;
+                const char *nm = ELITE_NAME[(b->elite-1)%ELITE_N];
+                int ny = y-r-24;
+                // the plate: a dark slip with a gold frame and a pin,
+                // the name in amber — above the sprite's own hp bar
+                int tw = text_w(nm, 1);
+                rect_fill(x-tw/2-5, ny-3, tw+10, 13, COL(24,18,28));
+                rect_line(x-tw/2-5, ny-3, tw+10, 13, COL(198,164,84));
+                draw_text_center(x, ny, nm, 1, COL(255,190,80));
+                disc_fill(x, ny-6, 2, COL(250,200,50));
+            }
+        }
+    }
     // Banzai Buddies trot with their owners
     for (int i=0;i<MAXP;i++) if (G.bud[i].active && !G.bud[i].in_bw) draw_buddy(&G.bud[i]);
     // players
@@ -3038,8 +3454,11 @@ static void render_world(void){
     // v1.24 ambient life: drifting motes in the daylight — world-
     // anchored hash specks bobbing on anim_t, so the meadow air
     // itself feels alive. Pure draw (no state, no particles, a few
-    // dozen blended points), outdoors only.
+    // dozen blended points), outdoors only. THE LIVING SKY (feat
+    // 12): as the light goes the motes dim with it, and the bolder
+    // specks turn into fireflies — same cells, same cost.
     if ((G.state==GS_PLAY || G.state==GS_STORE) && !G.p[G.view_pi>=0? G.view_pi:0].in_mall){
+        float dk = tod_darkf();
         int cx0 = (int)(G.camx/110)-8, cy0 = (int)(G.camy/110)-5;
         for (int gy=cy0; gy<cy0+10; gy++) for (int gx=cx0; gx<cx0+16; gx++){
             for (int k=0;k<2;k++){
@@ -3048,10 +3467,64 @@ static void render_world(void){
                 float my = gy*110 + h2*104 + fcos(G.anim_t*0.45f + h1*7.0f)*5;
                 int sx = SX(mx), sy = SY(my);
                 if (sx<clip_x0 || sx>=clip_x1 || sy<clip_y0 || sy>=clip_y1) continue;
-                int al = 24 + (int)(h1*36) + (int)(fsin(G.anim_t*1.3f + h2*12.0f)*10);
-                pset_blend(sx, sy, COL(255,246,205), al<8? 8 : al);
+                if (dk > 0.45f && h1 > 0.6f){
+                    int fa = (int)((46.0f + 64.0f*(0.5f + 0.5f*fsin(G.anim_t*2.2f + h2*20.0f))) * ((dk - 0.45f)/0.55f));
+                    pset_blend(sx, sy, COL(255,220,130), fa);
+                } else {
+                    int al = 24 + (int)(h1*36) + (int)(fsin(G.anim_t*1.3f + h2*12.0f)*10);
+                    al = (int)(al * (1.0f - 0.8f*dk));
+                    pset_blend(sx, sy, COL(255,246,205), al<8? 8 : al);
+                }
             }
         }
+    }
+    // THE LIVING SKY (feat 12): the tint, the lantern glow, and the
+    // regional weather — all over the finished world, all under the
+    // vignette, the particles, the floaters and the HUD, so nothing
+    // a player must read ever sits under the sky. Interiors never
+    // reach here (the mall/arcade early-outs above).
+    tod_apply_tint();
+    if (G.state==GS_PLAY || G.state==GS_STORE){
+        float dk = tod_darkf();
+        if (dk > 0.02f){
+            // the store building's lanterns and lit window, glowing
+            // warmer by contrast as the world cools (world +-74,-75)
+            glow_ellipse(SX(-74), SY(-75), 30, 20, COL(255,190,100), (int)(52.0f*dk));
+            glow_ellipse(SX( 74), SY(-75), 30, 20, COL(255,190,100), (int)(52.0f*dk));
+            glow_ellipse(SX(-65), SY(-74), 18, 12, COL(255,205,110), (int)(40.0f*dk));
+        }
+        // signature weather, in the motes' hash-grid language: each
+        // speck asks its own region what the sky is doing there
+        { int epoch = wx_epoch_now();
+          int cx0 = (int)(G.camx/110)-8, cy0 = (int)(G.camy/110)-5;
+          for (int gy=cy0; gy<cy0+10; gy++) for (int gx=cx0; gx<cx0+16; gx++){
+              for (int k=0;k<2;k++){
+                  float h1 = hash_f(gx*5+k, gy*3+k, 131), h2 = hash_f(gx*3+k, gy*7+k, 149);
+                  float wxp = gx*110 + h1*104, wyp = gy*110 + h2*104;
+                  int rg = region_at(fsqrt(wxp*wxp + wyp*wyp));
+                  int kind = WX_KIND[rg];
+                  if (!kind) continue;
+                  int st = wx_state(rg, epoch);
+                  if (!st || k >= st) continue;   // light = one speck, steady = two
+                  if (kind==1){        // CABLE JUNGLE rain: fast slanted streaks
+                      float fall = h2*7.0f + G.anim_t*2.36f; fall -= (int)fall;
+                      int sx = SX(wxp - fall*8.0f), sy = SY(gy*110 + fall*110.0f);
+                      if (sx<clip_x0 || sx>=clip_x1 || sy<clip_y0 || sy>=clip_y1) continue;
+                      pset_blend(sx, sy, COL(170,200,235), 110);
+                      pset_blend(sx-1, sy-3, COL(170,200,235), 90);
+                      pset_blend(sx-2, sy-6, COL(170,200,235), 70);
+                  } else if (kind==2){ // FROZEN CACHE snow: slow dots, sine sway
+                      float fall = h2*7.0f + G.anim_t*0.2f; fall -= (int)fall;
+                      int sx = SX(wxp + fsin(G.anim_t*0.9f + h1*20.0f)*6), sy = SY(gy*110 + fall*110.0f);
+                      if (sx<clip_x0 || sx>=clip_x1 || sy<clip_y0 || sy>=clip_y1) continue;
+                      pset_blend(sx, sy, COL(240,248,255), 130);
+                  } else {             // KERNEL BADLANDS shimmer: warm specks, fast wobble
+                      int sx = SX(wxp + fsin(G.anim_t*3.0f + h1*30.0f)*1.5f), sy = SY(wyp + fcos(G.anim_t*2.3f + h2*30.0f)*1.5f);
+                      if (sx<clip_x0 || sx>=clip_x1 || sy<clip_y0 || sy>=clip_y1) continue;
+                      pset_blend(sx, sy, COL(255,214,150), 70);
+                  }
+              }
+          } }
     }
     ui_vignette(clip_x0, clip_y0, clip_x1-clip_x0, clip_y1-clip_y0);
     // particles + floaters
@@ -3063,6 +3536,7 @@ static void render_world(void){
         Floater *q=&G.floats[i];
         draw_text_center(SX(q->x), SY(q->y), q->text, 1, q->col);
     }
+    G.camx-=shk_off_x; G.camy-=shk_off_y;   // hand the camera back unshaken
 }
 
 // ---------------------------------------------------------------------------
@@ -3284,7 +3758,7 @@ static void render_hud(void){
         draw_text_center(361, 31, "SAFE ZONE - NO BUGS", 1, COL(150,230,150));
     } else if (me->in_mall){
         draw_text_center(361, 7, "THE BUG MALL", 1, COL(255,255,255));
-        draw_text_center(361, 19, "FIVE FINE SHOPS", 1, COL(200,210,230));
+        draw_text_center(361, 19, "NINE FINE STOPS", 1, COL(200,210,230));
         draw_text_center(361, 31, "SAFE ZONE - NO BUGS", 1, COL(150,230,150));
     } else {
     draw_text_center_fit(361, 7, 200, zone_name(d), 1, COL(255,255,255));
@@ -3302,7 +3776,7 @@ static void render_hud(void){
     { char pb[64]; const char *pr = interact_prompt(me, pb, 0);
       if (pr) draw_text_center(VW/2, VH-34, pr, 1, COL(255,240,150));
       else if (me->stack_n>=3 && !me->in_mall)
-        { char b[64]; char *q=b; if (pad_mode()) q=sappend(q, "X"); else if (mobile_ui()) q=sappend(q, "WALL"); else q=sappend(q, key_name(G.bind[ACT_WALL])); q=sappend(q, " - THROW DOWN 3 CARCASSES AS A WALL");
+        { char b[64]; char *q=b; q=sappend(q, lbla(H_WALL)); q=sappend(q, " - THROW DOWN 3 CARCASSES AS A WALL");
           draw_text_center(VW/2, VH-34, b, 1, COL(220,220,200)); } }
     // (no bottom control line any more — controls live in the pause
     // menu's CONTROLS panel now; Daniel, Nov 6: the line overlapped)
@@ -3472,7 +3946,7 @@ static void draw_store_panel(void){
     rect_line(x+3, y+3, w-6, h-6, COL(198,164,84));      // gold inner trim
     rect_fill(x, y, w, 32, COL(74,36,34));               // title band
     rect_fill(x, y+31, w, 2, COL(198,164,84));
-    draw_text_center(x+w/2, y+3, "THE BUG BOUNTY", 2, COL(255,226,150));
+    draw_text_center(x+w/2, y+3, "THE COUNTER", 2, COL(255,226,150));
     { char b[56]; char *q=b;
       q=sappend(q, "ON YOUR HEAD: "); q=sapp_int(q, (int)me->carried); q=sappend(q, " KG");
       if (!G.ui_compact){ q=sappend(q, "  ("); q=sappend(q, hat_tier_name(me->stack_n, me->carried)); q=sappend(q, ")"); }
@@ -3546,16 +4020,169 @@ static void draw_store_panel(void){
     else draw_text(x+14, by+2, store_item_blurb(sel, me), 1, COL(80,66,44));
     if (pay_active) draw_text_center(x+w/2, y+h-13, "COUNTING CARCASSES...", 1, COL(190,60,40));
     else if (G.store_msg_t>0) draw_text_center(x+w/2, y+h-13, G.store_msg, 1, COL(60,140,60));
-    else if (G.ui_compact) draw_text_center(x+w/2, y+h-13, "SHIELD UP - FIRE BUYS - BACK LEAVES", 1, COL(88,76,54));
-    else if (mobile_ui()) draw_text_center(x+w/2, y+h-13, "TAP A ROW - TAP AGAIN TO BUY - TAP OUTSIDE TO LEAVE", 1, COL(88,76,54));
-    else if (pad_mode()) draw_text_center(x+w/2, y+h-13, "STICK/DPAD CHOOSE - A BUYS - B LEAVES", 1, COL(88,76,54));
-    else { char b[80]; char *q=b; q=sappend(q, "ARROWS CHOOSE - "); q=sappend(q, key_name(G.bind[ACT_FIRE]));
-           q=sappend(q, " BUYS - "); q=sappend(q, key_name(G.bind[ACT_INTERACT])); q=sappend(q, " LEAVES");
+    else if (G.ui_compact){ if (hint_dev()==DEV_TOUCH) draw_text_center(x+w/2, y+h-13, "TAP A ROW - TAP AGAIN TO BUY", 1, COL(88,76,54));
+        else { char b[80]; char *q=b; q=sappend(q, "SHIELD UP - "); q=sappend(q, lbla(H_FIRE)); q=sappend(q, " BUYS - "); q=sappend(q, lbla(H_BACK)); q=sappend(q, " LEAVES");
+               draw_text_center(x+w/2, y+h-13, b, 1, COL(88,76,54)); } }
+    else if (hint_dev()==DEV_TOUCH) draw_text_center(x+w/2, y+h-13, "TAP A ROW - TAP AGAIN TO BUY - TAP OUTSIDE TO LEAVE", 1, COL(88,76,54));
+    else { char b[96]; char *q=b; q=sappend(q, lbla(H_MOVE)); q=sappend(q, " CHOOSE - "); q=sappend(q, lbla(H_CONFIRM));
+           q=sappend(q, " BUYS - "); q=sappend(q, lbla(H_INT)); q=sappend(q, " LEAVES");
            draw_text_center(x+w/2, y+h-13, b, 1, COL(88,76,54)); }
 }
 static void render_store(void){
     G.store_pi = G.my_id; G.ui_compact = 0;
+    g_dev_ctx = dev_of(G.store_pi);
     render_world();
     draw_active_panel();
 }
 
+
+// ---------------------------------------------------------------------------
+// FIRST SHIFT (v1.25) — the HUD prompt, drawn once per frame from
+// the frame tail (mall.c) so solo and split-screen co-op see the
+// identical shared bar. Text and primitive shapes only: no sprite
+// assumptions, so Eddie Mode is safe. The chain core is in save.c.
+// ---------------------------------------------------------------------------
+// where the current place-step wants the player to go, routed
+// through doors when the target sits in another room of the
+// complex. Returns 0 for steps with no place.
+static int fs_target(Player *me, float *tx, float *ty, const char **label){
+    float dx, dy; const char *lb;
+    if (G.fs_step==3){ dx=-315; dy=MALL_CY-148; lb="THE COUNTER"; }
+    else if (G.fs_step==4){ dx=105; dy=MALL_CY-148; lb="BUG BANK"; }
+    else if (G.fs_step==5){ dx=0; dy=ARC_CY-108; lb="THE ARCADE"; }
+    else return 0;
+    if (G.fs_step==5){
+        if (me->in_arcade){ *tx=dx; *ty=dy; }
+        else if (me->in_mall){ *tx=350; *ty=MALL_CY+26; }   // the Arcade door
+        else { *tx=0; *ty=-10; }                            // the mall hut door
+    } else {
+        if (me->in_arcade){ *tx=-330; *ty=ARC_CY+24; }      // the Arcade exit mat
+        else if (me->in_mall){ *tx=dx; *ty=dy; }
+        else { *tx=0; *ty=-10; }                            // the mall hut door
+    }
+    *label=lb;
+    return 1;
+}
+static void fs_draw_prompt(void){
+    if (G.state!=GS_PLAY) return;
+    int mi = G.my_id>=0? G.my_id : 0;
+    Player *me=&G.p[mi];
+    int flashing = fs_flash_t>0;
+    if (G.fs_state!=1 && !flashing) return;
+    // inside a cabinet the mode owns the screen; the finale flash
+    // is the one thing that still shows there
+    if (G.bud[mi].in_bw && !flashing) return;
+    if (G.fs_state==1 && !flashing){
+        float tx, ty; const char *label=0;
+        if (fs_target(me, &tx, &ty, &label)){
+            float dx=tx-me->x, dy=ty-me->y; float d=fsqrt(dx*dx+dy*dy);
+            if (d>150.0f){
+                // an orbiting arrow in the home-arrow idiom, at its
+                // own radius (home rides 46, a downed partner 66)
+                float ca=dx/d, sa=dy/d;
+                int ax=VW/2+(int)(ca*62.0f), ay=VH/2+(int)(sa*62.0f);
+                int txp=ax+(int)(ca*13), typ=ay+(int)(sa*13);
+                int bx=ax-(int)(ca*7), by=ay-(int)(sa*7);
+                int px=(int)(-sa*9), py=(int)(ca*9);
+                tri_fill(txp, typ, bx+px, by+py, bx-px, by-py, COL(30,26,44));
+                int t2x=ax+(int)(ca*10), t2y=ay+(int)(sa*10);
+                int b2x=ax-(int)(ca*5), b2y=ay-(int)(sa*5);
+                int qx=(int)(-sa*6), qy=(int)(ca*6);
+                tri_fill(t2x, t2y, b2x+qx, b2y+qy, b2x-qx, b2y-qy, COL(120,230,255));
+                { char b[48]; char *q=b; q=sappend(q, label); q=sappend(q, " - ");
+                  q=sapp_int(q, (int)(d/50)); q=sappend(q, "M"); *q=0;
+                  draw_text_center(ax, ay+17, b, 1, COL(180,240,255)); }
+            } else if (G.p2_slot<0){
+                // close: a small bouncing diamond on the spot itself
+                int sx=SX(tx), sy=SY(ty);
+                if (sx>16 && sx<VW-16 && sy>30 && sy<VH-16){
+                    int bob=(int)(fsin(G.anim_t*3.0f)*3.0f);
+                    tri_fill(sx, sy-8+bob, sx-6, sy+bob, sx+6, sy+bob, COL(120,230,255));
+                    tri_fill(sx, sy+8+bob, sx-6, sy+bob, sx+6, sy+bob, COL(70,160,200));
+                    draw_text_center(sx, sy-24+bob, label, 1, COL(180,240,255));
+                }
+            }
+        }
+    }
+    { char b[96]; char *q=b;
+      if (flashing){
+          if (fs_flash_fin) q=sappend(q, "FIRST SHIFT COMPLETE!  +");
+          else q=sappend(q, "STEP DONE!  +");
+          q=sapp_int(q, fs_flash_amt); q=sappend(q, " XP"); *q=0;
+      } else {
+          q=sappend(q, "FIRST SHIFT "); q=sapp_int(q, G.fs_step+1); q=sappend(q, "/6:  ");
+          q=sappend(q, FS_TEXT[G.fs_step]); *q=0;
+      }
+      int w = text_w(b,1)+28; if (w>560) w=560;
+      int x = VW/2-w/2, y = VH-62;
+      ui_panel(x, y, w, 24);
+      draw_text_center(VW/2, y+8, b, 1, flashing? COL(150,255,190) : COL(255,240,180)); }
+}
+// WEEKLY CHALLENGE (v1.25 feature 6): the completion / new-week
+// banner — the First Shift flash's twin, drawn just above its bar
+// (y = VH-90 vs VH-62) so a step and a week can celebrate in the
+// same frame without colliding. No prompt bar of its own: the
+// challenge has no single target to point at.
+static void wk_draw_flash(void){
+    if (G.state!=GS_PLAY || wk_flash_t<=0 || !wk_flash_kind) return;
+    const char *b = wk_flash_kind==1? "WEEKLY CHALLENGE COMPLETE! +50 XP"
+                                    : "A NEW WEEK! THE BOARD HAS A FRESH CHALLENGE.";
+    int w = text_w(b,1)+28; if (w>560) w=560;
+    int x = VW/2-w/2, y = VH-90;
+    ui_panel(x, y, w, 24);
+    draw_text_center(VW/2, y+8, b, 1, wk_flash_kind==1? COL(150,255,190) : COL(255,240,180));
+}
+// NAMED ELITES (v1.25 feature 8): the hunt's HUD — an amber tracker
+// in the First Shift marker idiom (orbiting arrow at its own radius,
+// 84: home rides 46, First Shift 62, a downed partner 66) plus the
+// claim banner, stacked above the Weekly flash (y = VH-118). The
+// tracker scans G.bugs itself, so a LAN guest — whose bugs arrive by
+// snapshot, elite byte and all — sees the same arrow. Drawn once per
+// frame from the frame tail (mall.c), like its twins.
+static void bn_draw_hud(void){
+    if (G.state!=GS_PLAY) return;
+    int mi = G.my_id>=0? G.my_id : 0;
+    Player *me=&G.p[mi];
+    // the claim banner (host/local only — the flash is only set there)
+    if (bn_flash_t>0 && bn_flash_name>=0){
+        char b[80]; char *q=b;
+        q=sappend(q, "BOUNTY CLAIMED! "); q=sappend(q, ELITE_NAME[bn_flash_name%ELITE_N]);
+        q=sappend(q, " IS DOWN. +"); q=sapp_int(q, BN_XP); q=sappend(q, " XP"); *q=0;
+        int w = text_w(b,1)+28; if (w>600) w=600;
+        int x = VW/2-w/2, y = VH-118;
+        ui_panel(x, y, w, 24);
+        draw_text_center(VW/2, y+8, b, 1, COL(255,214,120));
+    }
+    // the tracker: only in the overworld, only while an elite lives
+    if (me->in_mall || me->in_arcade || G.bud[mi].in_bw) return;
+    int li = bn_any_live();
+    if (li<0) return;
+    Bug *t=&G.bugs[li];
+    const char *nm = ELITE_NAME[(t->elite-1)%ELITE_N];
+    float dx=t->x-me->x, dy=t->y-me->y; float d=fsqrt(dx*dx+dy*dy);
+    if (d>150.0f){
+        float ca=dx/d, sa=dy/d;
+        int ax=VW/2+(int)(ca*84.0f), ay=VH/2+(int)(sa*84.0f);
+        int txp=ax+(int)(ca*13), typ=ay+(int)(sa*13);
+        int bx=ax-(int)(ca*7), by=ay-(int)(sa*7);
+        int px=(int)(-sa*9), py=(int)(ca*9);
+        tri_fill(txp, typ, bx+px, by+py, bx-px, by-py, COL(30,26,44));
+        int t2x=ax+(int)(ca*10), t2y=ay+(int)(sa*10);
+        int b2x=ax-(int)(ca*5), b2y=ay-(int)(sa*5);
+        int qx=(int)(-sa*6), qy=(int)(ca*6);
+        tri_fill(t2x, t2y, b2x+qx, b2y+qy, b2x-qx, b2y-qy, COL(255,170,60));
+        { char b[64]; char *q=b; q=sappend(q, nm); q=sappend(q, " - ");
+          q=sapp_int(q, (int)(d/50)); q=sappend(q, "M"); *q=0;
+          draw_text_center(ax, ay+17, b, 1, COL(255,205,110)); }
+    } else if (G.p2_slot<0){
+        int sx=SX(t->x), sy=SY(t->y);
+        if (sx>16 && sx<VW-16 && sy>30 && sy<VH-16){
+            int bob=(int)(fsin(G.anim_t*3.0f)*3.0f);
+            tri_fill(sx, sy-8+bob, sx-6, sy+bob, sx+6, sy+bob, COL(255,170,60));
+            tri_fill(sx, sy+8+bob, sx-6, sy+bob, sx+6, sy+bob, COL(200,120,40));
+            // no name here: the bug's own nameplate (drawn with the
+            // sprite) already names it — printing it twice at this
+            // range just smudges the plate
+        }
+    }
+}

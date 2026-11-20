@@ -75,7 +75,7 @@ function T(name, cond, extra) { if (cond) { pass++; } else { fail++; console.log
   // ---- the bean on the gamepad's Y button ----
   // (leave the mall properly first: LEAVE left him at the gate indoors,
   // and the bean refuses indoors — walk out the exit mat, THEN teleport)
-  await call('dbg_tp', 0, -5850); await sleep(250);
+  await call('dbg_tp', 0, -5810); await sleep(250);
   await key('KeyE', 300); await sleep(300);
   await call('dbg_tp', 3000, 3000); await sleep(250);
   await call('dbg_beans', 1);

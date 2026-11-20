@@ -41,7 +41,7 @@ const CY = -6000;
 
   async function stageBankSelection() {
     for (let i = 0; i < 4; i++) await call('dbg_feed');            // +40 kg
-    await call('dbg_tp', 75, CY - 50); await sleep(200);
+    await call('dbg_tp', 105, CY - 98); await sleep(200);   // in front of the Bank disc (105, MALL_CY-148, r64) — the stand moved with the counter row (v1.25 MALL ENLARGEMENT)
     await key('KeyE', 300); await sleep(300);                      // bank panel
     T('bank panel open', (await call('dbg_station')) === 2, await call('dbg_station'));
     await key('Space', 350); await sleep(300);                     // row 0: DEPOSIT ALL
@@ -51,7 +51,7 @@ const CY = -6000;
     await key('Escape', 300); await sleep(300);                    // close WITHOUT buying: stale station 2, sel 3
   }
   async function toGatePanel() {
-    await call('dbg_tp', 185, CY + 96); await sleep(200);
+    await call('dbg_tp', 215, CY + 136); await sleep(200);   // the gate front (BW_SX 215, disc row MALL_CY+132 — v1.25 MALL ENLARGEMENT)
     await key('KeyE', 300); await sleep(350);
     return (await call('dbg_gate')) === 1;
   }

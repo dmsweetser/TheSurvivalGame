@@ -44,6 +44,33 @@ const tileCY = (ly) => ly * 48 + 24;
   // hooks enter BW, but entry itself goes through the actual gate panel
   await call('dbg_tp', 0, 80); await sleep(300); await key('KeyE', 250); await sleep(400);
   T('DEV parked in the mall', (await call('dbg_mall')) === 1, await call('dbg_mall'));
+
+  // DEEPER DOORS (v1.25 feat 11): the ENTRANCES cabinet panel is
+  // locked before a first clear — a fresh buddy's panel is the
+  // shipped two rows, so Down+Space LEAVES instead of launching
+  // anything. Entry into Chapter 2 later in this suite goes
+  // through this same panel; no debug door into it anywhere.
+  async function gotoEntPanel() {
+    await call('dbg_tp', 350, -5976); await sleep(200);
+    await key('KeyE', 250);
+    T('entered the arcade', (await poll('dbg_inarcade', v => v === 1, 4000)) === 1, await call('dbg_inarcade'));
+    await call('dbg_tp', -256, -12108); await sleep(200);   // the ENTRANCES cabinet's stand point (ARC_SX[0], ARC_ROWY[0]+58)
+    await key('KeyE', 250);
+    return (await poll('dbg_arcgate', v => v === 1, 3000)) === 1;
+  }
+  T('entrances panel opened (fresh buddy)', await gotoEntPanel());
+  await key('ArrowDown', 200);            // row 1: with two rows this is LEAVE
+  await key('Space', 300);
+  T('fresh panel: Down+Space LEAVES (no DEEPER DOORS row yet)',
+    (await call('dbg_arcgate')) === 0 && (await call('dbg_bwmode')) !== 2,
+    'gate=' + (await call('dbg_arcgate')) + ' mode=' + (await call('dbg_bwmode')));
+  T('panel reopened', await gotoEntPanel());
+  await key('Space', 300);                // row 0: PLAY — Chapter 1
+  T('PLAY launches Chapter 1', (await poll('dbg_bwmode', v => v === 2, 4000)) === 2 && (await call('dbg_entchap')) === 1,
+    'mode=' + (await call('dbg_bwmode')) + ' chap=' + (await call('dbg_entchap')));
+  await key('Escape', 300);
+  T('back from the panel launch', (await poll('dbg_bwstate', v => v === 0, 4000)) === 0, await call('dbg_bwstate'));
+
   await call('dbg_bwent2');
   T('in Banzai World', (await poll('dbg_bwstate', v => v === 1)) === 1);
   T('starts in room 1 (the lobby)', (await call('dbg_entroom')) === 1, await call('dbg_entroom'));
@@ -58,12 +85,31 @@ const tileCY = (ly) => ly * 48 + 24;
     // a one-second stand can still slip (Nov 6: the probe that stands
     // on the exact tile went 20 doors for 20; the sweeping suite
     // kept missing keys that were sitting right there)
+    // v1.25 feat 11: the stand now PERSISTS. A pass monster's bonk
+    // knocks the buddy exactly one pickup radius (26px) off the key,
+    // so a single stand-and-poll can be undone mid-poll by the room's
+    // own Zip/Boomerang — the hunt failed that way twice in one run,
+    // once per chapter, and in a locked Boomerang room the stacked
+    // bonks fainted the buddy out of the walk entirely. Re-standing
+    // every beat (and topping up between beats) keeps the buddy on
+    // the tile until the pocket registers; the assertion the caller
+    // makes — the key is found, then spent — is unchanged.
     const kp = await call('dbg_entdiag', room, 3);
     const kx = kp % 100000, ky = Math.floor(kp / 100000);
-    for (let t = 0; t < 3; t++) {
-      await tp(kx, ky);
-      if ((await poll('dbg_entkey', v => v === 1, 2500)) === 1) return 1;
+    const t0 = Date.now();
+    while (Date.now() - t0 < 12000) {
+      // top up EVERY beat, the first one included: the buddy can
+      // arrive at this hunt already carrying tryRows' dupe bonks,
+      // and the room's one Zip pass (45%) landing in the first
+      // second — before any in-hunt top-up — faints him out of
+      // the hunt entirely (feat 11 battery: door 3, twice in
+      // four runs; the pass's timing against the hunt is the
+      // whole race)
       await call('dbg_budup', 60);
+      await tp(kx, ky, 60);
+      if ((await call('dbg_entkey')) === 1) return 1;
+      await sleep(240);
+      if ((await call('dbg_entkey')) === 1) return 1;
     }
     return await call('dbg_entkey');
   }
@@ -89,6 +135,13 @@ const tileCY = (ly) => ly * 48 + 24;
   }
   async function tryRows(room, rows) {
     for (const ly of rows) {
+      // top up per row: a resident Big Bug bumps for 40% a bump
+      // with only its grace between bumps, so an un-topped
+      // multi-row try in its room can faint the buddy before the
+      // real row is ever pressed (feat 11 solo 3: door 39, key in
+      // hand, walk frozen at entdoor 38). One row's exposure —
+      // one bump plus a dupe bonk — is always survivable.
+      await call('dbg_budup', 60);
       await tp(doorX(room) - 40, tileCY(ly));
       if (await pressDoor(room)) return 1;   // a dupe bonks and refuses; the real door opens
     }
@@ -266,6 +319,111 @@ const tileCY = (ly) => ly * 48 + 24;
   await sleep(400);
   T('records survive the reload', (await call('dbg_entrec')) >= 10000, await call('dbg_entrec'));
   T('the subfloor record survives too', (await call('dbg_entsubb')) >= 3, await call('dbg_entsubb'));
+
+  // ============ DEEPER DOORS (v1.25 feat 11): Chapter 2 ============
+  // The buddy finished Chapter 1 above (ent_done >= 1), so the
+  // ENTRANCES panel has grown its third row. Everything below
+  // enters through that real panel; dbg_bwtp only positions the
+  // buddy inside the run (the suite's standing idiom), and
+  // dbg_entdiag only reads the live deal.
+  const entRecBefore = await call('dbg_entrec');
+  T('chapter 2 panel opened', await gotoEntPanel());
+  await page.screenshot({ path: __dirname + '/tsg-v125-f11-panel.png' });
+  await key('ArrowDown', 200);            // row 1: DEEPER DOORS
+  await key('Space', 300);
+  T('DEEPER DOORS launches Chapter 2', (await poll('dbg_bwmode', v => v === 2, 4000)) === 2 && (await call('dbg_entchap')) === 2,
+    'mode=' + (await call('dbg_bwmode')) + ' chap=' + (await call('dbg_entchap')));
+  T('chapter 2 starts in room 1', (await call('dbg_entroom')) === 1, await call('dbg_entroom'));
+  await call('dbg_budup', 60);
+  // Lumen joins at the threshold and settles at the buddy's
+  // shoulder (buddy - 26, buddy - 22). The buddy's own entry
+  // settle shifts his absolute spot a few px run to run (the
+  // shipped entry behaviour, both chapters), so the contract
+  // asserted is the RELATIVE one: Lumen sits on the shoulder
+  // point, polled until he arrives and holds it.
+  let lumenShoulder = 0;
+  { const t0 = Date.now();
+    while (Date.now() - t0 < 6000) {
+      const lu = await call('dbg_entlu'), bx = await call('dbg_bwx'), by = await call('dbg_bwy');
+      if (Math.abs((lu % 100000) - (bx - 26)) <= 6 && Math.abs(Math.floor(lu / 100000) - (by - 22)) <= 6) { lumenShoulder = 1; break; }
+      await sleep(150);
+    } }
+  T('Lumen hovers at the buddy\'s shoulder', lumenShoulder === 1);
+  await page.screenshot({ path: __dirname + '/tsg-v125-f11-room1.png' });
+  await tp(roomCX(2), 216); await sleep(300);
+  let lumenFollowed = 0;
+  { const t0 = Date.now();
+    while (Date.now() - t0 < 8000) { const lu = await call('dbg_entlu'); if (Math.abs((lu % 100000) - (roomCX(2) - 26)) < 40) { lumenFollowed = 1; break; } await sleep(150); } }
+  T('Lumen follows to the shoulder', lumenFollowed === 1);
+  T('chapter 2 room 2 is dark, Typo in residence', Math.floor((await call('dbg_entev')) / 10) === 3, await call('dbg_entev'));
+  await page.screenshot({ path: __dirname + '/tsg-v125-f11-dark.png' });
+
+  // the walk in: rooms 2..4 by the standing advance() machinery —
+  // it reads the live seed through dbg_entdiag, so it walks
+  // Chapter 2's fresh deal (locks, keys, dupes) unmodified
+  if ((await call('dbg_entroom')) < 3) await advance(2);
+  T('walked to room 3', (await call('dbg_entroom')) === 3, await call('dbg_entroom'));
+  if ((await call('dbg_entroom')) < 4) await advance(3);
+  T('walked to room 4', (await call('dbg_entroom')) === 4, await call('dbg_entroom'));
+
+  // the duet door: Interact refuses it; two plates open it
+  T('door 4 is a duet door', (await call('dbg_entduet', 4)) === 1, await call('dbg_entduet', 4));
+  const doorRow4 = await call('dbg_entdiag', 4, 4);   // the real door's row (which=4)
+  await tp(doorX(4) - 40, tileCY(doorRow4));
+  await key('KeyE', 250); await sleep(300);
+  T('Interact does not open a duet door', (await call('dbg_entdoor')) < 4, await call('dbg_entdoor'));
+  // the plates flank the doorway (ent_plate_pos: door tile centre
+  // x - 40, door row centre y -/+ 58); stand on the north one and
+  // watch for Lumen on the south one while the charge builds
+  const plateAX = doorX(4) - 40, plateAY = tileCY(doorRow4) - 58, plateBY = tileCY(doorRow4) + 58;
+  await tp(plateAX, plateAY);
+  let lumenOnPlate = 0, duetOpened = 0;
+  { const t0 = Date.now();
+    while (Date.now() - t0 < 12000) {
+      const lu = await call('dbg_entlu'); const lx = lu % 100000, ly = Math.floor(lu / 100000);
+      if (Math.abs(lx - plateAX) < 34 && Math.abs(ly - plateBY) < 34) lumenOnPlate = 1;
+      if ((await call('dbg_entdoor')) >= 4) { duetOpened = 1; break; }
+      await sleep(120);
+    } }
+  T('Lumen took the other plate', lumenOnPlate === 1);
+  T('the duet door opened for two friends', duetOpened === 1, await call('dbg_entdoor'));
+  await page.screenshot({ path: __dirname + '/tsg-v125-f11-duet.png' });
+  await tp(roomCX(5), 216); await sleep(200);
+  T('through the duet door into room 5', (await call('dbg_entroom')) === 5, await call('dbg_entroom'));
+  T('deeper best is room 5 already', (await call('dbg_ent2rec')) % 10000 >= 5, await call('dbg_ent2rec'));
+
+  // the long walk out: 5..18 by advance, the Inspector segment
+  // crossed by teleport (the Chapter 1 phase's own pattern — the
+  // chase machinery is shared code, re-proving it is not this
+  // feature's job), then 24..39 by advance. Duet doors met on the
+  // way refuse Interact and are crossed by advance's teleport,
+  // like every door the suite cannot open by hand.
+  for (let room = 5; room <= 18; room++) { if ((await call('dbg_entroom')) < room + 1) await advance(room); }
+  for (const room of [20, 21, 22, 23, 24, 25]) { await tp(roomCX(room), 216); await sleep(150); }
+  T('crossed the chase segment', (await call('dbg_entroom')) === 25, await call('dbg_entroom'));
+  for (let room = 25; room <= 39; room++) { if ((await call('dbg_entroom')) < room + 1) await advance(room); }
+  T('the Deeper exit room', (await call('dbg_entroom')) === 40, await call('dbg_entroom'));
+  T('a Deeper completion is recorded', (await call('dbg_ent2rec')) >= 10000, await call('dbg_ent2rec'));
+  T('chapter 1 records untouched by chapter 2', (await call('dbg_entrec')) === entRecBefore, (await call('dbg_entrec')) + ' vs ' + entRecBefore);
+  await page.screenshot({ path: __dirname + '/tsg-v125-f11-exit.png' });
+  await tp(tileCX(40, 7), tileCY(8));
+  await key('KeyE', 250); await sleep(400);
+  T('the Deeper EXIT door goes home', (await call('dbg_bwstate')) === 0, await call('dbg_bwstate'));
+
+  // persistence: the e2 token rides the save blob, a reload keeps
+  // the Deeper records, and Chapter 1 still deals Chapter 1
+  const blob = await page.evaluate(() => { for (let i = 0; i < localStorage.length; i++) { const v = localStorage.getItem(localStorage.key(i)); if (v && v.indexOf('e2=') >= 0) return v; } return ''; });
+  T('the save carries the e2 token', blob.indexOf('e2=') >= 0);
+  await page.reload({ waitUntil: 'load' });
+  await page.waitForFunction(() => window.__TSG && window.__TSG.dbg_state() === 0, null, { timeout: 20000 });
+  await key('Space', 450); await sleep(400);
+  if ((await call('dbg_state')) !== 1) await key('Enter', 400);
+  await sleep(400);
+  T('deeper records survive the reload', (await call('dbg_ent2rec')) >= 10000, await call('dbg_ent2rec'));
+  await call('dbg_bwent2');
+  T('chapter 1 still deals chapter 1', (await call('dbg_entchap')) === 1 && (await call('dbg_entroom')) === 1,
+    'chap=' + (await call('dbg_entchap')) + ' room=' + (await call('dbg_entroom')));
+  await key('Escape', 300);
 
   console.log('entrancetest: ' + pass + ' passed, ' + fail + ' failed');
   await browser.close();

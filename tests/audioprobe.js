@@ -101,22 +101,47 @@ function voicePeak(ch, vel, instr) {
 
   const pieceNames = ['Moonlight I (menu/calm)', 'Fur Elise', 'Symphony 5', 'Moonlight III', 'Bach (BW)'];
   const pieceStatsAll = [];
-  // piece 0 (calm, in game)
+  // FEAT 15 STAGING (disclosed; every assertion below is unchanged):
+  // this probe guards the balance of the FULL v1.23 arrangements,
+  // but adaptive intensity now plays a calm field SPARSE (lead
+  // alone) on purpose — so each collect first stages the danger
+  // that fills the arrangement in, using only the game's own rules:
+  // teleport clear (the 1750 cull), come home, and spawn four bugs
+  // ~400 out — inside the 430 density ring, far outside any bite.
+  async function stageDanger() {
+    await call('dbg_tp', 5000, 5000); await sleep(400);
+    await call('dbg_tp', 0, 80); await sleep(300);
+    const px = await call('dbg_px'), py = await call('dbg_py');
+    await call('dbg_spawnbug', px + 400, py);
+    await call('dbg_spawnbug', px - 400, py + 40);
+    await call('dbg_spawnbug', px + 380, py - 80);
+    await call('dbg_spawnbug', px - 380, py - 60);
+    await sleep(200);
+  }
+  // piece 0 (in game, danger staged — the full Moonlight)
+  await stageDanger();
   pieceStatsAll.push({ name: pieceNames[0], ...pieceStats(await collect(4), 4) });
-  // pieces 1..3 via threat override
+  // pieces 1..3 via threat override, danger re-staged per piece
   for (const [t, idx] of [[25, 1], [45, 2], [70, 3]]) {
     await call('dbg_setthreat', t);
-    await sleep(500);
+    await stageDanger();
     ok((await call('dbg_piece')) === idx, 'threat override selects piece ' + idx, await call('dbg_piece'));
     pieceStatsAll.push({ name: pieceNames[idx], ...pieceStats(await collect(4), 4) });
   }
   await call('dbg_setthreat', -1);
   // piece 4: Banzai World free roam (dbg_bwent2 is Entrances = mode 2,
-  // which plays the Moonlight by design; the Bach belongs to roam mode)
+  // which plays the Moonlight by design; the Bach belongs to roam mode).
+  // The full Sheep needs a battle: dbg_bwhackhere drops a hacker on
+  // the buddy and the turn-based battle sits at its choose phase,
+  // holding the danger for the whole collect (feat 15 staging, as
+  // above — the mode entry below discards the battle, bat.active=0).
   await call('dbg_adopt', 0);
   await call('dbg_bwenter');
   await sleep(600);
   ok((await call('dbg_piece')) === 4, 'Banzai World selects piece 4 (Bach)', await call('dbg_piece'));
+  await call('dbg_bwhackhere');
+  for (let i = 0; i < 30 && (await call('dbg_bwbattle')) <= 0; i++) await sleep(200);
+  ok((await call('dbg_bwbattle')) > 0, 'staged hacker battle holds the Banzai danger', await call('dbg_bwbattle'));
   pieceStatsAll.push({ name: pieceNames[4], ...pieceStats(await collect(4), 4) });
   await call('dbg_bwent2');   // now switch into Entrances for the chase
 

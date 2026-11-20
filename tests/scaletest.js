@@ -32,7 +32,7 @@ function ok(cond, label, extra) {
   ok((await call('dbg_state')) === 1, 'run started', await call('dbg_state'));
   const cv = await page.$('canvas');
   const exitMall = async () => {
-    await call('dbg_tp', 0, -5850); await sleep(300);
+    await call('dbg_tp', 0, -5810); await sleep(300);
     await key('KeyE', 300);
     return poll('dbg_mall', [], v => v === 0, 5000);
   };
@@ -44,7 +44,7 @@ function ok(cond, label, extra) {
   await call('dbg_adopt', 0);                       // a puppy, beside us in the mall
 
   // ---------- 2. training cost curve (10, 17, 27) ----------
-  await call('dbg_tp', 225, -6060); await sleep(300);   // the Banzai Buddies counter
+  await call('dbg_tp', 315, -6148); await sleep(300);   // the Banzai Buddies counter disc (MALL_SX[3]=315, MALL_CY-148 — v1.25 MALL ENLARGEMENT)
   await key('KeyE', 350);
   ok((await call('dbg_station')) === 3, 'buddies panel open', await call('dbg_station'));
   const trainOnce = async (xp) => {

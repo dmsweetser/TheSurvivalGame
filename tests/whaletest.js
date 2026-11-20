@@ -68,7 +68,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   await call('dbg_tp', 0, 80); await sleep(150);
   await key('KeyE', 300);
   T('entered the mall', (await call('dbg_mall')) === 1);
-  T('walked to the Whales Only counter', await walkTo(-75, -6108, 14));
+  T('walked to the Whales Only counter', await walkTo(-105, -6148, 14));
   await key('KeyE', 350);
   T('whales panel open', (await call('dbg_state')) === 2 && (await call('dbg_station')) === 1,
     (await call('dbg_state')) + '/' + (await call('dbg_station')));

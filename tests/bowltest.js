@@ -104,7 +104,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   await sleep(150);
   await key('KeyE', 300);
   ok((await call('dbg_mall')) === 1, 'entered the mall');
-  ok(await walkTo(-170, -5908, 14), 'walked to the Bug Bowl counter');
+  ok(await walkTo(-180, -5868, 14), 'walked to the Bug Bowl counter');
   await key('KeyE', 300);
   ok((await state()) === 2 && (await call('dbg_station')) === 4, 'bowling view opens', `${await state()}/${await call('dbg_station')}`);
   await key('Space', 250);
@@ -121,6 +121,76 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   ok(fr >= 10, 'frame 1 completes after two balls', fr);
   await key('Escape', 300);
   ok((await state()) === 1, 'bowling view closes');
+
+  // ---- v1.25 E2E regression (a): the announcement clock ---------------
+  // A settle message ("N PINS!" etc., 1.8s) set just before the panel
+  // closes must expire in real time while the panel is closed. It used
+  // to tick only inside bowl_update — which runs only while a player
+  // stands at the lanes — so closing the panel froze the countdown
+  // and the next visit opened on the stale message hanging over the
+  // lanes. frame() now decays msg_t for every connected player.
+  await key('KeyE', 300);
+  ok((await state()) === 2 && (await call('dbg_station')) === 4, 'lanes reopen for the announcement test');
+  await key('Space', 250); await key('Space', 300); await key('Space', 500);
+  const mt = await poll(() => call('dbg_bowl_msgt'), v => v > 800, 9000);
+  ok(mt > 800, 'a settle announcement is live', mt);
+  await key('Escape', 300);
+  ok((await poll(() => state(), v => v === 1, 4000)) === 1, 'panel closed with the announcement pending');
+  await sleep(2200);
+  // (msg_t may rest a hair below zero — the decay steps it past 0 by
+  // one frame's dt, as the old in-update decrement also did; a STALE
+  // message would still read ~+1500, frozen where the panel closed)
+  ok((await call('dbg_bowl_msgt')) <= 0, 'the announcement expired while the panel was closed', await call('dbg_bowl_msgt'));
+  await key('KeyE', 300);
+  ok((await state()) === 2 && (await call('dbg_bowl_msgt')) <= 0, 'no stale announcement on reopen', await call('dbg_bowl_msgt'));
+  await key('Escape', 200);
+  ok((await state()) === 1, 'lanes closed again');
+
+  // ---- v1.25 E2E regression (b): the attract-screen layout ------------
+  // With a bowl record on the books, the attract screen draws
+  // "BEST GAME SO FAR: n" (foul+30 = y 336) above the prompt line.
+  // The prompt used to sit at VH-20 (y 340) — inside the 8px font
+  // cell of the line above, so the two printed on top of each other.
+  // It now sits at VH-12. Fresh boot for the attract state (the bowl
+  // zeroes; the record persists), then scan the framebuffer's bottom
+  // band: the two pale text lines must form two separate row clusters
+  // with clear air between them.
+  await page.reload();
+  await page.waitForFunction(() => window.__TSG && window.__TSG.dbg_state() === 0, null, { timeout: 20000 });
+  const call2 = (fn, ...a) => page.evaluate(([f, x]) => window.__TSG[f](...x), [fn, a]);   // the pre-reload handle is dead; re-resolve per call
+  const state2 = () => call2('dbg_state');
+  await key('Space', 400);
+  if ((await state2()) !== 1) { await key('Enter', 400); }
+  ok((await state2()) === 1, 'run continued after reload', await state2());
+  await call2('dbg_tp', 0, 80); await sleep(150);
+  await key('KeyE', 300);
+  ok((await call2('dbg_mall')) === 1, 'entered the mall (attract check)');
+  await call2('dbg_tp', -180, -5868); await sleep(200);
+  await key('KeyE', 300);
+  ok((await state2()) === 2 && (await call2('dbg_station')) === 4, 'attract screen open', `${await state2()}/${await call2('dbg_station')}`);
+  await sleep(300);
+  const rowsWithText = await page.evaluate(() => {
+    const EX = window.__TSG, mem = new Uint8Array(EX.memory.buffer), fb = EX.fb();
+    const rows = [];
+    for (let gy = 328; gy < 360; gy++) {
+      let n = 0;
+      for (let y2 = 0; y2 < 2; y2++) for (let x = 0; x < 1280; x++) {
+        const o = fb + ((gy * 2 + y2) * 1280 + x) * 4;
+        if (mem[o] > 110 && mem[o + 1] > 190 && mem[o + 2] > 200) n++;
+      }
+      if (n >= 8) rows.push(gy);
+    }
+    return rows;
+  });
+  const clusters = [];
+  for (const r of rowsWithText) {
+    const c = clusters[clusters.length - 1];
+    if (c && r - c[c.length - 1] <= 2) c.push(r); else clusters.push([r]);
+  }
+  const gap = clusters.length === 2 ? clusters[1][0] - clusters[0][clusters[0].length - 1] : -1;
+  ok(clusters.length === 2 && gap >= 4, 'attract: BEST GAME line and NEW GAME prompt on separate rows',
+     JSON.stringify(clusters.map(c => [c[0], c[c.length - 1]])));
+  await page.screenshot({ path: 'tsg-v125-e2e-bowl-attract-suite.png' });
 
   console.log(`\n${pass} passed, ${fail} failed`);
   await browser.close();
