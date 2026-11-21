@@ -38,37 +38,200 @@
 // ============================================================================
 // [UNITY-SPLIT MAP]
 // ===========================================================================
-//  UNITY BUILD (Nov 17, 2026): the game source is split into per-system
-//  piece files, #included below in their original order. The translation
-//  unit — and the compiled game — is unchanged; this is the same code,
-//  filed by system. Edit the pieces; build survival.c as always.
-//    prelude.c    orig lines     39-   544  platform interface, libc-free helpers, framebuffer renderer, bitmap font
-//    buddies.c    orig lines    545-  2066  game design data, entity helpers, buddy species & powers, world props, bug stats, difficulty, combat, update logic, interlocked walls
-//    world.c      orig lines   2067-  5591  the Bug Mall and Arcade rooms, cartoony world rendering, EDDIE MODE sprites, HUD / leaderboard / store UI
-//    music.c      orig lines   5592-  6344  the chiptune sequencer + sfx engine and song data — plus, because it sits here in the original layout, the Ed25519 verifier for Whales Only unlock codes
-//    save.c       orig lines   6345-  7458  save / load, run setup + continue, save slots, the networking packet format, store purchases, mall station panels
-//    mall.c       orig lines   7459-  9762  WHALES ONLY, Bug Bowl, menus / splash / help, settings + key rebinding, the controls panel, the frame state machine, local co-op, game-over portrait
-//    banzai.c     orig lines   9763- 12517  BANZAI WORLD — the hub and Entrances (bw_modes 0-2)
-//    run.c        orig lines  12518- 13242  SUPER BUDDY RUN (Banzai World mode 3)
-//    craft.c      orig lines  13243- 14710  BUDDY CRAFT (Banzai World mode 4)
-//    tank.c       orig lines  14711- 15443  TANK RESCUE (Banzai World mode 5) + the mission chain
-//    castle.c     orig lines  15444- 15825  CASTLE (bw_mode 6)
-//    cart.c       orig lines  15826- 16976  SUPER BUDDY CART (bw_mode 7)
-//    war.c        orig lines  16977- 19564  WAR! (bw_mode 8), the tap-first RTS
-//    platform.c   orig lines  19565- 21488  PLATFORM hosts — WebAssembly, Windows, POSIX shared, Linux, macOS interface, and the embedded web server + game networking
+//  UNITY BUILD: survival.c #includes every piece below, in this exact
+//  order, forming one translation unit. Pieces live in category folders
+//  under src/ (core, data, input, player, entities, buddies, enemies,
+//  world, sim, combat, game, music, crypto, save, net, mall, menus,
+//  coop, ui, render, banzai, modes/<game>, war, platform). Edit the
+//  pieces; build survival.c as always. Order is load-bearing: do not
+//  rearrange includes without rebuilding and re-verifying.
 // ===========================================================================
 // [/UNITY-SPLIT MAP]
-#include "prelude.c"
-#include "buddies.c"
-#include "world.c"
-#include "music.c"
-#include "save.c"
-#include "mall.c"
-#include "banzai.c"
-#include "run.c"
-#include "craft.c"
-#include "tank.c"
-#include "castle.c"
-#include "cart.c"
-#include "war.c"
-#include "platform.c"
+// --- core/ ---
+#include "core/platform_iface.c"
+#include "core/libc.c"
+#include "core/math.c"
+#include "core/rng.c"
+#include "core/render.c"
+#include "core/color.c"
+#include "core/font.c"
+// --- data/ ---
+#include "data/design.c"
+#include "data/medals.c"
+#include "data/toppers.c"
+// --- mall/ ---
+#include "mall/bowl_state.c"
+// --- input/ ---
+#include "input/bindings.c"
+#include "input/hints.c"
+#include "input/touch.c"
+// --- data/ ---
+#include "data/palette.c"
+// --- world/ ---
+#include "world/regions.c"
+// --- data/ ---
+#include "data/hat_tiers.c"
+// --- player/ ---
+#include "player/speed.c"
+// --- entities/ ---
+#include "entities/fx.c"
+// --- buddies/ ---
+#include "buddies/species.c"
+#include "buddies/draft.c"
+// --- enemies/ ---
+#include "enemies/elites.c"
+// --- buddies/ ---
+#include "buddies/adopt.c"
+#include "buddies/items.c"
+// --- world/ ---
+#include "world/props.c"
+// --- enemies/ ---
+#include "enemies/bugs.c"
+// --- player/ ---
+#include "player/revive.c"
+// --- game/ ---
+#include "game/difficulty.c"
+// --- game/ ---
+#include "game/src_blob.c"
+#include "game/srcedit.c"
+#include "data/livedata.c"
+// --- combat/ ---
+#include "combat/combat.c"
+// --- game/ ---
+#include "game/update.c"
+// --- combat/ ---
+#include "combat/walls.c"
+// --- world/ ---
+#include "world/mall_geo.c"
+#include "world/srcroom_geo.c"
+#include "world/sky.c"
+#include "world/arcade_geo.c"
+// --- combat/ ---
+#include "combat/fire.c"
+// --- sim/ ---
+#include "sim/players.c"
+#include "sim/projectiles.c"
+#include "sim/bugs.c"
+#include "sim/fx.c"
+#include "sim/buddies_ai.c"
+#include "sim/sim.c"
+// --- render/ ---
+#include "render/render_core.c"
+#include "render/eddie.c"
+// --- enemies/ ---
+#include "enemies/draw_bugs.c"
+// --- render/ ---
+#include "render/hats.c"
+#include "render/buddies_draw.c"
+#include "render/players_draw.c"
+#include "render/props_draw.c"
+#include "render/mall_draw.c"
+#include "render/arcade_draw.c"
+#include "render/srcroom_draw.c"
+#include "render/render_world.c"
+// --- ui/ ---
+#include "ui/hud.c"
+#include "ui/first_shift.c"
+// --- music/ ---
+#include "music/songs.c"
+#include "music/pieces.c"
+#include "music/adaptive.c"
+#include "music/engine.c"
+// --- crypto/ ---
+#include "crypto/sha512.c"
+#include "crypto/ed25519.c"
+// --- save/ ---
+#include "save/saveio.c"
+#include "save/run_setup.c"
+// --- game/ ---
+#include "game/first_shift.c"
+#include "game/weekly.c"
+// --- save/ ---
+#include "save/bounty.c"
+#include "save/start.c"
+#include "save/slots.c"
+// --- net/ ---
+#include "net/packets.c"
+#include "net/host.c"
+#include "net/client.c"
+// --- mall/ ---
+#include "mall/store.c"
+#include "mall/whales.c"
+#include "mall/trophy_case.c"
+#include "mall/stations.c"
+#include "mall/station_input.c"
+#include "mall/bowl.c"
+#include "mall/bowl_draw.c"
+#include "mall/panel.c"
+#include "mall/booth.c"
+#include "mall/panels.c"
+#include "mall/srcterm.c"
+// --- menus/ ---
+#include "menus/menu.c"
+#include "menus/menu_render.c"
+#include "menus/help.c"
+#include "menus/settings.c"
+#include "menus/pause.c"
+// --- coop/ ---
+#include "coop/input.c"
+// --- mall/ ---
+#include "mall/frame.c"
+// --- banzai/ ---
+#include "banzai/tiles.c"
+#include "banzai/story.c"
+#include "banzai/battle.c"
+#include "banzai/gates.c"
+#include "banzai/cabinet.c"
+#include "banzai/frame.c"
+#include "banzai/input.c"
+#include "banzai/entrances.c"
+#include "banzai/entrances_draw.c"
+#include "banzai/draw.c"
+#include "banzai/minimap.c"
+// --- modes/run/ ---
+#include "modes/run/run_levels.c"
+#include "modes/run/run.c"
+#include "modes/run/run_render.c"
+// --- modes/craft/ ---
+#include "modes/craft/craft_world.c"
+#include "modes/craft/craft.c"
+#include "modes/craft/craft_update.c"
+#include "modes/craft/craft_render.c"
+// --- modes/tank/ ---
+#include "modes/tank/tank.c"
+#include "modes/tank/tank_render.c"
+// --- modes/castle/ ---
+#include "modes/castle/castle.c"
+#include "modes/castle/castle_play.c"
+#include "modes/castle/castle_render.c"
+// --- modes/cart/ ---
+#include "modes/cart/cart_track.c"
+#include "modes/cart/cart_race.c"
+#include "modes/cart/cart_render.c"
+// --- war/ ---
+#include "war/units.c"
+#include "war/coop.c"
+#include "war/fog.c"
+#include "war/terrain.c"
+#include "war/hive.c"
+#include "war/path.c"
+#include "war/snap.c"
+#include "war/pause.c"
+#include "war/enter.c"
+#include "war/build.c"
+#include "war/orders.c"
+#include "war/map.c"
+#include "war/pad.c"
+#include "war/update.c"
+#include "war/render.c"
+#include "war/modes_render.c"
+#include "war/touch.c"
+// --- platform/ ---
+#include "platform/wasm.c"
+#include "platform/native_common.c"
+#include "platform/win32.c"
+#include "platform/posix.c"
+#include "platform/linux.c"
+#include "platform/mac.c"
+#include "platform/srcbuild.c"
+#include "platform/server.c"

@@ -1,8 +1,19 @@
 // tapbattle.js — Banzai World battles must take taps (Daniel, Nov 4:
 // "in battle I'm not able to tap to select an attack"). The battle
 // menu only listened to keys/pads; bw_battle_tap now mirrors the
-// draw grid. Fresh buddy: 4 attacks in a 2x2 grid, box bh=84,
-// rstep=18, rows at y = 360-84+22 = 298 and 316.
+// draw grid. Grid geometry: box bh=84, rstep=18, rows at
+// y = 360-84+22 = 298 and 316; index = row*2 + col.
+// LOADOUT (F4 root cause, campaign resume wave): bw_battle_start
+// builds the grid as [mv0 basic] + [skill moves per skills bits]
+// + [consumables per items held] + [mv5 RUN AWAY]. A FRESH buddy
+// (buddy_adopt zeroes skills/items) therefore has exactly TWO
+// cells — basic and RUN AWAY — so the top-right tap (index 1) used
+// to pick RUN AWAY, whose 25% failure (bw_battle_pick mv5) leaves
+// foe hp and buddy energy unmoved: the registered F4 signature
+// ("70->70 / 100->100 / battle 1"). The suite now teaches move 2
+// (dbg_teach 1 — the bwtest idiom) before the battle, putting a
+// real attack (energy cost, damage mult 1.6) at index 1, so the
+// tapped-attack assertion tests an attack, deterministically.
 const { chromium } = require('playwright-core');
 const EXE = process.env.HOME + '/.cache/ms-playwright/chromium-1248/chrome-linux64/chrome';
 const sleep = ms => new Promise(r => setTimeout(r, ms));
@@ -31,6 +42,7 @@ function T(name, cond, extra) {
   await key('Space', 400);
   if ((await call('dbg_state')) !== 1) await key('Enter', 400);
   await call('dbg_adopt', 0);
+  await call('dbg_teach', 1);   // move 2: grid index 1 becomes an attack, not RUN AWAY (see header)
   await call('dbg_bwenter');
   T('inside Banzai World', (await call('dbg_bwstate')) === 1, await call('dbg_bwstate'));
   await call('dbg_setbudenergy', 100);

@@ -50,10 +50,18 @@ was rewritten to say so, trimmed to fit), and again for
 v1.19 ("BOOT CAMP" — every cabinet win pays the buddy XP,
 WAR! gains skirmish mode and roaming patcher buddies, and
 the fields run richer; the WAR! passage below grew again,
-trimmed elsewhere to fit). Character counts
+trimmed elsewhere to fit), and again for v1.25
+("FIRST SHIFT" — the combined feature release: the Mall
+grew to nine stops with a Trophy Case and its own Hat
+Portrait Booth, CASTLE gained Shuffle mode, ENTRANCES
+gained a second chapter, WAR! gained local two-commander
+co-op, Banzai World gained a post-game chapter, and the
+overworld gained day/night and regional weather; the Mall,
+Story and Arcade passages below grew to match, trimmed
+elsewhere to fit). Character counts
 verified against Play limits (title ≤ 30, short
 description ≤ 80, full description ≤ 4,000).
-Copy describes the current build (v1.19, 2026-11-17) and only what the Android
+Copy describes the current build (v1.25, 2026-11-20) and only what the Android
 build actually contains — no Whales Only purchase links (buying
 is web-only; the Android build has none), no host co-op claims
 (hosting is a native-build feature).
@@ -71,60 +79,66 @@ Squash bugs. Wear the evidence. Your carcass hat is your wallet.
 SQUASH BUGS. WEAR THE EVIDENCE.
 
 THE SURVIVAL GAME is a cartoony top-down survival game where the
-horde is made of software bugs — and every bug you squash lands on
-your head as a carcass.
+horde is software bugs — and every bug you squash lands on your
+head as a carcass.
 
 YOUR HAT IS YOUR WALLET
 Killed bugs stack up as a carcass hat, growing through tiers from
 BUG CAP to STACK OVERFLOW to THE LEGACY SYSTEM. A heavy hat is a
-rich hat — and a slow one. Haul it to the Bug Mall and cash in by
-weight at the shop counter, bank your carcasses at the Bug Bank,
+rich hat — and a slow one. Cash in by weight at the Bug Mall's
+shop counter, bank your carcasses at the Bug Bank,
 recruit a fighting companion at Banzai Buddies, or roll a game at
-Bug Bowl. Or throw carcasses down as walls — reinforce them into
-piles the swarm has to chew through one layer at a time.
+Bug Bowl. The Mall now runs nine stops: check your trophies at the
+Trophy Case, strike a pose at the Hat Portrait Booth, and take
+named-elite bounties from the Bounty Board. Or throw carcasses
+down as walls — reinforced piles the swarm chews through layer
+by layer.
 
 THE FURTHER OUT, THE BIGGER THEY GET
 Near the epicenter the bugs are few, tiny and slow — pocket change.
-Real money lives far from home: giants worth over 100 KG, dense
-swarms, and little bugs that suddenly run very fast. Difficulty
-scales from Easy to BUGAGGEDON — or take ZEN MODE, where every bug
-is gigantic and slow, and EDDIE MODE, where every bug is a fuzzy
-orange puffball.
+Real money lives far from home: giants worth over 100 KG and dense
+swarms. Difficulty scales from Easy to BUGAGGEDON — or take ZEN
+MODE, where every bug is gigantic and slow, and EDDIE MODE, where
+every bug is a fuzzy orange puffball.
 
 THREE WAYS TO PLAY
 • FREE PLAY — the endless procedural world, three save slots,
   weapon stacking and uncapped upgrades.
-• STORY MODE — Patch Village, the Ruined Server Farm, the Frozen
-  Lake, Zed's Compound and the Overgrown Ruins, with quests, bosses
-  and a proper ending to earn.
+• STORY MODE — five story places, with quests, bosses and a
+  proper ending to earn.
 • BANZAI WORLD — a second world reached through the Bug Mall's
-  torii gate, home to Story Mode and Free Play.
+  torii gate, home to Story Mode and Free Play. Finish the story
+  and a post-game chapter, The Rebuilding, opens with four more
+  quests.
 • THE ARCADE — a whole room off the Bug Mall with a cabinet per
   game: ENTRANCES, a spooky-but-friendly run through endless
-  doors; SUPER BUDDY RUN, a side-scrolling dash; BUDDY CRAFT, a
-  build-and-survive sandbox with day and night, crafting, fishing
-  and camping; and TANK RESCUE, where your buddy drives a tank
-  through scrolling battlefields, cracks open prison huts to free
-  captives, and takes on a fortress-core boss at the end of
-  every level — with switchable area-blast grenades; and CASTLE, a DOS-castle treasure hunt in the
-  spirit of the 1984 original — fetch the sword, brave the Dungeon for the key, gather 13 treasures, and escape; and SUPER BUDDY CART, a three-lap
+  doors, with a second chapter, Deeper Doors, and a lantern buddy
+  past the first clear; SUPER BUDDY RUN, a side-scrolling dash; BUDDY CRAFT, a
+  build-and-survive sandbox with crafting, fishing and camping; and TANK RESCUE, where your buddy drives a tank
+  through scrolling battlefields, frees captives from prison huts,
+  and takes on a fortress-core boss at the end of every level; and CASTLE, a DOS-castle treasure hunt in the
+  spirit of the 1984 original — fetch the sword, brave the Dungeon for the key, gather 13 treasures, and escape — then Shuffle mode re-deals the whole castle; and SUPER BUDDY CART, a three-lap
   kart racer in SNES Mode 7 style, viewed from right behind
-  your kart — and the driver in it is your own Banzai Buddy,
-  racing five rival buddies on a dressed circuit with boost
-  pads, drift mini-boosts, and a best finish and time with
-  your name on them; and WAR!, a real-time strategy game — harvest bits from code
+  your kart — the driver is your own Banzai Buddy, racing five
+  rivals with boost pads and drift mini-boosts; and WAR!, a real-time strategy game — harvest bits from code
 nodes, raise a Compiler Core base, train melee and ranged
 buddies, hold the line with zapper towers and firewalls,
 raze the bug hives, and conquer all eight regions of the
-world map — building on claimed land behind joined firewalls, with an Assembly Plant for scout buggies and siege tanks, under a fog
-of war that lifts as you explore and never falls again. And no two battles are alike: hives nest somewhere new every fight, debris scatters fresh, and indestructible barrier lines stand in new places with a gap in every one — your army pathfinds through, and so do the
-bugs. Trees, rocks and wrecked terminals can still be smashed flat. Battles pause and save mid-fight; queues stack nine deep; rally points aim troops; gates pass your army, not the bugs; roaming patcher buddies repair your buildings on their own; and skirmish mode deals a one-off battle on your choice of field and enemy, no campaign strings. Every cabinet win pays your buddy XP toward training and taught moves.
-  WAR! also takes gamepad orders — a stick-driven cursor, musters on double and triple presses, the command bar on the bumpers. And every cabinet has its own orchestra — Bumblebee for the Run, Valkyries for WAR!, Greensleeves in the Castle, the Mountain King in Entrances, the can-can for Tank Rescue, William Tell for the Cart, Sheep May Safely Graze for Buddy Craft.
+world map — building on claimed land behind joined firewalls, with an Assembly Plant for scout buggies and siege tanks, under a permanent fog of war. No two battles are alike: hives nest somewhere new every fight, debris scatters fresh, and barrier lines stand in new places with a gap in every one. Two local commanders can share one battle, one army and one purse. Battles pause and save mid-fight, and skirmish mode deals a one-off battle on your choice of field and enemy. Every cabinet win pays your buddy XP toward training and taught moves.
+  WAR! also takes gamepad orders. And every cabinet has its own orchestra — Bumblebee for the Run, Valkyries for WAR!, Greensleeves in the Castle, William Tell for the Cart.
+
+ALWAYS SOMETHING NEW ON THE BOARD
+A First Shift objective card starts every new save, cabinet wins
+chase Medal Times, a Weekly Challenge rotates in, and hat toppers
+crown your stack. The overworld follows your clock — dusk, night
+and dawn, with rain, snow and heat shimmer by region — and the
+music swells when bugs close in. Comfort settings cover volume,
+mute and screen shake.
 
 TOUCH-FIRST ON ANDROID
-Full touch controls (drag or floating stick), plus keyboard and
-gamepad support. The whole game is offline, collects no data, shows
-no ads, and asks for zero permissions.
+Full touch controls, plus keyboard and gamepad support. The
+whole game is offline, collects no data, shows no ads, and asks
+for zero permissions.
 
 How heavy can your hat get?
 
@@ -163,14 +177,14 @@ to show. Seven shots (Play allows 2–8), each exactly 1920×1080 PNG:
   The other six shots depict scenes v1.5 did not visibly change.
 - `assets/screenshot-02-combat.png` — Free Play combat in Clean Code
   Meadows wearing a 71 KG carcass hat, bugs engaged, buddy alongside.
-- `assets/screenshot-03-mall.png` — Bug Mall interior: Bug Bank,
-  Banzai Buddies, Bug Bowl and Whales Only stations, Banzai gate.
-  RECAPTURED 2026-11-10 from the v1.3 Arcade build (same framing
-  and 100 KG hat as the Nov 9 original, via
-  `tests/playmallshot.js`): the mall's east-wall Arcade entrance
-  (sign + violet mat) is now visible at the right edge. Visually
-  verified. The other six scenes are unchanged by the Nov 10
-  build.
+- `assets/screenshot-03-mall.png` — Bug Mall interior: the
+  enlarged nine-stop Mall — Photo Booth island, Bounty Board,
+  Bug Bowl and Challenge Board, First Shift card at the foot.
+  RECAPTURED 2026-11-20 from the shipped v1.25 build (via
+  `tests/playmallshot.js`, run solo — never alongside another
+  Chromium suite): the 768×402 interior with its "NINE FINE
+  STOPS" header. Visually verified. Supersedes the v1.3
+  capture of the old 568×322 Mall.
 - `assets/screenshot-04-wall.png` — a wall run whose west end is a
   5-layer reinforced pile, visibly heaped above the single walls
   (the Nov 7 stacking build; the pile's courses show, though the

@@ -150,6 +150,13 @@ static int keycode_pk(unsigned short kc){
         case 53: return 42;                                         // Escape
         case 56: case 60: return 43;                                // Shift keys
         case 51: return 44;                                         // Delete (backspace)
+        case 48: return 45;                                         // Tab (v1.26: source editor)
+        case 117: return 46;                                        // Forward Delete
+        case 115: return 47;                                        // Home
+        case 119: return 48;                                        // End
+        case 116: return 49;                                        // Page Up
+        case 121: return 50;                                        // Page Down
+        case 59: case 62: return 51;                                // Control keys
     }
     return -1;
 }

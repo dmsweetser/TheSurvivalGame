@@ -184,7 +184,16 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   await page.reload({ waitUntil: 'load' });
   await page.waitForFunction(() => window.__TSG && window.__TSG.dbg_state() === 0, null, { timeout: 20000 });
   ok((await call('dbg_mzen')) === 0, 'E: Zen preference starts off');
-  const mcount = await call('dbg_menucount');
+  // boot-settle (campaign resume wave; the Nov 19 trophycasetest
+  // triage's standing rule): the wasm exports answer before
+  // game_init's first frame, so a bare menucount read can catch
+  // the zeroed-state transient (a NO-save 6-row title) even with
+  // saves in every slot — this suite's battery-only 71/1 face.
+  // Poll until two reads 300ms apart agree, then assert the same
+  // >= 7 below. Assertion strength unchanged.
+  let mcount = await call('dbg_menucount');
+  { const t0 = Date.now();
+    while (Date.now() - t0 < 15000) { await sleep(300); const v = await call('dbg_menucount'); if (v === mcount) break; mcount = v; } }
   const msel0 = await call('dbg_menusel');
   const zenRow = 5;   // has_save title rows: CONTINUE, START, HOW TO, SETTINGS, DIFFICULTY, ZEN, EDDIE (a co-op row, when shown, appends after EDDIE)
   ok(mcount >= 7, 'E: title shows the full row set', mcount);

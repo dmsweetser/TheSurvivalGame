@@ -7,6 +7,7 @@
 # build intermediates and outputs
 src/*.wasm
 src/webbuild.h
+src/src_embed.h
 android/build/
 android/build-aab/
 android/aab-logs/

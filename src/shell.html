@@ -118,6 +118,32 @@ function js_load(slot, ptr, cap){
     return n;
   }catch(e){ return -1; }
 }
+// THE SOURCE ROOM (v1.26): edited source files persist as
+// localStorage keys 'tsgmod:<src-relative path>' — the web half of
+// the plat_mod_* overlay (the native builds keep real files).
+function js_mod_save(path_ptr, ptr, len){
+  if (!len){ try{ localStorage.removeItem('tsgmod:' + read_str(path_ptr)); }catch(e){} return; }   // an empty overlay is no overlay
+  try{ localStorage.setItem('tsgmod:' + read_str(path_ptr), new TextDecoder().decode(new Uint8Array(MEM.buffer, ptr, len))); }catch(e){}
+}
+function js_mod_load(path_ptr, ptr, cap){
+  try{
+    const s = localStorage.getItem('tsgmod:' + read_str(path_ptr)); if (s===null || s===undefined) return -1;
+    const u = new TextEncoder().encode(s);
+    const n = Math.min(u.length, cap);
+    new Uint8Array(MEM.buffer, ptr, n).set(u.subarray(0,n));
+    return n;
+  }catch(e){ return -1; }
+}
+function js_mod_clear(){
+  try{
+    const dead = [];
+    for (let i=0;i<localStorage.length;i++){ const k = localStorage.key(i); if (k && k.indexOf('tsgmod:')===0) dead.push(k); }
+    for (const k of dead) localStorage.removeItem(k);
+  }catch(e){}
+}
+function js_mod_exists(path_ptr){
+  try{ return localStorage.getItem('tsgmod:' + read_str(path_ptr))!==null? 1 : 0; }catch(e){ return 0; }
+}
 
 // ---------- networking over the LAN relay (see server.js) ----------
 // Relay framing: client->relay raw; relay->host [srcId, ...pkt];
@@ -201,6 +227,11 @@ function pk_from_event(e){
     case 'ArrowLeft': return 38; case 'ArrowRight': return 39;
     case 'Space': return 40; case 'Enter': return 41; case 'Escape': return 42;
     case 'ShiftLeft': case 'ShiftRight': return 43; case 'Backspace': return 44;
+    // v1.26: the source editor's keys (PK_TAB..PK_CTRL = 45..51)
+    case 'Tab': return 45; case 'Delete': return 46;
+    case 'Home': return 47; case 'End': return 48;
+    case 'PageUp': return 49; case 'PageDown': return 50;
+    case 'ControlLeft': case 'ControlRight': return 51;
   }
   // fallback for environments that report no useful code (some emulator
   // browsers): go by the key value alone
@@ -216,6 +247,10 @@ function pk_from_event(e){
     case 'ArrowLeft': return 38; case 'ArrowRight': return 39;
     case 'Enter': return 41; case 'Escape': case 'Esc': return 42;
     case 'Shift': return 43; case 'Backspace': return 44;
+    case 'Tab': return 45; case 'Delete': return 46;
+    case 'Home': return 47; case 'End': return 48;
+    case 'PageUp': return 49; case 'PageDown': return 50;
+    case 'Control': return 51;
   }
   return -1;
 }
@@ -241,8 +276,12 @@ addEventListener('keydown', (e)=>{
     return;
   }
   // printable characters are typed text: the menu's name field reads them
-  // when selected; gameplay ignores them entirely.
-  if (e.key && e.key.length===1 && e.code!=='Space') EX.evt_char(e.key.charCodeAt(0));
+  // when selected; gameplay ignores them entirely. A Ctrl/Cmd chord is
+  // NOT typing (v1.26: Ctrl+S in the source editor must save the file,
+  // not type an 's' into it) — and Ctrl+S is claimed here so the
+  // browser's own save dialog never opens over the game.
+  if ((e.ctrlKey || e.metaKey) && (e.code==='KeyS')) e.preventDefault();
+  if (e.key && e.key.length===1 && e.code!=='Space' && !e.ctrlKey && !e.metaKey) EX.evt_char(e.key.charCodeAt(0));
   const pk = pk_from_event(e);
   if (pk>=0){
     // one edge per physical press: a press counts when the key was up —
@@ -696,6 +735,7 @@ async function boot(){
     js_daynum: ()=>{ const d=new Date(); return Math.floor(Date.UTC(d.getFullYear(), d.getMonth(), d.getDate())/86400000); },
     js_minutes: ()=>{ const d=new Date(); return d.getHours()*60 + d.getMinutes() + d.getSeconds()/60 + d.getMilliseconds()/60000; },
     js_note, js_save, js_load,
+    js_mod_save, js_mod_load, js_mod_clear, js_mod_exists,
     js_net_start, js_net_stop, js_net_send, js_net_recv, js_net_src,
     js_open_url, js_whale_poll,
   };

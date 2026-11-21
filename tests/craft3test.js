@@ -95,8 +95,17 @@ function T(name, cond, extra) { if (cond) { pass++; } else { fail++; console.log
     }
   }
   T('found a shoreline', !!water, water && (water.tx + ',' + water.ty));
+  if (!water) {
+    // F5 crash-mode guard (campaign resume wave): a seed with no
+    // shoreline in the scanned country used to abort the whole
+    // suite on the shore deref below. Record the water-dependent
+    // checks as failed (same names, same count) and skip their
+    // choreography instead — the run still fails, informatively.
+    for (const nm of ['facing the water', 'fishing yields (fiber, shell, or fish)', 'a lake fish in the pack', 'dock built on the water', 'dock is kind 7', 'buddy stands on the dock tile', 'a shark finds the raft', 'the shark BITES (hp drops)']) T(nm, false, 'no shoreline');
+  }
   // standing on the shore tile (water + offset), face back INTO the water
-  const faceKey = shore.dx === 1 ? 'ArrowLeft' : shore.dx === -1 ? 'ArrowRight' : shore.dy === 1 ? 'ArrowUp' : 'ArrowDown';
+  const faceKey = !water ? 'ArrowLeft' : shore.dx === 1 ? 'ArrowLeft' : shore.dx === -1 ? 'ArrowRight' : shore.dy === 1 ? 'ArrowUp' : 'ArrowDown';
+  if (water) {
   // face the water — and PROVE it: the tile ahead must be water biome
   // before any casting, or the E presses just gather a bush somewhere.
   const fOff = faceKey === 'ArrowLeft' ? [-1, 0] : faceKey === 'ArrowRight' ? [1, 0] : faceKey === 'ArrowUp' ? [0, -1] : [0, 1];
@@ -139,6 +148,7 @@ function T(name, cond, extra) { if (cond) { pass++; } else { fail++; console.log
   }
   const bx = await call('dbg_bwx'), by = await call('dbg_bwy');
   T('buddy stands on the dock tile', onDock, bx + ',' + by);
+  }   // end if (water): fishing + dock
 
   // --- back at the clearing: campfire, raft, sail ---
   await call('dbg_bwtp', 0, 56); await sleep(300);
@@ -152,6 +162,7 @@ function T(name, cond, extra) { if (cond) { pass++; } else { fail++; console.log
   await closeMenu();
 
   // --- sharks: take the raft out and wait for teeth ---
+  if (water) {
   await call('dbg_bwtp', water.tx * 48 + 24, water.ty * 48 + 24); await sleep(400);
   const hpFull = await call('dbg_buddyhp');
   let sharks = await poll('dbg_craftsharks', v => v >= 1, 16000);
@@ -168,6 +179,7 @@ function T(name, cond, extra) { if (cond) { pass++; } else { fail++; console.log
   T('a shark finds the raft', sharks >= 1, sharks);
   const hpAfter = await poll('dbg_buddyhp', v => v < hpFull, 25000);
   T('the shark BITES (hp drops)', hpAfter < hpFull, hpFull + ' -> ' + hpAfter);
+  }   // end if (water): sharks
 
   // --- the bedroll nap: time passes, the night does not skip ---
   // stance notes: (1) aimAt's key-hold WALKS the buddy (headless dt
@@ -183,41 +195,85 @@ function T(name, cond, extra) { if (cond) { pass++; } else { fail++; console.log
   // failures, Nov 6). Scan for a stance like the fishing section does:
   // land, with a clear land tile to the WEST, well west of the campfire
   // (a fire within 84px outranks the bedroll in the rest chain).
+  // stance, FOURTH version (campaign resume wave — F5 root-caused
+  // by probe, tests/campaign-probe-f5.js, 6 worlds): the game's
+  // placement refuses when the builder stands <23px from the
+  // target tile (craft.c), and a tile CENTRE is exactly 24px from
+  // the aimed tile's edge — a 1px margin. The buddy's post-teleport
+  // slide (a few px toward his aim; more under load) eats it whole:
+  // the probe measured drift -3px -> placement refused, 0px ->
+  // placed, on clean stance tiles. craftRow's retries never
+  // re-stand, so one slide refused all three attempts (the battery
+  // face: "bedroll placed" + the nap cascade). The probe also
+  // caught craft.c's backstop shoving the buddy 40px out of a
+  // stance tile holding a SOLID node (kinds 1-3 are solid;
+  // craft_solid_at) — clean onto the wrong target tile; the old
+  // scan never checked the stance tile itself. Fix, assertions
+  // unchanged: stance tile must be node-free too, the scan window
+  // widens, the stand point is 12px off-centre AWAY from the
+  // target tile (36px clearance), and each candidate is
+  // settle-verified (>=26px from the target edge after 600ms)
+  // before the menu opens; a candidate that fails the settle
+  // falls through to the next.
   let stance = null;
-  for (let tx = -14; tx < -3 && !stance; tx++) for (let ty = -4; ty < 6 && !stance; ty++) {
+  const stanceCands = [];
+  for (let tx = -20; tx < -3; tx++) for (let ty = -8; ty < 10; ty++) {
     if ((await call('dbg_craftbiome', tx, ty)) !== 5 && (await call('dbg_craftbiome', tx - 1, ty)) !== 5 &&
-        (await call('dbg_craftnode', tx - 1, ty)) === 0) stance = { tx, ty };
+        (await call('dbg_craftnode', tx - 1, ty)) === 0 && (await call('dbg_craftnode', tx, ty)) === 0)
+      stanceCands.push({ tx, ty });
+  }
+  await aimAt('W');
+  for (const c of stanceCands) {
+    await call('dbg_bwtp', c.tx * 48 + 36, c.ty * 48 + 24); await sleep(600);
+    if ((await call('dbg_bwx')) >= c.tx * 48 + 26) { stance = c; break; }
   }
   T('found a bedroll stance', !!stance, stance && (stance.tx + ',' + stance.ty));
-  await aimAt('W');
-  await call('dbg_bwtp', stance.tx * 48 + 24, stance.ty * 48 + 24); await sleep(200);
-  const builds1 = await call('dbg_craftbuilds');
-  await openMenu();
-  await craftRow(22, async () => (await call('dbg_craftbuilds')) === builds1 + 1);   // BEDROLL
-  T('bedroll placed', (await call('dbg_craftbuilds')) === builds1 + 1, await call('dbg_craftbuilds'));
-  await closeMenu();
-  await call('dbg_craftsettod', 200);
-  await key('KeyE', 250);
-  const todNap = await poll('dbg_crafttod', v => v > 20 && v < 120, 9000);
-  T('nap wakes mid-morning (tod ~50, not dawn-skipped)', todNap > 20 && todNap < 120, todNap);
+  if (stance) {
+    const builds1 = await call('dbg_craftbuilds');
+    await openMenu();
+    await craftRow(22, async () => (await call('dbg_craftbuilds')) === builds1 + 1);   // BEDROLL
+    T('bedroll placed', (await call('dbg_craftbuilds')) === builds1 + 1, await call('dbg_craftbuilds'));
+    await closeMenu();
+    await call('dbg_craftsettod', 200);
+    await key('KeyE', 250);
+    const todNap = await poll('dbg_crafttod', v => v > 20 && v < 120, 9000);
+    T('nap wakes mid-morning (tod ~50, not dawn-skipped)', todNap > 20 && todNap < 120, todNap);
+  } else {
+    T('bedroll placed', false, 'no stance');
+    T('nap wakes mid-morning (tod ~50, not dawn-skipped)', false, 'no stance');
+  }
 
   // --- the scarecrow stands watch (DEFENSE) ---
   // the scarecrow gets the same adaptive treatment, east side: land
   // with a clear land tile to the EAST, clear of bedroll and fire.
+  // same fourth-version treatment as the bedroll (see above):
+  // node-free stance tile, widened window, stand 12px off-centre
+  // away from the EAST target tile, settle-verified >=26px from
+  // the target edge before the menu opens.
   let stance2 = null;
-  for (let tx = 4; tx < 14 && !stance2; tx++) for (let ty = -4; ty < 6 && !stance2; ty++) {
+  const stance2Cands = [];
+  for (let tx = 4; tx < 20; tx++) for (let ty = -8; ty < 10; ty++) {
     if ((await call('dbg_craftbiome', tx, ty)) !== 5 && (await call('dbg_craftbiome', tx + 1, ty)) !== 5 &&
-        (await call('dbg_craftnode', tx + 1, ty)) === 0) stance2 = { tx, ty };
+        (await call('dbg_craftnode', tx + 1, ty)) === 0 && (await call('dbg_craftnode', tx, ty)) === 0)
+      stance2Cands.push({ tx, ty });
+  }
+  await aimAt('E');
+  for (const c of stance2Cands) {
+    await call('dbg_bwtp', c.tx * 48 + 12, c.ty * 48 + 24); await sleep(600);
+    if ((await call('dbg_bwx')) <= c.tx * 48 + 22) { stance2 = c; break; }
   }
   T('found a scarecrow stance', !!stance2, stance2 && (stance2.tx + ',' + stance2.ty));
-  await aimAt('E');
-  await call('dbg_bwtp', stance2.tx * 48 + 24, stance2.ty * 48 + 24); await sleep(200);
-  const builds2 = await call('dbg_craftbuilds');
-  await openMenu();
-  await craftRow(27, async () => (await call('dbg_craftbuilds')) === builds2 + 1);   // SCARECROW
-  T('scarecrow built', (await call('dbg_craftbuilds')) === builds2 + 1, await call('dbg_craftbuilds'));
-  T('scarecrow is kind 9', (await call('dbg_craftbuildk', builds2)) === 9, await call('dbg_craftbuildk', builds2));
-  await closeMenu();
+  if (stance2) {
+    const builds2 = await call('dbg_craftbuilds');
+    await openMenu();
+    await craftRow(27, async () => (await call('dbg_craftbuilds')) === builds2 + 1);   // SCARECROW
+    T('scarecrow built', (await call('dbg_craftbuilds')) === builds2 + 1, await call('dbg_craftbuilds'));
+    T('scarecrow is kind 9', (await call('dbg_craftbuildk', builds2)) === 9, await call('dbg_craftbuildk', builds2));
+    await closeMenu();
+  } else {
+    T('scarecrow built', false, 'no stance');
+    T('scarecrow is kind 9', false, 'no stance');
+  }
 
   console.log('craft3test: ' + pass + ' passed, ' + fail + ' failed');
   await browser.close();

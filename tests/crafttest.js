@@ -31,12 +31,25 @@ function T(name, cond, extra) { if (cond) { pass++; } else { fail++; console.log
   T('entered BUDDY CRAFT (mode 4)', (await poll('dbg_bwmode', v => v === 4)) === 4, await call('dbg_bwmode'));
   T('pack starts empty', (await call('dbg_craftmat')) === 0 && (await call('dbg_craftcar')) === 0);
 
-  // find a tree in the endless wild and stand west of it
+  // find a tree in the endless wild and stand west of it.
+  // F6 fix (campaign resume wave): the world seed is wall-clock, so
+  // the first-found tree used to be a lottery — a shoreline tree
+  // whose WEST tile is water (or holds a solid node) can never be
+  // gathered from the west: the teleport lands in a solid tile and
+  // craft.c's backstop shoves the buddy out at a random edge, and
+  // the eastward walk stops at the water/node boundary, never
+  // adjacent to the tree. The choreography below silently assumes
+  // a standable west approach, so the scan now requires it, using
+  // the game's own solidity (craft_solid_at: water is solid
+  // without a raft; node kinds 1-3 are solid, kind 4 is not).
+  // Assertions unchanged.
   let tree = null;
   for (let r = 3; r <= 16 && !tree; r++)
     for (let tx = -r; tx <= r && !tree; tx++)
       for (let ty = -r; ty <= r && !tree; ty++)
-        if ((await call('dbg_craftnode', tx, ty)) === 1) tree = [tx, ty];
+        if ((await call('dbg_craftnode', tx, ty)) === 1 &&
+            (await call('dbg_craftbiome', tx - 1, ty)) !== 5 &&
+            [0, 4].includes(await call('dbg_craftnode', tx - 1, ty))) tree = [tx, ty];
   T('the wild grows trees', !!tree, tree);
   if (tree) {
     await call('dbg_bwtp', tree[0] * 48 + 24 - 62, tree[1] * 48 + 24);
