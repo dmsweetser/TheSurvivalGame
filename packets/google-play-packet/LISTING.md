@@ -58,10 +58,20 @@ gained a second chapter, WAR! gained local two-commander
 co-op, Banzai World gained a post-game chapter, and the
 overworld gained day/night and regional weather; the Mall,
 Story and Arcade passages below grew to match, trimmed
+elsewhere to fit), and again for v1.26
+("ROOT ACCESS" — the Mall gained a tenth stop, THE
+SOURCE: a door on the north wall, sealed until three
+Trophy Case trophies are earned, opening onto a
+terminal where you browse and edit the game's own
+source and live-tune its design values, your changes
+persisting — the copy claims only those Android-true
+parts, never the native host app's rebuild; Banzai
+World's Start menu now answers to touch as well; the
+Mall and touch passages below grew to match, trimmed
 elsewhere to fit). Character counts
 verified against Play limits (title ≤ 30, short
 description ≤ 80, full description ≤ 4,000).
-Copy describes the current build (v1.25, 2026-11-20) and only what the Android
+Copy describes the current build (v1.26, 2026-11-21) and only what the Android
 build actually contains — no Whales Only purchase links (buying
 is web-only; the Android build has none), no host co-op claims
 (hosting is a native-build feature).
@@ -79,18 +89,21 @@ Squash bugs. Wear the evidence. Your carcass hat is your wallet.
 SQUASH BUGS. WEAR THE EVIDENCE.
 
 THE SURVIVAL GAME is a cartoony top-down survival game where the
-horde is software bugs — and every bug you squash lands on your
-head as a carcass.
+horde is software bugs — and every bug you squash lands on
+your head as a carcass.
 
 YOUR HAT IS YOUR WALLET
 Killed bugs stack up as a carcass hat, growing through tiers from
 BUG CAP to STACK OVERFLOW to THE LEGACY SYSTEM. A heavy hat is a
 rich hat — and a slow one. Cash in by weight at the Bug Mall's
 shop counter, bank your carcasses at the Bug Bank,
-recruit a fighting companion at Banzai Buddies, or roll a game at
-Bug Bowl. The Mall now runs nine stops: check your trophies at the
+recruit a companion at Banzai Buddies, or roll a game at
+Bug Bowl. The Mall now runs ten stops: check your trophies at the
 Trophy Case, strike a pose at the Hat Portrait Booth, and take
-named-elite bounties from the Bounty Board. Or throw carcasses
+named-elite bounties from the Bounty Board. Earn three trophies
+and the tenth door opens: the Source Room, whose terminal lets
+you browse and edit the game's source code and live-tune
+its design values — and changes persist. Or throw carcasses
 down as walls — reinforced piles the swarm chews through layer
 by layer.
 
@@ -104,39 +117,39 @@ every bug is a fuzzy orange puffball.
 THREE WAYS TO PLAY
 • FREE PLAY — the endless procedural world, three save slots,
   weapon stacking and uncapped upgrades.
-• STORY MODE — five story places, with quests, bosses and a
-  proper ending to earn.
-• BANZAI WORLD — a second world reached through the Bug Mall's
+• STORY MODE — five story places, with quests, bosses and an
+  ending.
+• BANZAI WORLD — a second world reached through the Mall's
   torii gate, home to Story Mode and Free Play. Finish the story
-  and a post-game chapter, The Rebuilding, opens with four more
-  quests.
-• THE ARCADE — a whole room off the Bug Mall with a cabinet per
+  and a post-game chapter, The Rebuilding, opens.
+• THE ARCADE — a room off the Bug Mall with a cabinet per
   game: ENTRANCES, a spooky-but-friendly run through endless
   doors, with a second chapter, Deeper Doors, and a lantern buddy
   past the first clear; SUPER BUDDY RUN, a side-scrolling dash; BUDDY CRAFT, a
   build-and-survive sandbox with crafting, fishing and camping; and TANK RESCUE, where your buddy drives a tank
   through scrolling battlefields, frees captives from prison huts,
   and takes on a fortress-core boss at the end of every level; and CASTLE, a DOS-castle treasure hunt in the
-  spirit of the 1984 original — fetch the sword, brave the Dungeon for the key, gather 13 treasures, and escape — then Shuffle mode re-deals the whole castle; and SUPER BUDDY CART, a three-lap
-  kart racer in SNES Mode 7 style, viewed from right behind
+  spirit of the 1984 original — fetch the sword, brave the Dungeon for the key, gather 13 treasures, and escape — then Shuffle mode re-deals the castle; and SUPER BUDDY CART, a three-lap
+  kart racer in SNES Mode 7 style, viewed from behind
   your kart — the driver is your own Banzai Buddy, racing five
   rivals with boost pads and drift mini-boosts; and WAR!, a real-time strategy game — harvest bits from code
 nodes, raise a Compiler Core base, train melee and ranged
 buddies, hold the line with zapper towers and firewalls,
 raze the bug hives, and conquer all eight regions of the
-world map — building on claimed land behind joined firewalls, with an Assembly Plant for scout buggies and siege tanks, under a permanent fog of war. No two battles are alike: hives nest somewhere new every fight, debris scatters fresh, and barrier lines stand in new places with a gap in every one. Two local commanders can share one battle, one army and one purse. Battles pause and save mid-fight, and skirmish mode deals a one-off battle on your choice of field and enemy. Every cabinet win pays your buddy XP toward training and taught moves.
-  WAR! also takes gamepad orders. And every cabinet has its own orchestra — Bumblebee for the Run, Valkyries for WAR!, Greensleeves in the Castle, William Tell for the Cart.
+world map — building behind joined firewalls, with an Assembly Plant for scout buggies and siege tanks, under permanent fog of war. No two battles alike: hives, debris and barrier lines are dealt fresh every fight. Two local commanders can share one battle, one army and one purse. Battles pause and save mid-fight, and skirmish mode deals a one-off battle on your choice of field and enemy. Every cabinet win pays your buddy XP toward training and taught moves.
+  Every cabinet has its own orchestra — Bumblebee for the Run, Valkyries for WAR!, Greensleeves in the Castle, William Tell for the Cart.
 
 ALWAYS SOMETHING NEW ON THE BOARD
 A First Shift objective card starts every new save, cabinet wins
-chase Medal Times, a Weekly Challenge rotates in, and hat toppers
+chase Medal Times, a Weekly Challenge rotates, and hat toppers
 crown your stack. The overworld follows your clock — dusk, night
-and dawn, with rain, snow and heat shimmer by region — and the
-music swells when bugs close in. Comfort settings cover volume,
+and dawn, with regional weather — and the music swells when
+bugs close in. Comfort settings cover volume,
 mute and screen shake.
 
 TOUCH-FIRST ON ANDROID
-Full touch controls, plus keyboard and gamepad support. The
+Full touch controls — Banzai World's Start menu
+included — plus keyboard and gamepad support. The
 whole game is offline, collects no data, shows no ads, and asks
 for zero permissions.
 
@@ -178,13 +191,19 @@ to show. Seven shots (Play allows 2–8), each exactly 1920×1080 PNG:
 - `assets/screenshot-02-combat.png` — Free Play combat in Clean Code
   Meadows wearing a 71 KG carcass hat, bugs engaged, buddy alongside.
 - `assets/screenshot-03-mall.png` — Bug Mall interior: the
-  enlarged nine-stop Mall — Photo Booth island, Bounty Board,
-  Bug Bowl and Challenge Board, First Shift card at the foot.
-  RECAPTURED 2026-11-20 from the shipped v1.25 build (via
-  `tests/playmallshot.js`, run solo — never alongside another
-  Chromium suite): the 768×402 interior with its "NINE FINE
-  STOPS" header. Visually verified. Supersedes the v1.3
-  capture of the old 568×322 Mall.
+  north wall of the enlarged Mall — THE COUNTER and WHALES
+  ONLY flanking the Source Room's sealed door (plaque
+  "SEALED 1/3" and the prompt line "THE SOURCE - SEALED -
+  TROPHIES 1/3" both readable), Photo Booth island and
+  Bounty Board below, First Shift card at the foot.
+  RECAPTURED 2026-11-21 from the shipped v1.26 build (via
+  a `tests/playmallshot.js` variant framed on the north
+  wall, run solo — never alongside another Chromium
+  suite; no hat feed — the carcass tower hides the door).
+  Visually verified. Supersedes the v1.25 capture. Note:
+  the in-game header still reads "NINE FINE STOPS" in
+  v1.26 though the Mall now has ten stops — a game-side
+  string, not a capture error.
 - `assets/screenshot-04-wall.png` — a wall run whose west end is a
   5-layer reinforced pile, visibly heaped above the single walls
   (the Nov 7 stacking build; the pile's courses show, though the

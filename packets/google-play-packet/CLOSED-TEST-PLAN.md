@@ -56,8 +56,11 @@ Grace Church / co-op contacts.
 7. Create the app in Console, paste LISTING.md copy + assets,
    answer forms from FORMS.md, host PRIVACY-POLICY.md and paste
    its URL.
-8. Recapture phone screenshots from the current build
-   (see LISTING.md — all existing captures are stale).
+8. Phone screenshots: DONE for the current build — all seven
+   captures in `assets/` are current as of the v1.5 build (v1.6 changed the Arcade interior and added the kart, and v1.7 rebuilt the kart view and Tank Rescue — neither is depicted in a shot; the title and mall shots are unaffected; v1.8/v1.9 only renumbered the v1.7 build, changing no scene; v1.10 changed the kart race's controls and visuals — still not depicted in any shot; v1.11 changed the Run's level themes, the kart format and CASTLE's exit rule — none depicted in a shot either; v1.12 changed the Run's speed and touch layout, the kart grandstand's size and placement, and the wall health bookkeeping — also none depicted in a shot; v1.13 expanded the Arcade room for a seventh cabinet, WAR!, and added its battles — the Arcade interior is not depicted in a shot either; v1.14 changed WAR!'s battles — property-line building, terrain, connected firewalls, vehicles, fog of war, grab-the-world panning — none depicted in a shot)
+   (title shot recaptured 2026-11-14; see LISTING.md). Only
+   re-check this step if a later build visibly changes a
+   depicted scene.
 9. Upload the AAB to the **closed testing** track, add tester
    emails, send opt-in links.
 10. **Day 0 = the day the 12th tester opts in.** Track opt-ins

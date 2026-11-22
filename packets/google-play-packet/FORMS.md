@@ -1,8 +1,10 @@
 # Google Play Console forms — pre-answered for The Survival Game
 
 Prepared 2026-11-07 from the verified properties of the Android
-build (AAB target API 36, game HTML byte-identical to the itch
-build, checked Nov 7). Every answer below is a fact about the build,
+build (AAB target API 36, game HTML byte-identical to the web
+build, checked Nov 7; re-verified against the v1.14 AAB
+2026-11-16 — byte-identical to the GitHub v1.14 release AAB,
+versionCode 14 / versionName "1.14"). Every answer below is a fact about the build,
 not a guess — re-verify only if the build changes.
 
 ## Data safety
@@ -44,7 +46,7 @@ not a guess — re-verify only if the build changes.
 - Recommending **13+**: declaring an under-13 audience pulls the app
   into Google Play's Families policies (teacher-approved-style
   review, stricter ads/design rules) even though the game itself is
-  kid-friendly. His own kids play via itch/Fire regardless of what
+  kid-friendly. His own kids play via GitHub Pages/Fire regardless of what
   the Play listing declares. If Daniel would rather declare a
   younger audience, the forms need a second pass — don't submit on
   the 13+ answer without his word.
@@ -54,8 +56,8 @@ not a guess — re-verify only if the build changes.
 Play expects a privacy policy URL on the listing. `PRIVACY-POLICY.md`
 in this packet is a complete, accurate policy (it can be this short
 *because* the app collects nothing). It still needs a public URL —
-host it as a static page (the itch project page, a devlog page, or
-any free static host) at submission time and paste the URL into
+host it as a static page (the game's GitHub Pages homepage, a
+devlog page, or any free static host) at submission time and paste the URL into
 Console. No account or signup is needed to prepare the text.
 
 ## Pricing — DANIEL'S DECISION (open)
