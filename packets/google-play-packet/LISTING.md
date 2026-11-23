@@ -68,10 +68,33 @@ persisting — the copy claims only those Android-true
 parts, never the native host app's rebuild; Banzai
 World's Start menu now answers to touch as well; the
 Mall and touch passages below grew to match, trimmed
-elsewhere to fit). Character counts
+elsewhere to fit), and again for v1.27
+("TOUCH & GO" — the Source Room terminal wraps its text
+and takes full touch editing: drag-scroll, tap-to-open,
+tap-to-place, on-screen keyboard, changes persisting;
+WAR! fields roll wilder, its cabinet was raised and its
+SKIRMISH button answers touch; the Run's jump grew; TANK
+RESCUE gained medkits and a grenade launcher; the Cart
+got a dressing pass and its medals went podium-only; the
+touch passage below grew to match, trimmed elsewhere to
+fit), and again for v1.28
+("THERE AND BACK AGAIN" — an eighth Arcade cabinet,
+MORDOR FUN RUN: a top-down road from the Shire to the
+Black Gate measured in moose — 1,000 of them — with
+real-time fights against goblins, wolves, spiders and
+orcs, a milestone banked every 50 moose, and a run that
+saves and resumes at the exact spot; the Arcade list
+below grew to match, trimmed elsewhere to fit), and
+again for v1.29
+("ON THE BUTTON" — the Mordor swing answers the fire
+button only, never a held direction; the road gained
+powerups — health first and early, double damage,
+speed; and a WAR! skirmish in progress now saves and
+resumes like a campaign; the Mordor and WAR! passages
+below grew to match, trimmed elsewhere to fit). Character counts
 verified against Play limits (title ≤ 30, short
 description ≤ 80, full description ≤ 4,000).
-Copy describes the current build (v1.26, 2026-11-21) and only what the Android
+Copy describes the current build (v1.29, 2026-11-23) and only what the Android
 build actually contains — no Whales Only purchase links (buying
 is web-only; the Android build has none), no host co-op claims
 (hosting is a native-build feature).
@@ -95,17 +118,9 @@ your head as a carcass.
 YOUR HAT IS YOUR WALLET
 Killed bugs stack up as a carcass hat, growing through tiers from
 BUG CAP to STACK OVERFLOW to THE LEGACY SYSTEM. A heavy hat is a
-rich hat — and a slow one. Cash in by weight at the Bug Mall's
-shop counter, bank your carcasses at the Bug Bank,
+rich hat — and a slow one. Cash in by weight at the Bug Mall, bank carcasses at the Bug Bank,
 recruit a companion at Banzai Buddies, or roll a game at
-Bug Bowl. The Mall now runs ten stops: check your trophies at the
-Trophy Case, strike a pose at the Hat Portrait Booth, and take
-named-elite bounties from the Bounty Board. Earn three trophies
-and the tenth door opens: the Source Room, whose terminal lets
-you browse and edit the game's source code and live-tune
-its design values — and changes persist. Or throw carcasses
-down as walls — reinforced piles the swarm chews through layer
-by layer.
+Bug Bowl. The Mall now runs ten stops — Trophy Case, Hat Portrait Booth, Bounty Board of named-elite hunts. Earn three trophies and the tenth door opens — the Source Room, where a terminal lets you browse and edit the game's own source and live-tune its design values, changes persisting. Or throw carcasses down as reinforced walls the swarm chews through layer by layer.
 
 THE FURTHER OUT, THE BIGGER THEY GET
 Near the epicenter the bugs are few, tiny and slow — pocket change.
@@ -124,23 +139,13 @@ THREE WAYS TO PLAY
   and a post-game chapter, The Rebuilding, opens.
 • THE ARCADE — a room off the Bug Mall with a cabinet per
   game: ENTRANCES, a spooky-but-friendly run through endless
-  doors, with a second chapter, Deeper Doors, and a lantern buddy
-  past the first clear; SUPER BUDDY RUN, a side-scrolling dash; BUDDY CRAFT, a
+  doors, with a second chapter and a lantern buddy past the first clear; SUPER BUDDY RUN, a side-scrolling dash; BUDDY CRAFT, a
   build-and-survive sandbox with crafting, fishing and camping; and TANK RESCUE, where your buddy drives a tank
-  through scrolling battlefields, frees captives from prison huts,
-  and takes on a fortress-core boss at the end of every level; and CASTLE, a DOS-castle treasure hunt in the
-  spirit of the 1984 original — fetch the sword, brave the Dungeon for the key, gather 13 treasures, and escape — then Shuffle mode re-deals the castle; and SUPER BUDDY CART, a three-lap
-  kart racer in SNES Mode 7 style, viewed from behind
-  your kart — the driver is your own Banzai Buddy, racing five
-  rivals with boost pads and drift mini-boosts; and WAR!, a real-time strategy game — harvest bits from code
-nodes, raise a Compiler Core base, train melee and ranged
-buddies, hold the line with zapper towers and firewalls,
-raze the bug hives, and conquer all eight regions of the
-world map — building behind joined firewalls, with an Assembly Plant for scout buggies and siege tanks, under permanent fog of war. No two battles alike: hives, debris and barrier lines are dealt fresh every fight. Two local commanders can share one battle, one army and one purse. Battles pause and save mid-fight, and skirmish mode deals a one-off battle on your choice of field and enemy. Every cabinet win pays your buddy XP toward training and taught moves.
-  Every cabinet has its own orchestra — Bumblebee for the Run, Valkyries for WAR!, Greensleeves in the Castle, William Tell for the Cart.
+  through scrolling battlefields, frees captives, and takes on a fortress-core boss at every level's end; and CASTLE, a DOS-castle treasure hunt after the 1984 original — fetch the sword, brave the Dungeon for the key, gather 13 treasures, and escape — then Shuffle mode re-deals it; and SUPER BUDDY CART, a three-lap SNES Mode 7-style kart racer from behind your kart — your own Banzai Buddy drives, racing five rivals with boost pads and drift mini-boosts; and WAR!, a real-time strategy game — harvest bits, raise a Compiler Core base, train melee and ranged buddies, hold the line with zapper towers and firewalls, raze the bug hives, conquer all eight regions — scout buggies, siege tanks and permanent fog of war included. No two battles alike — every field is dealt fresh. Two local commanders can share one battle. Battles pause and save mid-fight, and a skirmish in progress saves and resumes too; and MORDOR FUN RUN, a top-down road from the Shire to the Black Gate, 1,000 moose long — goblins, wolves, spiders and orcs fought in real time, a milestone banked every 50 moose, powerups on the road (health first, then double damage and speed), and the run saved where you left it. The swing answers the fire button only. Every cabinet win pays your buddy XP.
+  Every cabinet has its own classical piece.
 
 ALWAYS SOMETHING NEW ON THE BOARD
-A First Shift objective card starts every new save, cabinet wins
+A First Shift card starts every new save, cabinet wins
 chase Medal Times, a Weekly Challenge rotates, and hat toppers
 crown your stack. The overworld follows your clock — dusk, night
 and dawn, with regional weather — and the music swells when
@@ -148,10 +153,7 @@ bugs close in. Comfort settings cover volume,
 mute and screen shake.
 
 TOUCH-FIRST ON ANDROID
-Full touch controls — Banzai World's Start menu
-included — plus keyboard and gamepad support. The
-whole game is offline, collects no data, shows no ads, and asks
-for zero permissions.
+Full touch controls — Banzai World's Start menu included — plus keyboard and gamepad support. The Source Room's terminal is touch-friendly too — text wraps to fit, and you can scroll, tap and edit the source on the on-screen keyboard; changes persist. The whole game is offline, collects no data, shows no ads, and asks for zero permissions.
 
 How heavy can your hat get?
 
@@ -169,7 +171,7 @@ How heavy can your hat get?
   orange spider with the thicker, darker frown Daniel asked for
   that morning, so the listing icon matches the shipped app icon).
 - `assets/feature-graphic-1024x500.png` — 1024×500, 24-bit, no alpha.
-- `assets/screenshot-01..07-*.png` — phone screenshots, 1920×1080
+- `assets/screenshot-01..08-*.png` — phone screenshots, 1920×1080
   (see below).
 
 ## Phone screenshots — DONE (recaptured Nov 9, 2026; mall shot Nov 10)
@@ -179,7 +181,7 @@ rig (`tests/playscreenshots*.js`); the Bug Mall shot was recaptured
 Nov 10, 2026 from the v1.3 build (`the-survival-game.html` md5
 e3c8e43d103d571bb158402c9361ce88) via `tests/playmallshot.js`.
 Every capture was visually verified against the scene it claims
-to show. Seven shots (Play allows 2–8), each exactly 1920×1080 PNG:
+to show. Eight shots (Play allows 2–8), each exactly 1920×1080 PNG:
 
 - `assets/screenshot-01-title.png` — title screen and menu.
   RECAPTURED 2026-11-14 from the v1.5 build (game HTML md5
@@ -215,3 +217,10 @@ to show. Seven shots (Play allows 2–8), each exactly 1920×1080 PNG:
 - `assets/screenshot-07-region.png` — Far Country: Neon RAM Flats,
   neon-strain bugs around the player (region plate reads 150M FROM
   EPICENTER).
+- `assets/screenshot-08-mordor.png` — MORDOR FUN RUN: the runner
+  on the Shire road at 1 of 1,000 moose, three goblins closing in
+  real time, HUD reading MARKER 0/20 and NEXT MARKER 49 MOOSE.
+  CAPTURED 2026-11-23 from the shipped v1.29 build (game HTML
+  md5 f1638b546b92b6ddeef50bb5d7bfbc5b) via
+  `tests/playmordorshot.js`, run solo; visually verified. Fills
+  the eighth and last Play screenshot slot.

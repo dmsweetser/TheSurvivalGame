@@ -8,9 +8,9 @@ the same day, and the Steam kit is a separate, untouched decision.
 ## Contents
 
 - `LISTING.md` — paste-ready Console copy (counts verified).
-  Phone screenshots DONE: seven 1920×1080 captures in `assets/`
+  Phone screenshots DONE: eight 1920×1080 captures in `assets/`
   (title, combat with a big hat, Bug Mall, stacked wall pile,
-  Banzai World, Story Mode, Neon RAM Flats) — six from the Nov 9
+  Banzai World, Story Mode, Neon RAM Flats, Mordor Fun Run) — six from the Nov 9
   "Far Country" build, the Bug Mall shot recaptured Nov 10 from
   v1.3 — each visually verified — see LISTING.md.
 - `FORMS.md` — Data Safety / ads / IARC answers pre-filled from the
@@ -320,6 +320,37 @@ the same day, and the Steam kit is a separate, untouched decision.
   LISTING.md. Synced to the repo-clone and handover
   packet copies. The packet now has no stale assets.
   Nothing was submitted anywhere.
+- PACKET RESTAMPED 2026-11-23 to v1.29 ("ON THE BUTTON"
+  — one restamp past v1.27 and v1.28, at Daniel's
+  direction): `../TheSurvivalGame.aab` is now 2,418,790
+  bytes (md5 c1f606279e928399c777ca5c4e5f5160),
+  byte-identical to the GitHub v1.29 release AAB in the
+  handover folder, bundletool-validated, versionCode 29
+  / versionName "1.29", targetSdk 36, ZERO
+  uses-permission elements, and its embedded
+  `base/assets/index.html` is byte-identical
+  (md5 f1638b546b92b6ddeef50bb5d7bfbc5b) to the live
+  GitHub Pages build — FORMS.md's data-safety answers
+  stand unchanged. Still debug-key signed — the
+  dedicated upload keystore is still needed at
+  submission. LISTING.md copy revised for v1.27 (Source
+  Room touch editing in the copy; wilder WAR! fields,
+  Tank Rescue pickups and podium-only Cart medals in the
+  revision log), v1.28 (the eighth cabinet, MORDOR FUN
+  RUN) and v1.29 (the fire-button swing, road powerups,
+  WAR! skirmish save/resume) in Android-accurate terms
+  only, trimmed elsewhere to fit: full description
+  re-counted at 3,983 of 4,000 chars counting newlines
+  (3,937 excluding them); title 17/30 and short
+  description 64/80 unchanged.
+  `assets/screenshot-08-mordor.png` ADDED 2026-11-23 —
+  the eighth and last Play slot — captured from the
+  shipped v1.29 build via `tests/playmordorshot.js`
+  (run solo, visually verified): the runner on the
+  Shire road at 1 of 1,000 moose with three goblins
+  closing in real time. Synced to the goals-files and
+  handover packet copies. Nothing was submitted
+  anywhere.
 
 ## Daniel-only, in order
 
