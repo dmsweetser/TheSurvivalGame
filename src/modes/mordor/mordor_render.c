@@ -207,6 +207,27 @@ static void mor_render(int pi){
         if (x<vx-60 || x>vx+vw2+60 || y<vy-60 || y>vy+vh2+60) continue;
         mor_draw_foe(e, x, y, G.anim_t, i);
     }
+    // --- the road powerups (v1.29): bobbing gifts on the road ---------------------
+    for (int pk=0; pk<MOR_POW_N; pk++){
+        if (mor_pow_taken(S, pk)) continue;
+        float ps, plat; int pkind; mor_pow_pos(pi, pk, &ps, &plat, &pkind);
+        int x = SX(mor_cx(ps) + plat), y = SY((float)MOR_Y0 - ps);
+        if (x<vx-50 || x>vx+vw2+50 || y<vy-50 || y>vy+vh2+50) continue;
+        int bob = (int)(fsin(G.anim_t*2.4f + pk*1.3f)*3.0f);
+        int pulse = 13 + (int)(fsin(G.anim_t*3.0f + pk)*3.0f);
+        disc_fill(x, y+bob, pulse, pkind==0? COL(120,40,40) : pkind==1? COL(120,80,20) : COL(30,80,110));
+        if (pkind==0){   // health: a white box with a red cross
+            rect_fill(x-9, y-9+bob, 18, 18, COL(240,240,244)); rect_line(x-9, y-9+bob, 18, 18, COL(160,60,60));
+            rect_fill(x-2, y-6+bob, 4, 12, COL(220,50,50)); rect_fill(x-6, y-2+bob, 12, 4, COL(220,50,50));
+        } else if (pkind==1){   // amplification: an orange sword
+            line_thick(x-6, y+8+bob, x+5, y-3+bob, 3, COL(255,190,80));
+            line_thick(x+3, y-8+bob, x+8, y-3+bob, 2, COL(255,230,170));
+            line_thick(x-8, y+4+bob, x-3, y+9+bob, 3, COL(150,100,40));
+        } else {   // speed: a cyan lightning bolt
+            tri_fill(x+2, y-11+bob, x-6, y+1+bob, x-1, y+1+bob, COL(140,230,255));
+            tri_fill(x-1, y-1+bob, x-7, y+11+bob, x+5, y-2+bob, COL(140,230,255));
+        }
+    }
     // --- the runner ----------------------------------------------------------------
     if (S->mor_faintt<=0){
         draw_buddy(b);
@@ -247,6 +268,15 @@ static void mor_render(int pi){
       *q=0;
       rect_fill(vx, vy+21, vw2, 15, COL(16,20,28));
       draw_text_center(vx+vw2/2, vy+24, buf, 1, COL(200,214,200)); }
+    if (S->mor_amp_t>0 || S->mor_spd_t>0){   // v1.29: the active buffs, Tank-tag style, with the seconds left
+        char buf[64]; char *q=buf;
+        if (S->mor_amp_t>0){ q=sappend(q, "[WEAPON x2 "); q=sapp_int(q, (int)(S->mor_amp_t + 0.999f)); q=sappend(q, "S]"); }
+        if (S->mor_amp_t>0 && S->mor_spd_t>0) q=sappend(q, "  ");
+        if (S->mor_spd_t>0){ q=sappend(q, "[SPEED "); q=sapp_int(q, (int)(S->mor_spd_t + 0.999f)); q=sappend(q, "S]"); }
+        *q=0;
+        rect_fill(vx, vy+37, vw2, 15, COL(16,20,28));
+        draw_text_center(vx+vw2/2, vy+40, buf, 1, S->mor_amp_t>0? COL(255,190,90) : COL(140,230,255));
+    }
     if (S->mor_faintt>0) draw_text_center(vx+vw2/2, vy+vh2/3, "DOWN!", 3, COL(255,150,110));
     if (S->mor_cleart>0){
         draw_text_center(vx+vw2/2, vy+vh2/3, "MORDOR!", 3, COL(255,190,90));

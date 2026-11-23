@@ -536,6 +536,12 @@ typedef struct {
     // the barrier-line count when >0 (campaign leaves it 0 and
     // keeps its region rule).
     int war_skirmish, war_size, war_diff, war_setup_sel, war_setup_prevk;
+    // v1.29: the RESUME / NEW SKIRMISH panel raised by war_enter
+    // when a saved skirmish is parked — the Mordor panel pattern
+    // (selection, two-step discard confirm, an entry pick lock so
+    // the entering select edge cannot pick RESUME itself).
+    int war_sk_panel, war_sk_psel;
+    float war_sk_confirm, war_sk_lock;
     float war_aw, war_ah;
     int war_gw, war_gh, war_lines;
     char war_msg[72]; float war_msgt;
@@ -602,9 +608,17 @@ typedef struct {
     // panel, and the timers. MOR_DEAD_BYTES covers the full route:
     // (460000/300 + 2) chunks * 5 slots / 8 = 960 bytes.
     MorEn mor_en[40];
-    int mor_en_n, mor_panel, mor_psel, mor_kills;
+    int mor_en_n, mor_panel, mor_psel, mor_kills, mor_swings;
     unsigned char mor_dead[960];
     float mor_t, mor_swing_cd, mor_swing_t, mor_grace, mor_faintt, mor_cleart, mor_spawn_t, mor_confirm_t, mor_hurt_t, mor_pick_lock;
+    // v1.29: road powerups — the taken-stations bitmap for this
+    // cabinet session (50 stations; a faint clears the bits at/
+    // after the banked milestone, mirroring mor_dead) and the two
+    // timed buffs. Run-scoped on purpose: the buffs tick in real
+    // time, lapse when the cabinet is left, clear on a faint, and
+    // are NEVER written to the save tokens.
+    unsigned char mor_powtaken[8];
+    float mor_amp_t, mor_spd_t;
 } BwSim;
 static BwSim BWS[MAXP];
 static int bw_defeated_has(BwSim *S, int key){ for (int i=0;i<S->defeated_n;i++) if (S->defeated[i]==key) return 1; return 0; }

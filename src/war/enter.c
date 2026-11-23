@@ -29,6 +29,16 @@ static void war_enter(int pi){
         b->bw_x = b->x; b->bw_y = b->y;
         return;
     }
+    if (war_snap_sk_on[pi]){   // v1.29: a saved SKIRMISH waits — raise the RESUME / NEW SKIRMISH panel over the map (the Mordor panel pattern; the campaign park above keeps its v1.17 priority, so the panel shows when no campaign battle is parked)
+        war_clear_field(S);
+        S->war_state=0;
+        S->war_map_sel = b->war_prog<8? b->war_prog : 7;
+        S->war_grace=0.35f; S->war_msgt=0; S->war_region=0; S->war_bits=0;
+        S->war_sk_panel=1; S->war_sk_psel=0; S->war_sk_confirm=0; S->war_sk_lock=0.35f;   // the lock: the entering select edge must not pick RESUME itself (the Mordor lesson)
+        b->x = WAR_OX+800; b->y = WAR_OY+600;   // parked mid-arena; this mode never draws him
+        b->bw_x = b->x; b->bw_y = b->y;
+        return;
+    }
     war_clear_field(S);
     S->war_state=0;
     S->war_map_sel = b->war_prog<8? b->war_prog : 7;

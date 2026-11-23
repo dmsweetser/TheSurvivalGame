@@ -50,6 +50,10 @@ static void war_win(int pi){
         // this same region-equivalent number, and it is not this
         // fight's to discard. The win pays buddy XP by difficulty
         // and saves (the award has to persist like a campaign's).
+        // v1.29: the SKIRMISH park is this fight's own to discard —
+        // a decided battle leaves nothing to resume, cleared BEFORE
+        // the save below so the file agrees.
+        war_snap_sk_clear(pi);
         static const int SKXP[4] = { 0, 30, 50, 80 };   // by war_diff: EASY / NORMAL / HARD
         int amt = SKXP[S->war_diff>=1 && S->war_diff<=3? S->war_diff : 2];
         buddy_award_xp(pi, amt);
@@ -76,7 +80,8 @@ static void war_lose(int pi){
     BwSim *S = &BWS[pi];
     S->war_state = 3; S->war_endt = 3.2f; S->war_pause = 0;
     if (S->war_skirmish){
-        war_note(S, "SKIRMISH LOST.");   // v1.19: ad-hoc — no snapshot clear, no progress, nothing to save
+        war_snap_sk_clear(pi);   // v1.29: a decided skirmish leaves nothing to resume (its own park is this fight's to discard; the campaign park still stands)
+        war_note(S, "SKIRMISH LOST.");   // v1.19: no campaign snapshot clear, no progress
     } else {
         if (!war_snap_on[pi] || war_snap_reg[pi]==S->war_region) war_snap_clear(pi);   // a fallen Core leaves nothing of THIS battle to resume — a park in another region still stands (v1.18)
         war_note(S, "THE COMPILER CORE HAS FALLEN!");

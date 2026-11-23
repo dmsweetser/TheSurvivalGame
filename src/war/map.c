@@ -62,9 +62,63 @@ static void war_skirmish_btn(int vx, int vy, int vw2, int vh2, int *bx, int *by)
 static void war_open_setup(BwSim *S, u32 keys){
     S->war_state = 4; S->war_setup_sel = 0; S->war_setup_prevk = (int)keys; sfx(6);
 }
+// v1.29: the RESUME / NEW SKIRMISH panel (war_state 0, raised by
+// war_enter when a skirmish is parked) — the Mordor entry panel's
+// pattern on WAR!'s own idiom: one rect set shared by the tap
+// handler and the renderer (below, in war_render_map), keyboard
+// edges to walk, a two-step confirm on NEW SKIRMISH, and an entry
+// pick lock so the cabinet-entering press cannot pick RESUME
+// itself. Esc dismisses the panel to the bare map — the saved
+// skirmish stays parked.
+static void war_sk_panel_rects(int vx, int vy, int vw2, int vh2, int *px, int *py, int *pw, int *ph){
+    *pw = vw2<420? vw2-24 : 396; *ph = 168;
+    *px = vx+(vw2-*pw)/2; *py = vy+(vh2-*ph)/2 - 10;
+}
+static void war_sk_panel_pick(int pi, int n){
+    BwSim *S = &BWS[pi];
+    if (n==0){   // RESUME SKIRMISH
+        S->war_sk_panel = 0;
+        war_snap_sk_restore(pi);
+        war_snap_sk_clear(pi);   // consumed — the live BwSim is authoritative now; later saves re-serialize from it
+        war_link_pull(pi);   // feat 13: a resumed battle pulls a waiting commander in
+    } else {   // NEW SKIRMISH — the first pick arms, the second discards the saved battle and frees the map
+        if (S->war_sk_confirm>0){
+            war_snap_sk_clear(pi);
+            S->war_sk_panel = 0; S->war_sk_confirm = 0; S->war_grace = 0.3f;
+            war_note(S, "THE SAVED SKIRMISH IS DISCARDED.");
+            sfx(6);
+        } else { S->war_sk_confirm = 2.5f; S->war_sk_lock = 0.3f; sfx(6); }   // the lock: a held select must not arm AND confirm in one press
+    }
+}
+static void war_sk_panel_update(int pi, float dt, const BwIn *in){
+    BwSim *S = &BWS[pi];
+    if (S->war_sk_confirm>0) S->war_sk_confirm -= dt;
+    if (S->war_sk_lock>0) S->war_sk_lock -= dt;
+    if (in->exit_){ S->war_sk_panel = 0; S->war_sk_confirm = 0; S->war_grace = 0.3f; sfx(6); return; }
+    if (in->up){ S->war_sk_psel = (S->war_sk_psel+1)%2; S->war_sk_confirm = 0; sfx(6); }
+    if (in->down){ S->war_sk_psel = (S->war_sk_psel+1)%2; S->war_sk_confirm = 0; sfx(6); }
+    if (S->war_sk_lock>0) return;   // picks wait out the lock; nav above still answers
+    if (in->sel || in->interact){ war_sk_panel_pick(pi, S->war_sk_psel); return; }
+    if (pi==G.my_id){
+        if (IN.tapped){
+            IN.tapped = 0;
+            int vx, vy, vw2, vh2; p1_view_rect(&vx, &vy, &vw2, &vh2);
+            int px, py, pw, ph; war_sk_panel_rects(vx, vy, vw2, vh2, &px, &py, &pw, &ph);
+            for (int n=0;n<2;n++){
+                int ry = py+58+n*38;
+                if (IN.tap_x>=px+16 && IN.tap_x<px+pw-16 && IN.tap_y>=ry && IN.tap_y<ry+32){
+                    S->war_sk_psel = n;
+                    war_sk_panel_pick(pi, n);
+                    return;
+                }
+            }
+        }
+        if (IN.pad_edges & (1u<<ACT_FIRE)){ war_sk_panel_pick(pi, S->war_sk_psel); return; }
+    }
+}
 static void war_map_update(int pi, float dt, const BwIn *in){
     BwSim *S = &BWS[pi];
-    (void)dt;
+    if (S->war_sk_panel){ war_sk_panel_update(pi, dt, in); return; }   // v1.29: the entry panel is modal over the map
     if (in->exit_){ bw_exit(pi, 0); return; }
     if (S->war_grace > 0) return;
     if (pi==G.my_id){   // v1.19: S opens the skirmish setup panel

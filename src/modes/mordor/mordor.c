@@ -70,6 +70,39 @@ static void mor_dead_clear_from(BwSim *S, int chunk){   // a faint resets the cu
     for (int idx = chunk*5; idx < 960*8; idx++)
         S->mor_dead[idx>>3] &= (unsigned char)~(1 << (idx&7));
 }
+// --- the road powerups: stations on the road, a hash of (seed, k) -----------
+// v1.29 (Daniel): pickups ON the road, collected by running over
+// them — health, weapon amplification, speed. Fifty stations ride
+// the road at total/50 spacing (~20 moose apart on the full road),
+// each placed by the same deterministic trick as the foes — a hash
+// of (buddy seed, station) with a DIFFERENT salt — so a station
+// re-derives identically every visit and the session's taken-
+// bitmap is the only memory it needs. Station 0 is special: always
+// HEALTH, early in the opening stretch, so a hurt runner meets
+// help before the road gets mean. The timed buffs live in BwSim
+// and are never saved (see story.c) — leaving the cabinet or
+// fainting ends them.
+#define MOR_POW_N 50
+static float mor_pow_spacing(int pi){ return (float)mor_total_units(pi) / MOR_POW_N; }
+static void mor_pow_pos(int pi, int k, float *spos, float *lat, int *kind){
+    if (k==0){ *spos = mor_pow_spacing(pi)*0.22f; *lat = 0; *kind = 0; return; }
+    Buddy *b=&G.bud[pi];
+    u32 seed = (u32)b->bw_seed ^ 0x51AB3u;
+    u32 h = hash2(k*29 + 11, k ^ 0x51, seed);
+    float spacing = mor_pow_spacing(pi);
+    // jitter within +-0.3 of the slot: stations stay ordered and
+    // never crowd (the closest two can sit is 0.4 slots apart)
+    *spos = (k + 0.5f)*spacing + ((float)((int)((h>>8)%100) - 50)/100.0f) * spacing * 0.6f;
+    *lat = (float)((int)((h>>20)%161) - 80);
+    int r = (int)((h>>16) % 100);
+    *kind = r<40? 0 : r<70? 1 : 2;   // health 40 / amplification 30 / speed 30
+}
+static int mor_pow_taken(BwSim *S, int k){ return (S->mor_powtaken[k>>3] >> (k&7)) & 1; }
+static void mor_pow_set(BwSim *S, int k){ S->mor_powtaken[k>>3] |= (unsigned char)(1 << (k&7)); }
+static void mor_pow_clear_all(BwSim *S){ for (int i=0;i<8;i++) S->mor_powtaken[i] = 0; }
+static void mor_pow_clear_from(int pi, BwSim *S, float s){   // a faint: stations at/after the banked milestone are back on the road
+    for (int k=0;k<MOR_POW_N;k++){ float ps, pl; int kd; mor_pow_pos(pi, k, &ps, &pl, &kd); if (ps >= s) S->mor_powtaken[k>>3] &= (unsigned char)~(1 << (k&7)); }
+}
 // --- the foes: a hash function of (seed, chunk, slot) -----------------------
 static const int MOR_EHP[4] = { 14, 10, 22, 34 };        // goblin, wolf, spider, orc
 static const float MOR_ESPD[4] = { 92, 148, 78, 66 };
@@ -128,6 +161,7 @@ static void mor_start_run(int pi){
     b->mor_on = 1; b->mor_dist = 0; b->mor_mile = 0; b->mor_hp = mor_maxhp(b); b->mor_secs = 0; b->mor_lat = 0;
     S->mor_t = 0; S->mor_kills = 0; S->mor_en_n = 0;
     for (int i=0;i<960;i++) S->mor_dead[i] = 0;
+    mor_pow_clear_all(S); S->mor_amp_t = 0; S->mor_spd_t = 0;
     S->mor_panel = 0;
     mor_place(pi, 0, 0);
     scpy(S->note, "A NEW RUN. THE SHIRE BEHIND YOU, MORDOR AHEAD. 1000 MOOSE.", 72); S->note_t = 3.6f;
@@ -137,7 +171,8 @@ static void mor_enter(int pi){
     BwSim *S=&BWS[pi]; Buddy *b=&G.bud[pi];
     S->mor_en_n = 0; S->mor_spawn_t = 0; S->mor_swing_cd = 0; S->mor_swing_t = 0;
     S->mor_grace = 0; S->mor_faintt = 0; S->mor_cleart = 0; S->mor_confirm_t = 0; S->mor_hurt_t = 0; S->mor_pick_lock = 0;
-    S->mor_kills = 0; S->mor_panel = 0;
+    S->mor_kills = 0; S->mor_swings = 0; S->mor_panel = 0;
+    mor_pow_clear_all(S); S->mor_amp_t = 0; S->mor_spd_t = 0;   // v1.29: buffs lapse on leaving, so a fresh entry starts clean; the stations re-derive untaken
     for (int i=0;i<960;i++) S->mor_dead[i] = 0;   // a fresh entry re-derives the road's foes; the banked run (Buddy) is what persists
     if (b->mor_on){
         if (b->mor_hp<=0) b->mor_hp = mor_maxhp(b);
@@ -166,6 +201,8 @@ static void mor_faint_home(int pi){   // the faint lands: back at the banked mil
     BwSim *S=&BWS[pi]; Buddy *b=&G.bud[pi];
     float sm = b->mor_mile * mor_spacing(pi);
     mor_dead_clear_from(S, (int)(sm / MOR_CHUNK));
+    mor_pow_clear_from(pi, S, sm);   // v1.29: the stretch's stations come back too, and the buffs end with the fall
+    S->mor_amp_t = 0; S->mor_spd_t = 0;
     S->mor_en_n = 0;
     b->mor_hp = mor_maxhp(b);
     b->mor_dist = (int)sm; b->mor_lat = 0;
@@ -238,6 +275,8 @@ static void mor_update(int pi, float dt, const BwIn *in){
     if (S->mor_swing_cd>0) S->mor_swing_cd -= dt;
     if (S->mor_swing_t>0) S->mor_swing_t -= dt;
     if (S->mor_hurt_t>0) S->mor_hurt_t -= dt;
+    if (S->mor_amp_t>0) S->mor_amp_t -= dt;   // v1.29: the buffs tick in real time
+    if (S->mor_spd_t>0) S->mor_spd_t -= dt;
     if (S->mor_faintt>0){
         S->mor_faintt -= dt;
         if (S->mor_faintt<=0) mor_faint_home(pi);
@@ -257,6 +296,7 @@ static void mor_update(int pi, float dt, const BwIn *in){
         float d=fsqrt(mx*mx+my*my); mx/=d; my/=d;
         b->aim = fatan2(my, mx);
         float sp = BUD_SPD[b->species%BUDN];
+        if (S->mor_spd_t>0) sp *= 1.4f;   // v1.29: SPEED BOOST — swift feet while it lasts
         float lat = b->x - mor_cx(s);
         if (lat > MOR_HALF+30 || lat < -MOR_HALF-30) sp *= 0.55f;   // off the road is trudging country
         b->x += mx*sp*dt; b->y += my*sp*dt;
@@ -276,11 +316,29 @@ static void mor_update(int pi, float dt, const BwIn *in){
     b->mor_dist = s<0? 0 : s>(float)total? total : (int)s;
     b->mor_lat = (int)(b->x - mor_cx(s));
     b->mor_secs = (int)S->mor_t;
+    // --- the road powerups: run over one and it is yours ----------------------
+    for (int pk=0; pk<MOR_POW_N; pk++){
+        if (mor_pow_taken(S, pk)) continue;
+        float ps, plat; int pkind; mor_pow_pos(pi, pk, &ps, &plat, &pkind);
+        if (ps < s - 60 || ps > s + 60) continue;
+        float px = mor_cx(ps) + plat, py = (float)MOR_Y0 - ps;
+        float dx = px - b->x, dy = py - b->y;
+        if (dx*dx + dy*dy > 30*30) continue;
+        mor_pow_set(S, pk);
+        if (pkind==0){ int mh = mor_maxhp(b); b->mor_hp += 50; if (b->mor_hp > mh) b->mor_hp = mh;
+            scpy(S->note, "+50 HP. THE ROAD PROVIDES.", 72); }
+        else if (pkind==1){ S->mor_amp_t = 30.0f; scpy(S->note, "WEAPON AMPLIFIED! DOUBLE DAMAGE FOR 30 SECONDS.", 72); }
+        else { S->mor_spd_t = 20.0f; scpy(S->note, "SPEED BOOST! SWIFT FEET FOR 20 SECONDS.", 72); }
+        S->note_t = 2.6f;
+        splat(px, py, pkind==0? COL(255,120,120) : pkind==1? COL(255,170,60) : COL(110,220,255), 14, 120);
+        sfx(11);
+    }
     // --- the swing: the buddy's standard attack, real time ------------------
     if ((in->sel || in->sel_held) && S->mor_swing_cd<=0){
-        S->mor_swing_cd = 0.34f; S->mor_swing_t = 0.18f; b->atk_cd = 0.34f;
+        S->mor_swing_cd = 0.34f; S->mor_swing_t = 0.18f; b->atk_cd = 0.34f; S->mor_swings++;
         sfx(4);
         float dmg = buddy_dmg(b);
+        if (S->mor_amp_t>0) dmg *= 2;   // v1.29: WEAPON AMPLIFICATION — double damage while it lasts
         for (int i=0;i<S->mor_en_n;i++){
             MorEn *e=&S->mor_en[i];
             float dx=e->x-b->x, dy=e->y-b->y, d2=dx*dx+dy*dy;

@@ -16,17 +16,20 @@ static void war_pause_pick(int pi, int n){
     if (BWS[pi].war_guest) pi = BWS[pi].war_guest-1;   // feat 13: a guest pauser's picks act on the battle (the owner's sim)
     BwSim *S = &BWS[pi];
     if (n==0){ S->war_pause=0; S->war_grace=0.3f; sfx(6); }   // RESUME (the grace keeps the closing press from leaking an order)
-    else if (S->war_skirmish && n==1){   // v1.19: RESTART a skirmish — re-roll the same size/difficulty; NO snapshot clear (a campaign park is never this fight's to discard)
+    else if (S->war_skirmish && n==1){   // v1.19: RESTART a skirmish — re-roll the same size/difficulty; NO campaign snapshot clear (a campaign park is never this fight's to discard). v1.29: the re-roll supersedes any saved skirmish, so the SKIRMISH park is cleared (mirroring the campaign restart's own-park clear below)
+        war_snap_sk_clear(pi);
         S->war_pause=0;
         war_start_skirmish(pi);
     }
-    else if (S->war_skirmish && n==2){   // v1.19: QUIT BATTLE — the skirmish is ad-hoc: nothing serialized, nothing saved, back to the map
+    else if (S->war_skirmish && n==2){   // v1.29: SAVE & QUIT — the skirmish parks in its OWN slot (the kb..kh text), beside any campaign park, and waits for the entry panel (was QUIT BATTLE in v1.19, when a skirmish could not be saved at all)
+        war_snap_sk_serialize(pi);
+        do_save();
         S->war_pause=0;
         war_clear_field(S);
         S->war_state=0; S->war_grace=0.3f;
-        war_note(S, "SKIRMISH ABANDONED.");
-        if (S->war_duo>=0){ int g=S->war_duo; war_link_break(pi); BWS[g].war_state=0; BWS[g].war_grace=0.3f; war_note(&BWS[g], "THE COMMANDER LEFT THE BATTLE."); }   // feat 13: the guest goes back to their own map too
-        sfx(6);
+        war_note(S, "SKIRMISH SAVED. IT WILL WAIT FOR YOU.");
+        if (S->war_duo>=0){ int g=S->war_duo; war_link_break(pi); BWS[g].war_state=0; BWS[g].war_grace=0.3f; war_note(&BWS[g], "THE COMMANDER SAVED THE SKIRMISH."); }   // feat 13: the guest goes back to their own map too
+        sfx(19);
     }
     else if (n==1){   // RESTART BATTLE: this region, fresh, and no snapshot of the old fight survives — unless the park belongs to another region (v1.18 scoping, as in war_win/war_lose)
         if (!war_snap_on[pi] || war_snap_reg[pi]==S->war_region) war_snap_clear(pi);

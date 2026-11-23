@@ -5,7 +5,7 @@
 // ---------------------------------------------------------------------------
 // Save / load — a small line-based text format in one block.
 // ---------------------------------------------------------------------------
-#define SAVE_CAP 65536
+#define SAVE_CAP 131072   // v1.29: doubled for the second (skirmish) WAR! snapshot per player — see the audit below
 static char savebuf[SAVE_CAP];
 static int parse_int(const char *s){ int v=0, neg=0; if (*s=='-'){ neg=1; s++; }
     while (*s>='0'&&*s<='9'){ v=v*10+(*s-'0'); s++; } return neg?-v:v; }
@@ -46,8 +46,18 @@ static void refresh_has_save(void){ G.has_save = (G.slot_has[1]||G.slot_has[2]||
 #define WAR_SNAP_CAP 12288
 static char war_snap[MAXP][WAR_SNAP_CAP];
 static int war_snap_on[MAXP];
+// v1.29: the SKIRMISH park — a second snapshot slot per player,
+// same canonical text under kb/ku/ks/kg/kt/kf/kh tokens, so a
+// skirmish persists beside (never instead of) the campaign park.
+// SAVE_CAP audit extended: per-player worst ~3.5K pl-line +
+// <=10.7K campaign snapshot + <=10.7K skirmish snapshot = ~24.9K;
+// x4 players = ~99.6K + ~420 shared walls + ~0.4K headers =
+// ~100K, inside the doubled 131072 cap with ~31K to spare.
+static char war_snap_sk[MAXP][WAR_SNAP_CAP];
+static int war_snap_sk_on[MAXP];
 static int war_snap_reg[MAXP] = { -1, -1, -1, -1 };   // v1.18: WHICH region the parked battle belongs to — the map needs it to offer a resume instead of a restart
 static void war_snap_clear(int pi){ war_snap_on[pi]=0; war_snap[pi][0]=0; war_snap_reg[pi]=-1; }
+static void war_snap_sk_clear(int pi){ war_snap_sk_on[pi]=0; war_snap_sk[pi][0]=0; }   // v1.29: defined here, with the buffers — war/hive.c and war/path.c (both before war/snap.c in the unity order) call it
 static void do_save(void){
     char *p = savebuf;
     p = sappend(p, "TSG3\n");   // v3: weapon counts written raw (stacks are uncapped now); v2 was base-6 packed, v1 a bitmask — both still load
@@ -245,6 +255,12 @@ static void do_save(void){
                     // BWS itself is defined far below the save code.)
                     { const char *wsnap = war_snap_for_save(i);
                       if (wsnap){ *p++=' '; *p=0; p = sappend(p, wsnap); } }
+                    // WAR! skirmish snapshot (v1.29): the second
+                    // park's text is written natively with k-prefixed
+                    // keys (kb..kh), so the loader rebuilds the two
+                    // parks independently; it rides verbatim too.
+                    { const char *sksnap = war_snap_sk_for_save(i);
+                      if (sksnap){ *p++=' '; *p=0; p = sappend(p, sksnap); } }
                     *p++=' '; *p=0; p = put_key(p, "cx"); p = put_int(p, (int)bd->craft_x);
                     *p++=' '; *p=0; p = put_key(p, "cy"); p = put_int(p, (int)bd->craft_y);
                     *p++=' '; *p=0; p = put_key(p, "cm"); p = put_int(p, bd->craft_wood + bd->craft_stone*1000 + bd->craft_fiber*1000000);

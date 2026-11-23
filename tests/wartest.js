@@ -2051,6 +2051,119 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   ok((await call('dbg_warstructs', 2)) === 1 && (await call('dbg_warbits')) === bits34c,
      'v1.21 check 34: arming then cancelling with B leaves the building standing, purse untouched');
 
+  // ================= v1.29 "ON THE BUTTON" (Nov 23) ==================
+  // checks 35-37: SAVE YOUR SKIRMISH (Daniel). A skirmish in
+  // progress parks in its OWN slot (kb..kh), beside — never instead
+  // of — the campaign park; it survives a full reload and resumes
+  // from the entry panel; NEW SKIRMISH is a two-step discard. The
+  // mid-battle state is realistic: bits spent on a building, a unit
+  // roster on the field, the hive wounded, the fight underway.
+  // (After the reload, wartest's T handle is stale — the call2/poll2
+  // pair below re-reads window.__TSG fresh, the mordortest way.)
+  const call2 = (fn, ...a) => page.evaluate(([f, x]) => window.__TSG[f](...x), [fn, a]);
+  const poll2 = async (fn, pred, ms = 10000) => { const t0 = Date.now(); let v; while (Date.now() - t0 < ms) { v = await call2(fn); if (pred(v)) return v; await sleep(120); } return v; };
+  const structHPs = async c => { const a = []; for (let i = 0; i < 28; i++) a.push(await c('dbg_warstructhp', i)); return a; };
+  const frozen2 = async () => {   // frozenReadings, post-reload edition
+    await key('Escape', 300);
+    await poll2('dbg_warpause', v => v === 1, 4000);
+    return { bits: await call2('dbg_warbits'), units: await call2('dbg_warunits', 0, -1), nodes: await call2('dbg_warnodes') };
+  };
+
+  // check 35: build the mid-skirmish state and SAVE & QUIT it
+  await frozenReadings();   // park check 34's campaign battle first (its own slot — the skirmish must not disturb it)
+  await saveQuitToMap();
+  ok((await call('dbg_warsnap')) === 1, 'v1.29 check 35: the campaign battle is parked before the skirmish');
+  await tap(568, 307);   // SKIRMISH button
+  ok((await poll('dbg_warstate', [], v => v === 4, 4000)) === 4, 'v1.29 check 35: setup panel for the saveable skirmish');
+  await tap(400, 132);   // MAP SIZE forward: SMALL -> STANDARD
+  await tap(400, 170);   // ENEMY forward: EASY -> NORMAL
+  await tap(320, 208);   // LAUNCH
+  ok((await poll('dbg_warstate', [], v => v === 1, 5000)) === 1 && (await call('dbg_warskirmish')) === 1, 'v1.29 check 35: STANDARD/NORMAL skirmish launched');
+  await call('dbg_waraddbits', 600);
+  const pb35 = await call('dbg_warbuildat', 1);
+  ok(pb35 > 0, 'v1.29 check 35: a Patch Bay was built (bits spent)', 'idx=' + pb35);
+  const skHive0 = await call('dbg_warstructhp', 1);
+  await call('dbg_warhurt', 1, 1, 40);
+  const skHive1 = await call('dbg_warstructhp', 1);
+  ok(skHive0 > 0 && skHive1 < skHive0, 'v1.29 check 35: the hive is wounded (the fight is underway)', skHive0 + ' -> ' + skHive1);
+  await sleep(2500);   // let the battle breathe: waves, movement, harvesting
+  const r35 = await frozenReadings();
+  const hp35 = await structHPs(call);
+  await saveQuitToMap();   // the skirmish's third pause row is SAVE & QUIT now
+  ok((await poll('dbg_warstate', [], v => v === 0, 4000)) === 0, 'v1.29 check 35: SAVE & QUIT returned to the map');
+  ok((await call('dbg_warsksnap')) === 1, 'v1.29 check 35: the skirmish is parked in its own slot');
+  ok((await call('dbg_warsnap')) === 1, 'v1.29 check 35: the campaign park SURVIVED the skirmish save');
+
+  // check 36: the skirmish park survives a full reload and resumes
+  // from the entry panel, state intact. The campaign park is
+  // consumed first (war_enter gives it priority by design), the
+  // cabinet is left, and the file settles — so the reload's entry
+  // is the skirmish panel's stage, exactly as a player's would be.
+  const [skN0x, skN0y] = nodeXY(0);
+  await tap(skN0x, skN0y);   // region 1's node: resumes (consumes) the campaign park
+  ok((await poll('dbg_warstate', [], v => v === 1, 6000)) === 1, 'v1.29 check 36: the campaign park resumed (consumed) on the way');
+  await call('dbg_warhurt', 1, 1, 99999);
+  ok((await poll('dbg_warstate', [], v => v === 0, 9000)) === 0, 'v1.29 check 36: the replayed campaign battle is won and done');
+  await sleep(500);
+  await key('Escape', 300);   // leave the cabinet from the map
+  ok((await poll('dbg_bwmode', [], v => v === -1, 4000)) === -1, 'v1.29 check 36: out of WAR! before the reload');
+  await sleep(6000);   // an autosave writes the settled file (skirmish park in, campaign park out)
+  const blob36 = await page.evaluate(() => localStorage.getItem('tsg_save1') || '');
+  ok(blob36.includes(' kb=') && !blob36.includes(' wb='), 'v1.29 check 36: the save file carries the skirmish park (kb=) and no campaign park', blob36.slice(0, 60));
+  await page.reload({ waitUntil: 'load' });
+  await page.waitForFunction(() => window.__TSG && window.__TSG.dbg_state, null, { timeout: 20000 });
+  await key('Space', 400);
+  await key('Enter', 400);
+  ok((await poll2('dbg_state', v => v === 1, 8000)) === 1, 'v1.29 check 36: the run reloads from the slot');
+  await call2('dbg_tp', 0, 80); await sleep(200);
+  await key('KeyE', 300);
+  ok((await poll2('dbg_mall', v => v === 1)) === 1, 'v1.29 check 36: in the mall after the reload');
+  await call2('dbg_tp', 350, -5976); await sleep(200);
+  await key('KeyE', 250);
+  ok((await poll2('dbg_inarcade', v => v === 1)) === 1, 'v1.29 check 36: in the arcade after the reload');
+  await call2('dbg_tp', 0, -11758); await sleep(200);
+  ok((await call2('dbg_cabinet')) === 6, 'v1.29 check 36: standing at the WAR! cabinet');
+  await key('KeyE', 250);
+  ok((await poll2('dbg_arcgate', v => v === 1, 3000)) === 1, 'v1.29 check 36: WAR! cabinet panel opened');
+  await key('Space', 300);
+  ok((await poll2('dbg_bwmode', v => v === 8, 4000)) === 8, 'v1.29 check 36: WAR! launched after the reload');
+  ok((await poll2('dbg_warskpanel', v => v === 1, 4000)) === 1, 'v1.29 check 36: the RESUME / NEW SKIRMISH panel is up');
+  ok((await call2('dbg_warstate')) === 0, 'v1.29 check 36: the map waits under the panel (nothing auto-resumed)');
+  const instantSk = () => page.evaluate(() => [window.__TSG.dbg_warstate(), window.__TSG.dbg_warskirmish(), window.__TSG.dbg_warsksnap()]);
+  await key('Space', 300);   // RESUME SKIRMISH (the panel's first row)
+  const inst36 = await (async () => { const t0 = Date.now(); let v = await instantSk(); while (v[0] !== 1 && Date.now() - t0 < 6000) { await sleep(120); v = await instantSk(); } return v; })();
+  ok(inst36[0] === 1 && inst36[1] === 1 && inst36[2] === 0, 'v1.29 check 36: RESUME restored the skirmish (park consumed at the same instant)', 'state/skirmish/sksnap=' + inst36.join('/'));
+  const r36 = await frozen2();
+  const hp36 = await structHPs(call2);
+  ok(sameReadings(r36, r35), 'v1.29 check 36: bits, army and nodes match the saved skirmish exactly', readingsStr(r36) + ' vs saved ' + readingsStr(r35));
+  ok(JSON.stringify(hp36) === JSON.stringify(hp35), 'v1.29 check 36: every structure HP matches (the wounded hive included)',
+     'hive ' + hp36[1] + ' vs saved ' + hp35[1]);
+  await tap(320, 234);   // SAVE & QUIT — park it again for the discard check (the pause menu is up)
+  ok((await poll2('dbg_warstate', v => v === 0, 4000)) === 0 && (await call2('dbg_warsksnap')) === 1, 'v1.29 check 36: the skirmish is parked again');
+
+  // check 37: NEW SKIRMISH — the first pick only arms, the second
+  // discards the saved battle and frees the map
+  await sleep(600);
+  await key('Escape', 300);   // leave the cabinet from the map
+  ok((await poll2('dbg_bwmode', v => v === -1, 4000)) === -1, 'v1.29 check 37: out of WAR! again');
+  await call2('dbg_tp', 0, -11758); await sleep(200);
+  await key('KeyE', 250);
+  ok((await poll2('dbg_arcgate', v => v === 1, 3000)) === 1, 'v1.29 check 37: cabinet panel again');
+  await key('Space', 300);
+  ok((await poll2('dbg_warskpanel', v => v === 1, 4000)) === 1, 'v1.29 check 37: the panel is up again');
+  await key('ArrowDown', 200);   // selection to NEW SKIRMISH
+  await key('Space', 300);
+  ok((await call2('dbg_warskpanel')) === 1 && (await call2('dbg_warsksnap')) === 1, 'v1.29 check 37: the first NEW SKIRMISH pick only arms the confirm');
+  await sleep(400);   // the arm's pick lock lapses
+  await key('Space', 300);
+  ok((await poll2('dbg_warskpanel', v => v === 0, 4000)) === 0, 'v1.29 check 37: the second pick discards — panel closed');
+  ok((await call2('dbg_warsksnap')) === 0, 'v1.29 check 37: the saved skirmish is gone');
+  ok((await call2('dbg_warstate')) === 0, 'v1.29 check 37: the bare map remains');
+  await tap(568, 307);
+  ok((await poll2('dbg_warstate', v => v === 4, 4000)) === 4, 'v1.29 check 37: a fresh skirmish can be set up (the discard freed the field)');
+  await key('Escape', 300);
+  ok((await poll2('dbg_warstate', v => v === 0, 4000)) === 0, 'v1.29 check 37: setup backed out to the map');
+
   console.log(`\nwartest: ${pass} passed, ${fail} failed`);
   await browser.close();
   process.exit(fail ? 1 : 0);

@@ -67,6 +67,22 @@ static void war_render_map(int pi, int vx, int vy, int vw2, int vh2){
         draw_text_center(vx+vw2/2, vy+vh2-19, b2, 1, COL(200,230,200)); }
     else draw_text_center(vx+vw2/2, vy+vh2-19, hint_dev()==DEV_PAD? "STICK + A - INVADE - LAST STOP IS SKIRMISH" : (hint_dev()==DEV_TOUCH? "TAP A REGION TO INVADE IT" : "CLICK A REGION - ARROWS + SPACE - S: SKIRMISH"), 1, COL(150,160,185));
     if (S->war_msgt>0) draw_text_center(vx+vw2/2, vy+58, S->war_msg, 1, COL(255,170,150));
+    if (S->war_sk_panel){   // v1.29: the saved-skirmish panel over the map (rects shared with the tap handler in map.c)
+        blend_rect(vx, vy, vw2, vh2, COL(8,8,14), 150);
+        int px, py, pw, ph; war_sk_panel_rects(vx, vy, vw2, vh2, &px, &py, &pw, &ph);
+        rect_fill(px, py, pw, ph, COL(16,18,28)); rect_line(px, py, pw, ph, COL(255,170,90));
+        draw_text_center(px+pw/2, py+14, "A SKIRMISH IS WAITING", 2, COL(255,210,150));
+        draw_text_center(px+pw/2, py+38, "A SAVED SKIRMISH IS PARKED ON THIS FIELD.", 1, COL(200,214,200));
+        for (int n=0;n<2;n++){
+            int ry = py+58+n*38;
+            int sel = (S->war_sk_psel==n);
+            rect_fill(px+16, ry, pw-32, 32, sel? COL(56,64,88) : COL(38,44,60));
+            rect_line(px+16, ry, pw-32, 32, sel? COL(255,220,120) : COL(198,164,84));
+            const char *lbl = n==0? "RESUME SKIRMISH" : (S->war_sk_confirm>0? "NEW SKIRMISH? AGAIN TO DISCARD IT" : "NEW SKIRMISH");
+            draw_text_center(px+pw/2, ry+10, lbl, 2, COL(240,244,250));
+        }
+        draw_text_center(px+pw/2, py+ph-16, hint_dev()==DEV_PAD? "STICK + A - ESC KEEPS IT" : (hint_dev()==DEV_TOUCH? "TAP A ROW" : "ARROWS + SPACE - ESC KEEPS IT"), 1, COL(150,160,185));
+    }
 }
 static void war_draw_bar_btn(BwSim *S, int bx, int by, int act, int cost, const char *name, int hl){
     int afford = S->war_bits >= cost;
@@ -652,7 +668,7 @@ static void war_render(int pi){
         draw_text_center(px+pw/2, py+14, "PAUSED", 2, COL(255,220,120));
         { char buf[48]; char *q=buf; q=sappend(q, S->war_skirmish? "SKIRMISH" : REGION_NAME[rg]); q=sappend(q, " - THE BATTLE WAITS"); *q=0;
           draw_text_center(px+pw/2, py+36, buf, 1, COL(200,210,230)); }
-        const char *PLBL[3] = { "RESUME", "RESTART BATTLE", S->war_skirmish? "QUIT BATTLE" : "SAVE & QUIT" };   // v1.19: a skirmish is never parked — its third choice quits outright
+        const char *PLBL[3] = { "RESUME", "RESTART BATTLE", "SAVE & QUIT" };   // v1.29: a skirmish parks in its own slot now — the third choice saves for both battle kinds
         for (int n=0;n<3;n++){
             int by = war_pause_btn_y(py, n);
             rect_fill(px+40, by, pw-80, 36, COL(38,44,60));

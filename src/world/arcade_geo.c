@@ -120,6 +120,7 @@ static void mor_hurt(int pi, int dmg);            // v1.28: the dbg_morhurt seam
 static void mor_set_test_total(int moose);        // v1.28: the dbg_mortotal seam (test-only route shortening; shipped play never sets it)
 static void mor_warp(int pi, int dist);           // v1.28: the dbg_morwarp seam (stand at a distance on the centreline; Tank's dbg_tankwarp precedent)
 static const char *war_snap_for_save(int pi);   // v1.17: WAR! battle snapshot for the save writer (defined with the WAR! block, below)
+static const char *war_snap_sk_for_save(int pi);   // v1.29: the skirmish park's door, same arrangement
 static void bw_draw_note(int pi);
 static void bw_update(int pi, float dt, const BwIn *in);   // ditto, below
 static void bw_fill_p1(BwIn *bin, float dt);   // P1 input pack (touch-unified), below

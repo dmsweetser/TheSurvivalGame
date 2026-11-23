@@ -34,11 +34,16 @@ static void bw_fill_p1(BwIn *bin, float dt){
     bin->keys = IN.keys | IN.touch_keys;
     int tf = (IN.touch_keys & K_FIRE)? 1:0;
     bin->sel = IN.select_pressed || (tf && !bw_tf_prev);
-    // the K_UP fold is the platformer's hold-to-jump-higher; in TANK
-    // RESCUE (mode 5) Up is just steering north, and folding it into
-    // sel_held made the cannon fire the whole way up the field —
-    // steering must never pull the trigger there (Nov 10 fix)
-    bin->sel_held = ((IN.act_held>>ACT_FIRE)&1) || ((IN.raw>>G.bind[ACT_FIRE])&1) || ((bin->keys & K_UP) && b->bw_mode!=5) || tf;
+    // the K_UP fold belongs to the PLATFORMER alone (mode 3): there
+    // Up is the jump button, and holding it must read as holding the
+    // jump for the hold-to-jump-higher cut. Everywhere else Up is
+    // steering, and steering must never pull the trigger — Tank
+    // Rescue's cannon fired all the way up the field (Nov 10 fix),
+    // and Mordor's swing answered Up instead of the FIRE button
+    // (Nov 23, Daniel's playtest). Excluding modes one at a time
+    // kept letting the next mode fall in; the fold now names the
+    // one mode it exists for.
+    bin->sel_held = ((IN.act_held>>ACT_FIRE)&1) || ((IN.raw>>G.bind[ACT_FIRE])&1) || ((bin->keys & K_UP) && b->bw_mode==3) || tf;
     bw_tf_prev = tf;
     bin->interact = IN.interact_pressed || IN.enter_pressed;
     bin->exit_ = IN.esc_pressed;

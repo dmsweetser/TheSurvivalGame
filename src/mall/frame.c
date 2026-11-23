@@ -277,7 +277,7 @@ static void coop_frame(float dt){
         bin.sel = act2_edge(ACT_FIRE);
         bin.up = p2up; bin.down = p2down;
         bin.wall = act2_edge(ACT_WALL);
-        bin.sel_held = ((IN.act2_held>>ACT_FIRE)&1) || ((p2->cur_keys & K_UP) && G.bud[G.p2_slot].bw_mode!=5);   // mode 5: steering never fires (see bw_fill_p1)
+        bin.sel_held = ((IN.act2_held>>ACT_FIRE)&1) || ((p2->cur_keys & K_UP) && G.bud[G.p2_slot].bw_mode==3);   // the K_UP fold is the platformer's alone: steering never fires (see bw_fill_p1)
         bw_update(G.p2_slot, dt, &bin);
         p2->cur_keys=0;   // P2's DEV stands at the gate meanwhile
     }

@@ -225,8 +225,10 @@ static void continue_run(int slot){
                   // a space) and are rebuilt into war_snap[idx] below.
                   // The nodes key is "wg", NOT the spec's "wn" — wn is
                   // already whale_on in this same token tail.
-                  char twb[64], twu[4096], tws[2688], twg[192], twt[4800], twf[512];   // v1.18: caps re-audited — wt must hold 160 terrain entries now, and the old tws/twf caps could already clip a big battle's tail
-                  int twar=0; twb[0]=twu[0]=tws[0]=twg[0]=twt[0]=twf[0]=0;
+                  char twb[64], twu[4096], tws[2688], twg[192], twt[4800], twf[512], twh[512];   // v1.18: caps re-audited — wt must hold 160 terrain entries now, and the old tws/twf caps could already clip a big battle's tail; v1.29: twh joins (the hive purses used to fall out of the rebuild)
+                  int twar=0; twb[0]=twu[0]=tws[0]=twg[0]=twt[0]=twf[0]=twh[0]=0;
+                  char tkb[64], tku[4096], tks[2688], tkg[192], tkt[4800], tkf[512], tkh[512];   // v1.29: the skirmish park's token luggage, same caps
+                  int twarsk=0; tkb[0]=tku[0]=tks[0]=tkg[0]=tkt[0]=tkf[0]=tkh[0]=0;
                   while (*q==' '){
                       q++;
                       char kk[4]; int ki=0;
@@ -288,7 +290,7 @@ static void continue_run(int slot){
                               while (*q>='0' && *q<='9' && tptk_n<MAXSTACK) tptk[tptk_n++]=*q++;
                           }
                           while (*q && *q!=' ' && *q!='\n') q++;   // consume any overflow exactly to the delimiter (Nov 5 lesson)
-                      } else if (kk[0]=='w' && kk[2]==0 && (kk[1]=='b' || kk[1]=='u' || kk[1]=='s' || kk[1]=='g' || kk[1]=='t' || kk[1]=='f')){
+                      } else if (kk[0]=='w' && kk[2]==0 && (kk[1]=='b' || kk[1]=='u' || kk[1]=='s' || kk[1]=='g' || kk[1]=='t' || kk[1]=='f' || kk[1]=='h')){
                           // a WAR! snapshot value: copy it raw (bounded);
                           // the generic tail-skip below then steps over it
                           char *dst; int cap;
@@ -297,10 +299,26 @@ static void continue_run(int slot){
                           else if (kk[1]=='s'){ dst=tws; cap=(int)sizeof(tws); }
                           else if (kk[1]=='g'){ dst=twg; cap=(int)sizeof(twg); }
                           else if (kk[1]=='t'){ dst=twt; cap=(int)sizeof(twt); }
+                          else if (kk[1]=='h'){ dst=twh; cap=(int)sizeof(twh); }
                           else { dst=twf; cap=(int)sizeof(twf); }
                           { int di=0; while (*q && *q!=' ' && *q!='\n' && di<cap-1) dst[di++]=*q++;
                             dst[di]=0; while (*q && *q!=' ' && *q!='\n') q++; }
                           if (kk[1]=='b') twar=1;   // the header anchors the snapshot; the rest are its luggage
+                      } else if (kk[0]=='k' && kk[2]==0 && (kk[1]=='b' || kk[1]=='u' || kk[1]=='s' || kk[1]=='g' || kk[1]=='t' || kk[1]=='f' || kk[1]=='h')){
+                          // v1.29: a SKIRMISH snapshot value — the same
+                          // luggage under the k prefix, rebuilt into
+                          // the second park below
+                          char *dst; int cap;
+                          if (kk[1]=='b'){ dst=tkb; cap=(int)sizeof(tkb); }
+                          else if (kk[1]=='u'){ dst=tku; cap=(int)sizeof(tku); }
+                          else if (kk[1]=='s'){ dst=tks; cap=(int)sizeof(tks); }
+                          else if (kk[1]=='g'){ dst=tkg; cap=(int)sizeof(tkg); }
+                          else if (kk[1]=='t'){ dst=tkt; cap=(int)sizeof(tkt); }
+                          else if (kk[1]=='h'){ dst=tkh; cap=(int)sizeof(tkh); }
+                          else { dst=tkf; cap=(int)sizeof(tkf); }
+                          { int di=0; while (*q && *q!=' ' && *q!='\n' && di<cap-1) dst[di++]=*q++;
+                            dst[di]=0; while (*q && *q!=' ' && *q!='\n') q++; }
+                          if (kk[1]=='b') twarsk=1;
                       }
                       int vv=parse_int(q);
                       if (kk[0]=='b' && kk[1]=='k' && kk[2]==0) pl->banked=vv*0.5f;
@@ -463,8 +481,20 @@ static void continue_run(int slot){
                           sp = sappend(sp, " wg="); sp = sappend(sp, twg);
                           sp = sappend(sp, " wt="); sp = sappend(sp, twt);
                           sp = sappend(sp, " wf="); sp = sappend(sp, twf);
+                          if (twh[0]){ sp = sappend(sp, " wh="); sp = sappend(sp, twh); }   // v1.29: the hive purses ride the rebuild too (they used to fall out, resetting every loaded park's purses to 150)
                           *sp = 0; war_snap_on[idx] = 1;
                           war_snap_reg[idx] = parse_int(twb);   // v1.18: the wb header's first field is the region
+                      }
+                      if (twarsk){   // v1.29: rebuild the SKIRMISH park's text (k-prefixed keys, its own buffer)
+                          char *sp = war_snap_sk[idx];
+                          sp = sappend(sp, "kb="); sp = sappend(sp, tkb);
+                          sp = sappend(sp, " ku="); sp = sappend(sp, tku);
+                          sp = sappend(sp, " ks="); sp = sappend(sp, tks);
+                          sp = sappend(sp, " kg="); sp = sappend(sp, tkg);
+                          sp = sappend(sp, " kt="); sp = sappend(sp, tkt);
+                          sp = sappend(sp, " kf="); sp = sappend(sp, tkf);
+                          if (tkh[0]){ sp = sappend(sp, " kh="); sp = sappend(sp, tkh); }
+                          *sp = 0; war_snap_sk_on[idx] = 1;
                       }
                       bd->craft_gn = tcd_gn;
                       for (int gi=0;gi<tcd_gn;gi++) bd->craft_gone[gi]=tcd_g[gi];

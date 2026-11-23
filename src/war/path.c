@@ -639,9 +639,11 @@ static void war_start_battle(int pi, int region){
     war_link_pull(pi);   // feat 13: a launch pulls the other local commander in
 }
 // v1.19: a SKIRMISH — an ad-hoc battle on the player's picked
-// size and difficulty. It never touches war_prog, is never
-// parked, and never disturbs a parked campaign battle (nothing
-// here serializes or clears a snapshot). The difficulty doubles
+// size and difficulty. It never touches war_prog, and never
+// disturbs a parked campaign battle (nothing here serializes or
+// clears a CAMPAIGN snapshot). v1.29: a skirmish CAN be parked
+// now — in its own slot — and starting a fresh one supersedes
+// the saved one, so the skirmish park is cleared here. The difficulty doubles
 // as the battle's region equivalent: every region-keyed strength
 // (unit/hive HP, wave strength and pace, hive count banding)
 // reads it exactly as it would a campaign region.
@@ -651,6 +653,7 @@ static void war_start_skirmish(int pi){
     int diff = (S->war_diff>=1 && S->war_diff<=3)? S->war_diff : 2;
     S->war_size = size; S->war_diff = diff;
     war_clear_field(S);
+    war_snap_sk_clear(pi);   // v1.29: a fresh skirmish supersedes the saved one
     S->war_skirmish = 1;
     if (size==1){ S->war_aw=1200.0f; S->war_ah=900.0f; S->war_lines=2; }
     else if (size==3){ S->war_lines=4; }
