@@ -119,6 +119,11 @@ __attribute__((export_name("text_mode"))) int exp_text_mode(void){
     if (G.state==GS_MENU && G.edit_field) return G.edit_field;
     if (whale_code_mode[G.my_id]) return 3;
     if (BWS[G.my_id].craft_menu && BWS[G.my_id].craft_search) return 4;   // the craft menu's search field
+    // v1.27: 5 = the Source Room editor / LIVE TUNING on a touch
+    // device (srcterm_text_wanted carries the essential mobile gate:
+    // on a desktop this field must never take focus, or the shell's
+    // keydown path would eat the editor's Ctrl+S / Ctrl+T chords)
+    if (srcterm_text_wanted()) return 5;
     return 0;
 }
 __attribute__((export_name("dbg_peek"))) void exp_dbg_peek(void){ peek_slots(); }
@@ -151,7 +156,13 @@ __attribute__((export_name("touch_point"))) void exp_touch_point(int id, int x, 
             IN.tp[i].x=IN.tp[i].x0=x; IN.tp[i].y=IN.tp[i].y0=y;
             IN.tp[i].age=0; IN.tp[i].moved=0; IN.tp[i].zone=0;
             if (G.state==GS_PLAY){
-                int z = tp_zone_at(x, y);
+                // WAR! (bw_mode 8) draws no main-game touch buttons,
+                // so its screens must not claim their zones: the
+                // SKIRMISH button sits under the FIRE/USE zones and
+                // its taps were eaten whole (v1.27, Daniel). Zone 0
+                // here means the touch stays a plain tap/drag, which
+                // is all WAR! ever reads.
+                int z = (G.my_id>=0 && G.bud[G.my_id].in_bw && G.bud[G.my_id].bw_mode==8)? 0 : tp_zone_at(x, y);
                 if (z==9){ IN.tp[i].zone=9; IN.tp_wall_edge=1; }        // WALL: both schemes
                 else if (z==7){ IN.tp[i].zone=7; IN.tp_wpn_edge=1; }   // WPN: both schemes
                 else if (G.touch_ctl==1){
@@ -562,7 +573,7 @@ __attribute__((export_name("dbg_crtbesttime"))) int exp_dbg_crtbesttime(void){ i
 // through the same table the game renders with; set the live race clock
 // so a test can land a finish at a chosen time via the real record path
 __attribute__((export_name("dbg_crttbest"))) int exp_dbg_crttbest(int track){ int id = G.my_id>=0? G.my_id : 0; if (track<0 || track>7) return -1; return G.bud[id].crt_tbest[track]; }
-__attribute__((export_name("dbg_crtmedal"))) int exp_dbg_crtmedal(int track){ int id = G.my_id>=0? G.my_id : 0; if (track<0 || track>7) return -1; return medal_tier(G.bud[id].crt_tbest[track], crt_medal[track]); }
+__attribute__((export_name("dbg_crtmedal"))) int exp_dbg_crtmedal(int track){ int id = G.my_id>=0? G.my_id : 0; if (track<0 || track>7) return -1; return G.bud[id].crt_medal_best[track]; }   // v1.27: the EARNED medal (podium rule), not a derivation from the best time
 __attribute__((export_name("dbg_crtsettime"))) int exp_dbg_crtsettime(int ds){ int id = G.my_id>=0? G.my_id : 0; BWS[id].crt_t = ds * 0.1f; return (int)(BWS[id].crt_t * 10.0f); }
 __attribute__((export_name("dbg_crtskip"))) int exp_dbg_crtskip(void){ int id = G.my_id>=0? G.my_id : 0; BwSim *S = &BWS[id];
     if (G.bud[id].bw_mode != 7) return -1;
@@ -573,6 +584,17 @@ __attribute__((export_name("dbg_crtskip"))) int exp_dbg_crtskip(void){ int id = 
       S->crt_x[0] = x; S->crt_y[0] = y; S->crt_h[0] = fatan2(hy, hx); S->crt_v[0] = 120.0f;
       S->crt_seg[0] = crt_nearest_full(x, y); }
     return (int)S->crt_prog[0]; }
+__attribute__((export_name("dbg_crtfin"))) int exp_dbg_crtfin(int i){ int id = G.my_id>=0? G.my_id : 0; BwSim *S = &BWS[id];
+    if (G.bud[id].bw_mode != 7 || i<1 || i>5) return -1;
+    // v1.27 test staging (the medal podium boundary): park rival kart
+    // i just PAST the finish line — the race's own finish check then
+    // registers its place on the next frame, exactly as if it had
+    // driven home. Observation/staging only, like dbg_crtskip.
+    S->crt_prog[i] = 3.0f * CRT_LEN + 50.0f;
+    { float x, y, hx, hy; crt_point_at(CRT_OFF + S->crt_prog[i], 0, &x, &y, &hx, &hy);
+      S->crt_x[i] = x; S->crt_y[i] = y; S->crt_h[i] = fatan2(hy, hx); S->crt_v[i] = 120.0f;
+      S->crt_seg[i] = crt_nearest_full(x, y); }
+    return (int)S->crt_prog[i]; }
 __attribute__((export_name("dbg_arcgate"))) int exp_dbg_arcgate(void){ int id = G.my_id>=0? G.my_id : 0; return arcgate[id]; }
 __attribute__((export_name("dbg_jet"))) int exp_dbg_jet(void){ int id = G.my_id>=0? G.my_id : 0; return G.p[id].bean_jet>0? 1 : (G.p[id].jet_fall>0? 2 : 0); }
 __attribute__((export_name("dbg_givebean"))) void exp_dbg_givebean(void){ int id = G.my_id>=0? G.my_id : 0; G.p[id].beans++; }
@@ -656,6 +678,8 @@ __attribute__((export_name("dbg_warsnap"))) int exp_dbg_warsnap(void){ int id = 
 __attribute__((export_name("dbg_warbcat"))) int exp_dbg_warbcat(void){ int id = G.my_id>=0? G.my_id : 0; return BWS[id].war_bcat; }   // v1.17: open bar category (-1 top level, 0 TRAIN, 1 BUILD, 2 DEFENSE)
 __attribute__((export_name("dbg_warnodes"))) int exp_dbg_warnodes(void){ int id = G.my_id>=0? G.my_id : 0; BwSim *S = &BWS[id]; int sum=0;
     for (int n=0;n<S->war_nn;n++) sum += S->war_namt[n]; return S->war_nn*100000 + sum; }   // v1.17: node count *100000 + total bits left on the field
+__attribute__((export_name("dbg_warnodexy"))) int exp_dbg_warnodexy(int n){ int id = G.my_id>=0? G.my_id : 0; BwSim *S = &BWS[id];
+    if (n<0 || n>=S->war_nn || S->war_namt[n]<=0) return -1; return (int)(S->war_nx[n]-WAR_OX)*10000 + (int)(S->war_ny[n]-WAR_OY); }   // v1.27: node n's ARENA-RELATIVE coords, packed like dbg_warunitxy (every war seam reports relative — featxy/structxy/unitxy all subtract WAR_OX/WAR_OY; observation only — the wall checks scan placement clearance, and v1.27's node jitter means they must read node spots live)
 __attribute__((export_name("dbg_warcarry"))) int exp_dbg_warcarry(void){ int id = G.my_id>=0? G.my_id : 0; BwSim *S = &BWS[id]; int m=-1;
     for (int i=0;i<WAR_MAXU;i++) if (S->war_uhp[i]>0 && S->war_utype[i]==WAR_U_HARV && S->war_ucarry[i]>m) m = S->war_ucarry[i]; return m; }   // v1.17: the fullest harvester's load
 __attribute__((export_name("dbg_warqueue"))) int exp_dbg_warqueue(int s){ int id = G.my_id>=0? G.my_id : 0; BwSim *S = &BWS[id];
@@ -756,6 +780,14 @@ __attribute__((export_name("dbg_tankshells"))) int exp_dbg_tankshells(void){ int
 __attribute__((export_name("dbg_tankwep"))) int exp_dbg_tankwep(void){ int id = G.my_id>=0? G.my_id : 0; return BWS[id].tank_wep; }
 __attribute__((export_name("dbg_tankgren"))) int exp_dbg_tankgren(void){ int id = G.my_id>=0? G.my_id : 0; return BWS[id].tank_gren; }
 __attribute__((export_name("dbg_tankboom"))) int exp_dbg_tankboom(void){ int id = G.my_id>=0? G.my_id : 0; int n=0; for (int i=0;i<6;i++) if (BWS[id].tank_boom_t[i]>0) n++; for (int i=0;i<10;i++) if (BWS[id].tank_gr_a[i]) n+=10; return n; }
+// v1.27 powerup seams (observation only): the tank's x, a live count
+// of tank entities of a kind (3 wrench, 6 health, 7 launcher), the
+// first such entity's position (-1 when none), and the launcher flag
+__attribute__((export_name("dbg_tankx"))) int exp_dbg_tankx(void){ int id = G.my_id>=0? G.my_id : 0; return (int)G.bud[id].x; }
+__attribute__((export_name("dbg_tankpick"))) int exp_dbg_tankpick(int kind){ int id = G.my_id>=0? G.my_id : 0; int n=0; for (int i=0;i<BWS[id].tank_en_n;i++) if (BWS[id].tank_en[i].kind==kind) n++; return n; }
+__attribute__((export_name("dbg_tankpickx"))) int exp_dbg_tankpickx(int kind){ int id = G.my_id>=0? G.my_id : 0; for (int i=0;i<BWS[id].tank_en_n;i++) if (BWS[id].tank_en[i].kind==kind) return (int)BWS[id].tank_en[i].x; return -1; }
+__attribute__((export_name("dbg_tankpicky"))) int exp_dbg_tankpicky(int kind){ int id = G.my_id>=0? G.my_id : 0; for (int i=0;i<BWS[id].tank_en_n;i++) if (BWS[id].tank_en[i].kind==kind) return (int)BWS[id].tank_en[i].y; return -1; }
+__attribute__((export_name("dbg_tankglauncher"))) int exp_dbg_tankglauncher(void){ int id = G.my_id>=0? G.my_id : 0; return tank_glauncher_st[id]; }
 __attribute__((export_name("dbg_crtdrv"))) int exp_dbg_crtdrv(int k){ int id = G.my_id>=0? G.my_id : 0; if (k<0||k>5) return -1; return BWS[id].crt_species[k]*100 + BWS[id].crt_dcolidx[k]*10 + BWS[id].crt_nameidx[k]%10; }
 __attribute__((export_name("dbg_tankobj"))) int exp_dbg_tankobj(void){ int id = G.my_id>=0? G.my_id : 0; return BWS[id].tank_obj; }
 __attribute__((export_name("dbg_tankdeliv"))) int exp_dbg_tankdeliv(void){ int id = G.my_id>=0? G.my_id : 0; return BWS[id].tank_deliv; }
@@ -828,6 +860,16 @@ __attribute__((export_name("dbg_srcdoor"))) int exp_dbg_srcdoor(void){ int id = 
 __attribute__((export_name("dbg_srcterm"))) int exp_dbg_srcterm(void){ int id = G.my_id>=0? G.my_id : 0; return srcterm_view_for(id); }
 __attribute__((export_name("dbg_srcfile"))) int exp_dbg_srcfile(void){ int id = G.my_id>=0? G.my_id : 0; return srcterm_file_idx(id); }
 __attribute__((export_name("dbg_srcmod"))) int exp_dbg_srcmod(void){ return src_edited_count(); }
+// v1.27 wrap/touch seams — observe only: the editor's wrapped
+// display-row total, the cursor's display row, the display-row
+// scroll offset, the cursor packed as line*100000+col, the browser
+// selection packed as bsel*10000+bscroll, and the touch-edit gate
+__attribute__((export_name("dbg_srcdrows"))) int exp_dbg_srcdrows(void){ return srcterm_dbg_drows(); }
+__attribute__((export_name("dbg_srcdrow"))) int exp_dbg_srcdrow(void){ return srcterm_dbg_drow(); }
+__attribute__((export_name("dbg_srctop"))) int exp_dbg_srctop(void){ return srcterm_dbg_top(); }
+__attribute__((export_name("dbg_srccur"))) int exp_dbg_srccur(void){ return srcterm_dbg_cursor(); }
+__attribute__((export_name("dbg_srcbrowse"))) int exp_dbg_srcbrowse(void){ return srcterm_dbg_browse(); }
+__attribute__((export_name("dbg_srccanedit"))) int exp_dbg_srccanedit(void){ int id = G.my_id>=0? G.my_id : 0; return srcterm_dbg_canedit(id); }
 __attribute__((export_name("dbg_givetrophy"))) int exp_dbg_givetrophy(int n){ dbg_pin_trophies(n); int id = G.my_id>=0? G.my_id : 0; return trophy_earned_count(&G.p[id]); }
 // LIVE TUNING (v1.26 Item 3): the entry name rides in dbg_scratch;
 // values cross as milli-units (x1000) so ints and floats share a seam

@@ -178,11 +178,18 @@ static void do_save(void){
                     // best times ride as compound tokens in the cw/cd
                     // idiom, written ONLY when some entry is set, so a
                     // medal-less save stays byte-identical to before.
-                    { int anymc=0, anymr=0;
+                    { int anymc=0, anymr=0, anymd=0;
                       for (int ti=0; ti<8; ti++) if (bd->crt_tbest[ti]>0) anymc=1;
+                      for (int ti=0; ti<8; ti++) if (bd->crt_medal_best[ti]>0) anymd=1;
                       for (int ti=0; ti<16; ti++) if (bd->plat_tbest[ti]>0) anymr=1;
                       if (anymc){ *p++=' '; *p=0; p = put_key(p, "mc");
                           for (int ti=0; ti<8; ti++){ if (ti) *p++=','; p = put_int(p, bd->crt_tbest[ti]); } }
+                      // v1.27: the EARNED Cart medals ride as md. It is
+                      // written whenever mc or md has anything to say,
+                      // so a save WITHOUT md is provably pre-v1.27 and
+                      // the loader migrates its medals from the times.
+                      if (anymc || anymd){ *p++=' '; *p=0; p = put_key(p, "md");
+                          for (int ti=0; ti<8; ti++){ if (ti) *p++=','; p = put_int(p, bd->crt_medal_best[ti]); } }
                       if (anymr){ *p++=' '; *p=0; p = put_key(p, "mr");
                           for (int ti=0; ti<16; ti++){ if (ti) *p++=','; p = put_int(p, bd->plat_tbest[ti]); } } }
                     *p++=' '; *p=0; p = put_key(p, "wr"); p = put_int(p, bd->war_prog);

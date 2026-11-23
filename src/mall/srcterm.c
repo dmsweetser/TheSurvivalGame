@@ -4,10 +4,13 @@
 // THE SOURCE TERMINAL (v1.26 Item 1c + Item 3) — station 9, inside the
 // Source Room. Five views over the game's own embedded source
 // (game/src_blob.c): a file BROWSER, a full-screen EDITOR (the game's
-// bitmap font; keyboard required to edit — pad/touch are view-only),
-// an unsaved-changes / reset PROMPT, a BUILD view (host compile via
-// platform/srcbuild.c; on the web it explains itself), and the LIVE
-// TUNING list (Item 3) for files that carry registry entries.
+// bitmap font; v1.27: keyboard OR touch can edit — the pad is
+// view-only), an unsaved-changes / reset PROMPT, a BUILD view (host
+// compile via platform/srcbuild.c; on the web it explains itself),
+// and the LIVE TUNING list (Item 3) for files that carry registry
+// entries. v1.27: long lines SOFT-WRAP in the source/editor views —
+// wrapping is display-only; the file bytes and the edit model never
+// change, and every scroll offset below counts DISPLAY rows.
 // Persistence is the overlay model in game/srcedit.c (plat_mod_*);
 // RESET STOCK clears edits, tuning overrides and the custom page.
 
@@ -32,7 +35,9 @@ static int srct_nrows[2];
 static int srct_bsel[2], srct_bscroll[2];
 static char srct_note[2][128];
 static int srct_elen[2], srct_cur[2], srct_dirty[2];
-static int srct_top[2], srct_left[2];
+static int srct_top[2];              // v1.27: a DISPLAY-row offset (soft wrap)
+// touch drag-scroll state (v1.27): last finger y + sub-row remainder
+static int srct_drag_on[2], srct_drag_y[2], srct_drag_acc[2];
 static int srct_repkey[2], srct_rep_t[2];
 static int srct_prompt[2], srct_psel[2];        // prompt: 0 unsaved, 1 reset confirm
 static int srct_tsel[2], srct_tscroll[2], srct_tn[2];
@@ -44,9 +49,19 @@ static int srct_build_scroll[2];
 static int srct_swallow[2];
 
 static void srct_note_set(int s, const char *t){ scpy(srct_note[s], t, 128); }
+// v1.27: touch reaches parity — a keyboard OR a touch device may
+// modify source (Daniel, Nov 22). The pad stays view/scroll-only.
 static int srct_can_edit(int pi){
-    return pi==G.my_id && dev_local()==DEV_KB;
+    return pi==G.my_id && (dev_local()==DEV_KB || mobile_ui());
 }
+// the panel geometry, one derivation for input and drawing alike
+static int srct_panel_w(void){ return G.ui_compact? 308 : STORE_W; }
+static int srct_panel_x(void){ int w = srct_panel_w(); return G.ui_compact? G.view_x0 + (G.view_w - w)/2 : STORE_X; }
+static int srct_panel_cols(void){ return (srct_panel_w()-20)/8; }
+// editor text rows on screen: the touch footer (buttons + a status
+// row) eats the bottom of the panel on mobile, so fewer rows fit
+static int srct_editor_lines(void){ return mobile_ui()? (STORE_H-40-52)/16 : (STORE_H-40-24)/16; }
+
 // where the frame may close the panel outright: only the browser
 // view. Inner views own Esc/Interact (the editor's Esc is "back",
 // the prompt's whole job is deciding) — mall/frame.c asks here.
@@ -62,6 +77,17 @@ static int srct_open_for(int pi){
 }
 static int srcterm_view_for(int pi){ return srct_open_for(pi)? srct_view[whale_slot_of(pi)] : 0; }
 static int srcterm_file_idx(int pi){ return srct_file[whale_slot_of(pi)]; }
+// the soft-keyboard bridge (wasm exp_text_mode): 5 while the local
+// terminal sits in EDIT or TUNE on a touch device. The mobile gate
+// is essential — on a desktop the shell's hidden field must never
+// hold focus, or its keydown path would swallow the editor's
+// Ctrl+S / Ctrl+T chords as printable text.
+static int srcterm_text_wanted(void){
+    if (!mobile_ui()) return 0;
+    if (!srct_open_for(G.my_id)) return 0;
+    int s = whale_slot_of(G.my_id);
+    return (srct_view[s]==SRV_EDIT || srct_view[s]==SRV_TUNE)? 5 : 0;
+}
 
 // --- browser rows ------------------------------------------------------
 static void srct_build_rows(int s){
@@ -107,7 +133,8 @@ static void srct_load_editor(int s, int idx){
     int n = src_file_current(idx, src_edit_buf[s], SRCT_CAP);
     if (n>=SRCT_CAP) n = SRCT_CAP-1;
     srct_elen[s]=n; src_edit_buf[s][n]=0;
-    srct_cur[s]=0; srct_dirty[s]=0; srct_top[s]=0; srct_left[s]=0;
+    srct_cur[s]=0; srct_dirty[s]=0; srct_top[s]=0;
+    srct_drag_on[s]=0; srct_drag_acc[s]=0;
     srct_repkey[s]=-1; srct_rep_t[s]=0;
 }
 static void srct_save_editor(int s){
@@ -133,6 +160,101 @@ static int srct_line_len(int s, int ls){
     int n=0; while (ls+n<srct_elen[s] && src_edit_buf[s][ls+n]!='\n') n++;
     return n;
 }
+// --- soft wrap (v1.27, display-only) -----------------------------------
+// A logical line of llen chars at `cols` columns takes this many
+// display rows. The cursor's display row is the sum of the segments
+// of every line above it plus its own segment; a cursor sitting at
+// the end of a line whose length is an exact multiple of cols stays
+// on that line's LAST segment (offset cols), never on a phantom row.
+static int srct_line_segs(int llen, int cols){
+    if (cols<1) cols=1;
+    return llen<=0? 1 : (llen+cols-1)/cols;
+}
+static int srct_total_lines(int s){
+    int n=1; for (int i=0;i<srct_elen[s];i++) if (src_edit_buf[s][i]=='\n') n++;
+    return n;
+}
+static int srct_total_drows(int s, int cols){
+    // one pass over the buffer (this runs per frame — no per-line
+    // rescans from byte 0)
+    int total=0, llen=0;
+    for (int i=0;i<srct_elen[s];i++){
+        if (src_edit_buf[s][i]=='\n'){ total += srct_line_segs(llen, cols); llen=0; }
+        else llen++;
+    }
+    return total + srct_line_segs(llen, cols);
+}
+// the cursor's segment index within its line + its column offset
+// inside that segment (the end-of-line adjustment lives here)
+static void srct_cursor_seg(int s, int cols, int *seg, int *off){
+    int line, col, ls; srct_cursor_lc(s, &line, &col, &ls);
+    int llen = srct_line_len(s, ls);
+    if (col==llen && llen>0 && (llen%cols)==0){ *seg = llen/cols - 1; *off = cols; }
+    else { *seg = col/cols; *off = col - (*seg)*cols; }
+    (void)line;
+}
+static void srct_cursor_display(int s, int cols, int *drow, int *doff){
+    int line, col, ls; srct_cursor_lc(s, &line, &col, &ls);
+    int d=0, llen=0;
+    for (int i=0;i<ls;i++){
+        if (src_edit_buf[s][i]=='\n'){ d += srct_line_segs(llen, cols); llen=0; }
+        else llen++;
+    }
+    int seg, off; srct_cursor_seg(s, cols, &seg, &off);
+    *drow = d + seg; *doff = off;
+    (void)line; (void)col;
+}
+// a tap on display row drow / display column dcol -> the byte offset
+// it points at (clamped to that line's end); one pass over the text
+static int srct_display_to_offset(int s, int cols, int drow, int dcol){
+    int acc=0, i=0;
+    for (;;){
+        int ls=i, llen=0;
+        while (i<srct_elen[s] && src_edit_buf[s][i]!='\n'){ i++; llen++; }
+        int segs = srct_line_segs(llen, cols);
+        if (drow < acc+segs){
+            int c = (drow-acc)*cols + dcol;
+            if (c>llen) c=llen;
+            return ls + c;
+        }
+        acc += segs;
+        if (i>=srct_elen[s]) break;
+        i++;   // the '\n'
+    }
+    return srct_elen[s];
+}
+// keep the cursor's display row inside the visible window
+static void srct_ensure_cursor(int s){
+    int cols = srct_panel_cols(), lines = srct_editor_lines();
+    int drow, doff; srct_cursor_display(s, cols, &drow, &doff);
+    if (drow < srct_top[s]) srct_top[s] = drow;
+    if (drow > srct_top[s]+lines-1) srct_top[s] = drow-lines+1;
+    int total = srct_total_drows(s, cols);
+    if (srct_top[s] > total-lines) srct_top[s] = total-lines;
+    if (srct_top[s]<0) srct_top[s]=0;
+    (void)doff;
+}
+// --- touch drag scroll (v1.27) -------------------------------------------
+// IN.touch_down carries the live finger (the drag scheme's mirror of
+// tp[]); stick-scheme touches in the store never set it, so fall back
+// to the first live zone-0 touch point. Returns whole rows scrolled
+// this frame: positive = the view moves DOWN (finger swept up).
+static int srct_drag_pos(int *x, int *y){
+    if (IN.touch_down){ *x=IN.touch_x; *y=IN.touch_y; return 1; }
+    for (int i=0;i<6;i++) if (IN.tp[i].active && IN.tp[i].zone==0){ *x=IN.tp[i].x; *y=IN.tp[i].y; return 1; }
+    return 0;
+}
+static int srct_drag_rows(int s, int row_h){
+    int x, y;
+    if (!srct_drag_pos(&x, &y)){ srct_drag_on[s]=0; srct_drag_acc[s]=0; return 0; }
+    if (!srct_drag_on[s]){ srct_drag_on[s]=1; srct_drag_y[s]=y; srct_drag_acc[s]=0; return 0; }
+    srct_drag_acc[s] += y - srct_drag_y[s];
+    srct_drag_y[s] = y;
+    int rows=0;
+    while (srct_drag_acc[s]<=-row_h){ rows++; srct_drag_acc[s]+=row_h; }
+    while (srct_drag_acc[s]>= row_h){ rows--; srct_drag_acc[s]-=row_h; }
+    return rows;
+}
 static void srct_insert(int s, char c){
     if (srct_elen[s]+1 > srct_edit_limit(srct_file[s])){
         srct_note_set(s, "FILE SIZE CAP REACHED - CANNOT GROW THIS FILE FURTHER");
@@ -155,6 +277,40 @@ static void srct_delete(int s){
     srct_elen[s]--; src_edit_buf[s][srct_elen[s]]=0;
     srct_dirty[s]=1;
 }
+// v1.27: vertical movement steps DISPLAY rows — one step crosses to
+// the next wrapped segment of the same line before it ever leaves
+// the line, keeping the segment column offset where it can.
+static void srct_move_display(int s, int drows){
+    int cols = srct_panel_cols();
+    int step = drows<0? -1 : 1, n = drows<0? -drows : drows;
+    for (int k=0;k<n;k++){
+        int line, col, ls; srct_cursor_lc(s, &line, &col, &ls);
+        int llen = srct_line_len(s, ls);
+        int seg, off; srct_cursor_seg(s, cols, &seg, &off);
+        if (step>0){
+            if (seg+1 < srct_line_segs(llen, cols)){
+                int nc = (seg+1)*cols + off; if (nc>llen) nc=llen;
+                srct_cur[s] = ls + nc;
+            } else {
+                int nls = ls + llen + 1;
+                if (nls>srct_elen[s]) break;
+                int nl = srct_line_len(s, nls);
+                srct_cur[s] = nls + (off<nl? off : nl);
+            }
+        } else {
+            if (seg>0){
+                int nc = (seg-1)*cols + off; if (nc>llen) nc=llen;
+                srct_cur[s] = ls + nc;
+            } else {
+                if (line<=0) break;
+                int pls = srct_line_start(s, line-1), pl = srct_line_len(s, pls);
+                int nc = (srct_line_segs(pl, cols)-1)*cols + off; if (nc>pl) nc=pl;
+                srct_cur[s] = pls + nc;
+            }
+        }
+        (void)col;
+    }
+}
 static void srct_move(int s, int pk){
     int line, col, ls; srct_cursor_lc(s, &line, &col, &ls);
     int ll = srct_line_len(s, ls);
@@ -162,23 +318,11 @@ static void srct_move(int s, int pk){
     else if (pk==PK_RIGHT){ if (srct_cur[s]<srct_elen[s]) srct_cur[s]++; }
     else if (pk==PK_HOME){ srct_cur[s]=ls; }
     else if (pk==PK_END){ srct_cur[s]=ls+ll; }
-    else if (pk==PK_UP || pk==PK_PGUP){
-        int step = pk==PK_PGUP? 10 : 1;
-        for (int k=0;k<step && line>0;k++){
-            line--; ls = srct_line_start(s, line);
-            int nl = srct_line_len(s, ls);
-            srct_cur[s] = ls + (col<nl? col : nl);
-        }
-    }
-    else if (pk==PK_DOWN || pk==PK_PGDN){
-        int step = pk==PK_PGDN? 10 : 1;
-        for (int k=0;k<step;k++){
-            int nls = ls+ll+1;
-            if (nls>srct_elen[s]) break;
-            ls = nls; ll = srct_line_len(s, ls);
-            srct_cur[s] = ls + (col<ll? col : ll);
-        }
-    }
+    else if (pk==PK_UP) srct_move_display(s, -1);
+    else if (pk==PK_DOWN) srct_move_display(s, 1);
+    else if (pk==PK_PGUP) srct_move_display(s, -10);
+    else if (pk==PK_PGDN) srct_move_display(s, 10);
+    (void)line; (void)col;
 }
 // one editor key step (edge or auto-repeat) for movement/delete keys
 static void srct_editor_key(int s, int pk){
@@ -303,6 +447,29 @@ static void srct_tune_apply(int s){
     srct_view[s]=SRV_EDIT;
 }
 
+// --- test seams (observe only, never saved) ------------------------------
+static int srcterm_dbg_drows(void){
+    int s = whale_slot_of(G.my_id);
+    return srct_view[s]==SRV_EDIT? srct_total_drows(s, srct_panel_cols()) : -1;
+}
+static int srcterm_dbg_drow(void){
+    int s = whale_slot_of(G.my_id);
+    if (srct_view[s]!=SRV_EDIT) return -1;
+    int d, o; srct_cursor_display(s, srct_panel_cols(), &d, &o);
+    return d;
+}
+static int srcterm_dbg_top(void){ return srct_top[whale_slot_of(G.my_id)]; }
+static int srcterm_dbg_cursor(void){
+    int s = whale_slot_of(G.my_id);
+    int l, c, ls; srct_cursor_lc(s, &l, &c, &ls);
+    return l*100000 + c;
+}
+static int srcterm_dbg_browse(void){
+    int s = whale_slot_of(G.my_id);
+    return srct_bsel[s]*10000 + srct_bscroll[s];
+}
+static int srcterm_dbg_canedit(int pi){ return srct_can_edit(pi); }
+
 // --- input ---------------------------------------------------------------
 static void srct_browser_input(int pi, int s, int up, int down, int activate){
     int n = srct_nrows[s];
@@ -310,6 +477,25 @@ static void srct_browser_input(int pi, int s, int up, int down, int activate){
     if (down){ do { srct_bsel[s] = (srct_bsel[s]+1)%n; } while (srct_rows[s][srct_bsel[s]]==-1); sfx(6); }
     if (pi==G.my_id && raw_edge(PK_PGUP)){ for (int k=0;k<10;k++){ int p=(srct_bsel[s]+n-1)%n; if (srct_rows[s][p]!=-1) srct_bsel[s]=p; } }
     if (pi==G.my_id && raw_edge(PK_PGDN)){ for (int k=0;k<10;k++){ int p=(srct_bsel[s]+1)%n; if (srct_rows[s][p]!=-1) srct_bsel[s]=p; } }
+    // v1.27: swipe/drag scrolls the list (17px rows); the selection
+    // rides along so it never leaves the window the draw will show
+    if (pi==G.my_id && mobile_ui()){
+        int drows = srct_drag_rows(s, 17);
+        if (drows){
+            int vis = (STORE_H-40-22)/17;
+            srct_bscroll[s] += drows;
+            if (srct_bscroll[s] > n-vis) srct_bscroll[s] = n-vis;
+            if (srct_bscroll[s]<0) srct_bscroll[s]=0;
+            if (srct_bsel[s] < srct_bscroll[s]){
+                int r = srct_bscroll[s]; while (r<n && srct_rows[s][r]==-1) r++;
+                if (r<n) srct_bsel[s]=r;
+            }
+            if (srct_bsel[s] > srct_bscroll[s]+vis-1){
+                int r = srct_bscroll[s]+vis-1; while (r>=0 && srct_rows[s][r]==-1) r--;
+                if (r>=0) srct_bsel[s]=r;
+            }
+        }
+    }
     int row = srct_rows[s][srct_bsel[s]];
     if (pi==G.my_id && raw_edge('B'-'A')){ srct_build_kick(s); return; }
     if (pi==G.my_id && raw_edge('R'-'A')){ srct_prompt[s]=1; srct_psel[s]=1; srct_view[s]=SRV_PROMPT; return; }
@@ -335,16 +521,51 @@ static void srct_browser_input(int pi, int s, int up, int down, int activate){
     else if (row==SRCT_ROW_RESET){ srct_prompt[s]=1; srct_psel[s]=1; srct_view[s]=SRV_PROMPT; }
     else if (row==SRCT_ROW_CLOSE){ if (pi==G.my_id) G.tap_close_store=1; }
 }
+// the editor's way back — Esc, and the touch footer's BACK zone,
+// are the exact same step (dirty files ask first)
+static void srct_editor_back(int s){
+    srct_swallow[s]=1;
+    if (srct_dirty[s]){ srct_prompt[s]=0; srct_psel[s]=0; srct_view[s]=SRV_PROMPT; }
+    else srct_view[s]=SRV_BROWSE;
+}
 static void srct_editor_input(int pi, int s, int up, int down, int activate){
     (void)up; (void)down; (void)activate;
-    if (IN.esc_pressed || raw_edge(PK_ESC)){
-        srct_swallow[s]=1;
-        if (srct_dirty[s]){ srct_prompt[s]=0; srct_psel[s]=0; srct_view[s]=SRV_PROMPT; }
-        else srct_view[s]=SRV_BROWSE;
-        return;
+    if (IN.esc_pressed || raw_edge(PK_ESC)){ srct_editor_back(s); return; }
+    int cur0 = srct_cur[s];
+    // v1.27 touch: drag scrolls by DISPLAY rows (16px), a tap on the
+    // text positions the cursor through the wrap mapping, and the
+    // footer zones [ SAVE ] [ NEW LINE ] [ TUNE ] [ BACK ] run the
+    // exact Ctrl+S / Enter / Ctrl+T / Esc actions — so saving never
+    // depends on soft-keyboard quirks. A drag is not a tap (tapped
+    // only fires for quick, still touches), so the two never fight.
+    if (pi==G.my_id && mobile_ui()){
+        int drows = srct_drag_rows(s, 16);
+        if (drows){ srct_top[s]+=drows; if (srct_top[s]<0) srct_top[s]=0; }
+        if (IN.tapped){
+            int x = srct_panel_x(), y = STORE_Y, w = srct_panel_w(), h = STORE_H;
+            int fy = y+h-26;
+            if (IN.tap_y>=fy && IN.tap_y<y+h && IN.tap_x>=x && IN.tap_x<x+w){
+                int zone = (IN.tap_x-x)*4/w; if (zone>3) zone=3;
+                if (zone==0){ if (srct_can_edit(pi)) srct_save_editor(s); }
+                else if (zone==1){ if (srct_can_edit(pi)){ srct_insert(s, '\n'); srct_ensure_cursor(s); } }
+                else if (zone==2){
+                    if (srct_file[s]>=0 && livedata_file_has(src_path(srct_file[s]))) srct_tune_open(s);
+                    else srct_note_set(s, "NO LIVE TUNABLES IN THIS FILE");
+                }
+                else srct_editor_back(s);
+                return;
+            }
+            if (srct_can_edit(pi) && IN.tap_x>=x+10 && IN.tap_x<x+w-6 && IN.tap_y>=y+40 && IN.tap_y<y+40+srct_editor_lines()*16){
+                int cols = srct_panel_cols();
+                int drow = srct_top[s] + (IN.tap_y-(y+40))/16;
+                int dcol = (IN.tap_x-(x+10))/8; if (dcol<0) dcol=0; if (dcol>cols) dcol=cols;
+                srct_cur[s] = srct_display_to_offset(s, cols, drow, dcol);
+                srct_repkey[s]=-1;
+            }
+        }
     }
     if (!srct_can_edit(pi)){
-        // view-only: menu up/down scroll the text a line at a time
+        // view-only (the pad): menu up/down scroll a display row at a time
         if (up && srct_top[s]>0) srct_top[s]--;
         if (down) srct_top[s]++;
         return;
@@ -375,9 +596,17 @@ static void srct_editor_input(int pi, int s, int up, int down, int activate){
     if (IN.enter_pressed) srct_insert(s, '\n');
     for (int i=0;i<IN.typed_n;i++){
         char c = IN.typed[i];
-        if (c==' ') continue;   // space comes from the PK_SPACE edge only (native shells ALSO emit it as a char — one path, no doubles)
+        // space comes from the PK_SPACE edge only on physical-keyboard
+        // paths (native shells ALSO emit it as a char — one path, no
+        // doubles). v1.27: on a touch session the soft-keyboard bridge
+        // is the ONLY source of typed chars, so its space is text.
+        if (c==' ' && !mobile_ui()) continue;
         if (c>=32 && c<127) srct_insert(s, c);
     }
+    // a move or edit pulls the view back to the cursor; a frame in
+    // which the cursor never moved (a drag-scroll, a save) leaves
+    // the player's chosen scroll offset alone
+    if (srct_cur[s]!=cur0) srct_ensure_cursor(s);
 }
 static void srct_prompt_input(int pi, int s, int up, int down, int activate){
     int rows = srct_prompt[s]==0? 3 : 2;
@@ -388,6 +617,21 @@ static void srct_prompt_input(int pi, int s, int up, int down, int activate){
     }
     if (up){ srct_psel[s] = (srct_psel[s]+rows-1)%rows; sfx(6); }
     if (down){ srct_psel[s] = (srct_psel[s]+1)%rows; sfx(6); }
+    // v1.27: taps work the browser's idiom — tap selects, tapping the
+    // selected row activates it (the box math mirrors the draw)
+    if (pi==G.my_id && IN.tapped){
+        int w = srct_panel_w(), x = srct_panel_x(), y = STORE_Y, h = STORE_H;
+        int bw = (w-16<340)? w-16 : 340, bh = 110;
+        int bx = x + (w-bw)/2, by = y + (h-bh)/2;
+        int base = srct_prompt[s]==0? by+44 : by+58;
+        for (int i=0;i<rows;i++){
+            int ry = base + i*20;
+            if (IN.tap_x>=bx+8 && IN.tap_x<bx+bw-8 && IN.tap_y>=ry-2 && IN.tap_y<=ry+17){
+                if (i==srct_psel[s]) activate=1; else { srct_psel[s]=i; sfx(6); }
+                break;
+            }
+        }
+    }
     if (!activate) return;
     if (srct_prompt[s]==0){
         if (srct_psel[s]==0){ srct_save_editor(s); srct_view[s]=SRV_BROWSE; }
@@ -400,16 +644,49 @@ static void srct_prompt_input(int pi, int s, int up, int down, int activate){
     sfx(5);
 }
 static void srct_build_input(int pi, int s, int up, int down, int activate){
-    (void)pi; (void)activate;
+    (void)activate;
     if (IN.esc_pressed || raw_edge(PK_ESC)){ srct_swallow[s]=1; srct_view[s]=SRV_BROWSE; return; }
     if (up && srct_build_scroll[s]>0) srct_build_scroll[s]--;
     if (down) srct_build_scroll[s]++;
+    // v1.27: drag scrolls the (wrapped) log, 16px display rows
+    if (pi==G.my_id && mobile_ui()){
+        int drows = srct_drag_rows(s, 16);
+        if (drows){ srct_build_scroll[s]+=drows; if (srct_build_scroll[s]<0) srct_build_scroll[s]=0; }
+    }
 }
 static void srct_tune_input(int pi, int s, int up, int down, int activate){
     int rows = srct_tn[s]+2;
     if (IN.esc_pressed || raw_edge(PK_ESC)){ srct_swallow[s]=1; srct_view[s]=SRV_EDIT; return; }
     if (up){ srct_tsel[s] = (srct_tsel[s]+rows-1)%rows; sfx(6); }
     if (down){ srct_tsel[s] = (srct_tsel[s]+1)%rows; sfx(6); }
+    // v1.27 touch: drag scrolls the list (17px rows, selection rides
+    // along), taps select-then-activate like the browser's
+    if (pi==G.my_id && mobile_ui()){
+        int drows = srct_drag_rows(s, 17);
+        if (drows){
+            int vis = (STORE_H-40-38)/17;
+            srct_tscroll[s] += drows;
+            if (srct_tscroll[s] > rows-vis) srct_tscroll[s] = rows-vis;
+            if (srct_tscroll[s]<0) srct_tscroll[s]=0;
+            if (srct_tsel[s] < srct_tscroll[s]) srct_tsel[s] = srct_tscroll[s];
+            if (srct_tsel[s] > srct_tscroll[s]+vis-1) srct_tsel[s] = srct_tscroll[s]+vis-1;
+        }
+        if (IN.tapped){
+            int x = srct_panel_x(), y = STORE_Y, w = srct_panel_w(), h = STORE_H;
+            int vis = (h-40-38)/17;
+            if (IN.tap_x>=x && IN.tap_x<x+w){
+                for (int vi=0; vi<vis; vi++){
+                    int ri = srct_tscroll[s]+vi;
+                    if (ri>=rows) break;
+                    int ry = y+40 + vi*17;
+                    if (IN.tap_y>=ry-2 && IN.tap_y<=ry+15){
+                        if (ri==srct_tsel[s]) activate=1; else { srct_tsel[s]=ri; sfx(6); }
+                        break;
+                    }
+                }
+            }
+        }
+    }
     if (srct_can_edit(pi) && srct_tsel[s]<srct_tn[s]){
         char *pd = srct_pend[s][srct_tsel[s]];
         int pl = slen(pd);
@@ -436,7 +713,9 @@ static void srcterm_input(int pi, int up, int down, int activate){
 
 // --- drawing ---------------------------------------------------------------
 static void srct_draw_note(int s, int x, int y, int w){
-    if (srct_note[s][0]) draw_text_center(x+w/2, y, srct_note[s], 1, COL(255,214,130));
+    // v1.27: notes run long ("FILE SIZE CAP REACHED - ...") — fit-draw
+    // so nothing ever spills past the panel at compact width
+    if (srct_note[s][0]) draw_text_center_fit(x+w/2, y, w-16, srct_note[s], 1, COL(255,214,130));
 }
 static void srct_draw_browser(int s, int x, int y, int w, int h){
     { char b[128]; char *q=b;
@@ -445,7 +724,7 @@ static void srct_draw_browser(int s, int x, int y, int w, int h){
       if (ec>0){ q=sappend(q, " - MODDED ("); q=sapp_int(q, ec); q=sappend(q, ")"); }
       int ov = livedata_overrides();
       if (ov>0){ q=sappend(q, " - LIVE TUNING: "); q=sapp_int(q, ov); q=sappend(q, " OVERRIDES"); }
-      *q=0; draw_text_center(x+w/2, y+20, b, 1, COL(190,240,205)); }
+      *q=0; draw_text_center_fit(x+w/2, y+20, w-16, b, 1, COL(190,240,205)); }
     int vis = (h-40-22)/17;
     if (srct_bsel[s] < srct_bscroll[s]) srct_bscroll[s] = srct_bsel[s];
     if (srct_bsel[s] > srct_bscroll[s]+vis-1) srct_bscroll[s] = srct_bsel[s]-vis+1;
@@ -469,8 +748,23 @@ static void srct_draw_browser(int s, int x, int y, int w, int h){
             const char *p = src_path(row);
             const char *base = p;
             for (const char *c=p; *c; c++) if (*c=='/') base=c+1;
-            draw_text(x+22, ry+2, base, 1, COL(215,240,220));
-            int ex = x+22 + text_w(base,1) + 6;
+            // v1.27: the name is fit-trimmed into the space the row's
+            // tags leave behind, so a long name + LIVE + TEXT!=LIVE
+            // can never run past the panel edge at compact width
+            int reserve = 0;
+            if (src_file_edited(row)) reserve += 12;
+            if (src_file_differs(p)) reserve += 34 + 88;
+            else if (livedata_file_has(p)) reserve += 34;
+            char db[96]; int dn=0;
+            while (base[dn] && dn<94){ db[dn]=base[dn]; dn++; }
+            db[dn]=0;
+            int maxbw = w - 36 - reserve;
+            if (text_w(db,1) > maxbw){
+                while (dn>0 && (dn+2)*8 > maxbw) db[--dn]=0;
+                if (dn>0){ db[dn]='.'; db[dn+1]='.'; db[dn+2]=0; }
+            }
+            draw_text(x+22, ry+2, db, 1, COL(215,240,220));
+            int ex = x+22 + text_w(db,1) + 6;
             if (src_file_edited(row)){ draw_text(ex, ry+2, "*", 1, COL(255,214,130)); ex += 12; }
             if (livedata_file_has(p)) draw_text(ex, ry+2, "LIVE", 1, COL(120,255,170));
             if (src_file_differs(p)) draw_text(ex+34, ry+2, "TEXT!=LIVE", 1, COL(255,150,120));
@@ -481,7 +775,7 @@ static void srct_draw_browser(int s, int x, int y, int w, int h){
     }
     srct_draw_note(s, x, y+h-20, w);
     if (!srct_note[s][0])
-        draw_text_center(x+w/2, y+h-20, hint_dev()==DEV_PAD? "D-PAD + A - OPEN    B - BUILD" : "ARROWS + SPACE - OPEN    B - BUILD    R - RESET", 1, COL(140,170,150));
+        draw_text_center_fit(x+w/2, y+h-20, w-16, hint_dev()==DEV_PAD? "D-PAD + A - OPEN    B - BUILD" : hint_dev()==DEV_TOUCH? "TAP - OPEN    DRAG - SCROLL" : "ARROWS + SPACE - OPEN    B - BUILD    R - RESET", 1, COL(140,170,150));
 }
 static void srct_draw_editor(int s, int x, int y, int w, int h){
     const char *p = srct_file[s]>=0? src_path(srct_file[s]) : "";
@@ -490,122 +784,167 @@ static void srct_draw_editor(int s, int x, int y, int w, int h){
       if (srct_dirty[s]) q=sappend(q, " *");
       if (srct_file[s]>=0 && livedata_file_has(p)) q=sappend(q, "  [LIVE]");
       if (src_file_differs(p)) q=sappend(q, "  LIVE VALUE DIFFERS FROM TEXT");
-      *q=0; draw_text_center(x+w/2, y+20, b, 1, COL(190,240,205)); }
+      *q=0; draw_text_center_fit(x+w/2, y+20, w-16, b, 1, COL(190,240,205)); }
     int tx = x+10, ty = y+40;
-    int cols = (w-20)/8, lines = (h-40-24)/16;
-    int line, col, ls; srct_cursor_lc(s, &line, &col, &ls);
-    if (srct_can_edit(G.store_pi)){
-        if (line < srct_top[s]) srct_top[s]=line;
-        if (line > srct_top[s]+lines-1) srct_top[s]=line-lines+1;
-        if (col < srct_left[s]) srct_left[s]=col;
-        if (col > srct_left[s]+cols-1) srct_left[s]=col-cols+1;
-    }
-    int total_lines = 1;
-    for (int i=0;i<srct_elen[s];i++) if (src_edit_buf[s][i]=='\n') total_lines++;
-    if (srct_top[s] > total_lines-lines) srct_top[s] = total_lines-lines;
+    int cols = (w-20)/8;
+    int mob = mobile_ui();
+    int lines = mob? (h-40-52)/16 : (h-40-24)/16;
+    int total_lines = srct_total_lines(s);
+    int total_drows = srct_total_drows(s, cols);
+    if (srct_top[s] > total_drows-lines) srct_top[s] = total_drows-lines;
     if (srct_top[s]<0) srct_top[s]=0;
+    // walk to the logical line + segment the top display row shows
+    // (line starts advance incrementally — one pass, no rescans),
+    // then render segment by segment (v1.27 soft wrap)
+    int ln=0, segi=0, acc=0, lstart=0;
+    while (ln<total_lines){
+        int segs = srct_line_segs(srct_line_len(s, lstart), cols);
+        if (srct_top[s] < acc+segs){ segi = srct_top[s]-acc; break; }
+        acc += segs; ln++; lstart += srct_line_len(s, lstart)+1;
+    }
+    if (ln>=total_lines){ ln = total_lines-1; segi = 0; lstart = srct_line_start(s, ln); }
     char seg[600];
     for (int vi=0; vi<lines; vi++){
-        int ln = srct_top[s]+vi;
         if (ln>=total_lines) break;
-        int lstart = srct_line_start(s, ln);
         int llen = srct_line_len(s, lstart);
         int dn=0;
-        for (int ci=srct_left[s]; ci<llen && dn<cols && dn<(int)sizeof(seg)-1; ci++){
+        int c0 = segi*cols, c1 = c0+cols; if (c1>llen) c1=llen;
+        for (int ci=c0; ci<c1 && dn<(int)sizeof(seg)-1; ci++){
             char c = src_edit_buf[s][lstart+ci];
             seg[dn++] = (c=='\t')? ' ' : c;
         }
         seg[dn]=0;
         draw_text(tx, ty+vi*16, seg, 1, COL(205,235,212));
+        if (++segi >= srct_line_segs(llen, cols)){ segi=0; ln++; lstart += llen+1; }
     }
+    int line, col, ls; srct_cursor_lc(s, &line, &col, &ls);
     if (srct_can_edit(G.store_pi)){
-        int cx = tx + (col-srct_left[s])*8, cy = ty + (line-srct_top[s])*16;
-        if (col-srct_left[s]>=0 && col-srct_left[s]<cols && line-srct_top[s]>=0 && line-srct_top[s]<lines){
+        int drow, doff; srct_cursor_display(s, cols, &drow, &doff);
+        if (drow>=srct_top[s] && drow<srct_top[s]+lines && doff<=cols){
+            int cx = tx + doff*8, cy = ty + (drow-srct_top[s])*16;
             rect_fill(cx, cy, 8, 16, COL(110,230,160));
             if (srct_cur[s]<srct_elen[s] && src_edit_buf[s][srct_cur[s]]!='\n'){
                 char one[2]; one[0]=src_edit_buf[s][srct_cur[s]]; one[1]=0;
                 draw_text(cx, cy, one, 1, COL(8,20,12));
             }
         }
-        { char b[96]; char *q=b;
-          q=sappend(q, "LN "); q=sapp_int(q, line+1); q=sappend(q, " COL "); q=sapp_int(q, col+1);
-          q=sappend(q, "    CTRL+S SAVE");
-          if (srct_file[s]>=0 && livedata_file_has(p)) q=sappend(q, "    CTRL+T TUNE");
-          q=sappend(q, "    ESC BACK"); *q=0;
-          draw_text_center(x+w/2, y+h-20, b, 1, COL(140,170,150)); }
-    } else {
-        draw_text_center(x+w/2, y+h-20, "EDITING NEEDS A KEYBOARD - VIEW ONLY", 1, COL(255,214,130));
+        if (!mob){
+            { char b[96]; char *q=b;
+              q=sappend(q, "LN "); q=sapp_int(q, line+1); q=sappend(q, " COL "); q=sapp_int(q, col+1);
+              q=sappend(q, "    CTRL+S SAVE");
+              if (srct_file[s]>=0 && livedata_file_has(p)) q=sappend(q, "    CTRL+T TUNE");
+              q=sappend(q, "    ESC BACK"); *q=0;
+              draw_text_center_fit(x+w/2, y+h-20, w-16, b, 1, COL(140,170,150)); }
+        }
+    } else if (!mob) {
+        draw_text_center_fit(x+w/2, y+h-20, w-16, "EDITING NEEDS A KEYBOARD - VIEW ONLY", 1, COL(255,214,130));
     }
-    srct_draw_note(s, x, y+h-36, w);
+    if (mob){
+        // the status row (LN/COL, or the note when one is up) and the
+        // tappable touch footer (v1.27): the input side hit-tests the
+        // exact quarters drawn here
+        if (!srct_note[s][0]){
+            char b[64]; char *q=b;
+            q=sappend(q, "LN "); q=sapp_int(q, line+1); q=sappend(q, " COL "); q=sapp_int(q, col+1);
+            if (srct_dirty[s]) q=sappend(q, "  * UNSAVED");
+            *q=0;
+            draw_text_center_fit(x+w/2, y+h-48, w-16, b, 1, COL(140,170,150));
+        }
+        static const char *FL[4] = { "SAVE", "NEW LINE", "TUNE", "BACK" };
+        int fy = y+h-26, zw = w/4;
+        for (int i=0;i<4;i++){
+            int bx = x + i*zw, bw2 = (i==3)? (x+w)-bx : zw;
+            int dim = (i==2 && !(srct_file[s]>=0 && livedata_file_has(p)));
+            rect_fill(bx+2, fy, bw2-4, 22, dim? COL(24,30,26) : COL(26,54,36));
+            rect_line(bx+2, fy, bw2-4, 22, COL(90,220,150));
+            draw_text_center(bx+bw2/2, fy+7, FL[i], 1, dim? COL(120,140,125) : COL(230,245,232));
+        }
+    }
+    srct_draw_note(s, x, mob? y+h-48 : y+h-36, w);
+    (void)ls;
 }
 static void srct_draw_prompt(int s, int x, int y, int w, int h){
     srct_draw_editor(s, x, y, w, h);
-    int bw = 340, bh = 110, bx = x + (w-bw)/2, by = y + (h-bh)/2;
+    // v1.27: the box fits INSIDE the compact panel (340px never did)
+    int bw = (w-16<340)? w-16 : 340, bh = 110, bx = x + (w-bw)/2, by = y + (h-bh)/2;
     rect_fill(bx-4, by-4, bw+8, bh+8, OUTLINE);
     rect_fill(bx, by, bw, bh, COL(20,26,22));
     rect_line(bx+3, by+3, bw-6, bh-6, COL(90,220,150));
     if (srct_prompt[s]==0){
-        draw_text_center(bx+bw/2, by+12, "UNSAVED CHANGES", 2, COL(255,226,150));
+        draw_text_center_fit(bx+bw/2, by+12, bw-16, "UNSAVED CHANGES", 2, COL(255,226,150));
         static const char *PR[3] = { "SAVE AND CLOSE FILE", "DISCARD CHANGES", "KEEP EDITING" };
         for (int i=0;i<3;i++){
             int ry = by+44+i*20;
             if (i==srct_psel[s]){ rect_fill(bx+16, ry-2, bw-32, 17, COL(26,54,36)); rect_fill(bx+16, ry-2, 3, 17, COL(120,255,170)); }
-            draw_text_center(bx+bw/2, ry, PR[i], 1, COL(230,245,232));
+            draw_text_center_fit(bx+bw/2, ry, bw-32, PR[i], 1, COL(230,245,232));
         }
     } else {
-        draw_text_center(bx+bw/2, by+12, "RESET TO STOCK?", 2, COL(255,226,150));
-        draw_text_center(bx+bw/2, by+36, "EVERY EDIT AND TUNING OVERRIDE GOES.", 1, COL(200,220,205));
+        draw_text_center_fit(bx+bw/2, by+12, bw-16, "RESET TO STOCK?", 2, COL(255,226,150));
+        draw_text_center_fit(bx+bw/2, by+36, bw-16, "EVERY EDIT AND TUNING OVERRIDE GOES.", 1, COL(200,220,205));
         static const char *PR2[2] = { "RESET EVERYTHING", "KEEP MY EDITS" };
         for (int i=0;i<2;i++){
             int ry = by+58+i*20;
             if (i==srct_psel[s]){ rect_fill(bx+16, ry-2, bw-32, 17, COL(26,54,36)); rect_fill(bx+16, ry-2, 3, 17, COL(120,255,170)); }
-            draw_text_center(bx+bw/2, ry, PR2[i], 1, COL(230,245,232));
+            draw_text_center_fit(bx+bw/2, ry, bw-32, PR2[i], 1, COL(230,245,232));
         }
     }
 }
 static void srct_draw_build(int s, int x, int y, int w, int h){
     draw_text_center(x+w/2, y+20, "BUILD", 1, COL(190,240,205));
     if (!plat_srcbuild_available()){
-        draw_text_center(x+w/2, y+90, "BUILD NEEDS THE HOST APP", 2, COL(255,226,150));
-        draw_text_center(x+w/2, y+130, "YOUR EDITS ARE SAVED AND WILL BUILD THERE.", 1, COL(215,240,220));
-        draw_text_center(x+w/2, y+150, "RUN THE DESKTOP APP, OPEN THIS TERMINAL,", 1, COL(215,240,220));
-        draw_text_center(x+w/2, y+166, "AND CHOOSE BUILD - IT COMPILES AND SERVES", 1, COL(215,240,220));
-        draw_text_center(x+w/2, y+182, "YOUR PAGE FROM ITS OWN WINDOW.", 1, COL(215,240,220));
-        draw_text_center(x+w/2, y+h-20, "ESC - BACK", 1, COL(140,170,150));
+        draw_text_center_fit(x+w/2, y+90, w-16, "BUILD NEEDS THE HOST APP", 2, COL(255,226,150));
+        draw_text_center_fit(x+w/2, y+130, w-16, "YOUR EDITS ARE SAVED AND WILL BUILD THERE.", 1, COL(215,240,220));
+        draw_text_center_fit(x+w/2, y+150, w-16, "RUN THE DESKTOP APP, OPEN THIS TERMINAL,", 1, COL(215,240,220));
+        draw_text_center_fit(x+w/2, y+166, w-16, "AND CHOOSE BUILD - IT COMPILES AND SERVES", 1, COL(215,240,220));
+        draw_text_center_fit(x+w/2, y+182, w-16, "YOUR PAGE FROM ITS OWN WINDOW.", 1, COL(215,240,220));
+        draw_text_center_fit(x+w/2, y+h-20, w-16, "ESC - BACK", 1, COL(140,170,150));
         return;
     }
     int st = plat_srcbuild_state();
     const char *sl = st==1? "BUILDING..." : st==2? "DONE - YOUR BUILD IS LIVE" : st==3? "BUILD FAILED - THE LAST GOOD PAGE STAYS SERVED" : "IDLE";
-    draw_text_center(x+w/2, y+44, sl, 1, st==3? COL(255,150,120) : COL(170,255,200));
+    draw_text_center_fit(x+w/2, y+44, w-16, sl, 1, st==3? COL(255,150,120) : COL(170,255,200));
     if (st==2){
-        draw_text_center(x+w/2, y+62, "THE HOST NOW SERVES YOUR PAGE AT ITS USUAL ADDRESS.", 1, COL(215,240,220));
-        draw_text_center(x+w/2, y+76, "THIS WINDOW STILL RUNS STOCK CODE - ONLY THE", 1, COL(215,240,220));
-        draw_text_center(x+w/2, y+90, "SERVED WEB PAGE CHANGED.", 1, COL(215,240,220));
+        draw_text_center_fit(x+w/2, y+62, w-16, "THE HOST NOW SERVES YOUR PAGE AT ITS USUAL ADDRESS.", 1, COL(215,240,220));
+        draw_text_center_fit(x+w/2, y+76, w-16, "THIS WINDOW STILL RUNS STOCK CODE - ONLY THE", 1, COL(215,240,220));
+        draw_text_center_fit(x+w/2, y+90, w-16, "SERVED WEB PAGE CHANGED.", 1, COL(215,240,220));
     }
     static char logbuf[8192];
     plat_srcbuild_log(logbuf, (int)sizeof(logbuf));
     int lines = (h-120-22)/16;
-    // count + show log lines with scroll
-    int total=0; for (const char *c=logbuf; *c; c++) if (*c=='\n') total++;
+    // v1.27: log lines soft-wrap like the editor's (a 79-char line
+    // never fit even the full-width panel); scroll counts display rows
+    int cols = (w-24)/8; if (cols<8) cols=8;
+    int total=0;
+    { const char *c = logbuf;
+      while (*c){ int ll=0; while (*c && *c!='\n'){ ll++; c++; } if (*c=='\n') c++; total += ll<=0? 1 : (ll+cols-1)/cols; } }
     int start = srct_build_scroll[s];
     if (start > total-lines) start = total-lines;
     if (start<0) start=0;
-    int li=0;
-    const char *c = logbuf;
-    while (*c && li<start){ if (*c=='\n') li++; c++; }
-    for (int vi=0; vi<lines && *c; vi++){
-        char lb[80]; int dn=0;
-        while (*c && *c!='\n' && dn<79) lb[dn++]=*c++;
-        if (*c=='\n') c++;
-        lb[dn]=0;
-        draw_text(x+12, y+110+vi*16, lb, 1, COL(180,215,190));
-    }
-    draw_text_center(x+w/2, y+h-20, "UP/DOWN - SCROLL LOG    ESC - BACK", 1, COL(140,170,150));
+    srct_build_scroll[s] = start;
+    { const char *c = logbuf; int drow=0, vi=0;
+      while (*c && vi<lines){
+          char lb[512]; int ll=0;
+          while (*c && *c!='\n' && ll<511) lb[ll++]=*c++;
+          if (*c=='\n') c++;
+          lb[ll]=0;
+          int segs = ll<=0? 1 : (ll+cols-1)/cols;
+          for (int sg=0; sg<segs && vi<lines; sg++){
+              if (drow+sg >= start){
+                  char sb[512]; int dn=0;
+                  for (int ci=sg*cols; ci<ll && ci<(sg+1)*cols && dn<511; ci++) sb[dn++]=lb[ci];
+                  sb[dn]=0;
+                  draw_text(x+12, y+110+vi*16, sb, 1, COL(180,215,190));
+                  vi++;
+              }
+          }
+          drow += segs;
+      } }
+    draw_text_center_fit(x+w/2, y+h-20, w-16, "UP/DOWN - SCROLL LOG    ESC - BACK", 1, COL(140,170,150));
 }
 static void srct_draw_tune(int s, int x, int y, int w, int h){
     const char *p = srct_file[s]>=0? src_path(srct_file[s]) : "";
     { char b[128]; char *q=b; q=sappend(q, "LIVE TUNING - "); q=sappend(q, p); *q=0;
-      draw_text_center(x+w/2, y+20, b, 1, COL(190,240,205)); }
+      draw_text_center_fit(x+w/2, y+20, w-16, b, 1, COL(190,240,205)); }
     int vis = (h-40-38)/17;
     int rows = srct_tn[s]+2;
     if (srct_tsel[s] < srct_tscroll[s]) srct_tscroll[s] = srct_tsel[s];
@@ -622,21 +961,22 @@ static void srct_draw_tune(int s, int x, int y, int w, int h){
         }
         if (ri<srct_tn[s]){
             const TuneEntry *e = livedata_entry(srct_tidx[s][ri]);
-            draw_text(x+22, ry+2, e->name, 1, COL(215,240,220));
             char vb[40];
             if (srct_pend[s][ri][0]){ scpy(vb, srct_pend[s][ri], 40); }
             else tune_fmt_num(livedata_get(srct_tidx[s][ri]), vb);
             if (livedata_is_over(srct_tidx[s][ri])){ char *q=vb; while (*q) q++; q=sappend(q, " *"); }
+            // v1.27: the name fit-trims into the space the value leaves
+            draw_text_fit(x+22, ry+2, (w-36-text_w(vb,1))>0? (w-36-text_w(vb,1)) : 8, e->name, 1, COL(215,240,220));
             draw_text(x+w-14-text_w(vb,1), ry+2, vb, 1, srct_pend[s][ri][0]? COL(255,226,150) : COL(190,240,205));
         } else {
             draw_text(x+22, ry+2, ri==srct_tn[s]? "[ APPLY ]" : "[ BACK ]", 1, COL(255,226,150));
         }
     }
     if (!srct_can_edit(G.store_pi))
-        draw_text_center(x+w/2, y+h-36, "EDITING NEEDS A KEYBOARD - VIEW ONLY", 1, COL(255,214,130));
+        draw_text_center_fit(x+w/2, y+h-36, w-16, "EDITING NEEDS A KEYBOARD - VIEW ONLY", 1, COL(255,214,130));
     srct_draw_note(s, x, y+h-20, w);
     if (!srct_note[s][0])
-        draw_text_center(x+w/2, y+h-20, "TYPE A NEW VALUE, THEN APPLY - IT GOES LIVE AT ONCE", 1, COL(140,170,150));
+        draw_text_center_fit(x+w/2, y+h-20, w-16, "TYPE A NEW VALUE, THEN APPLY - IT GOES LIVE AT ONCE", 1, COL(140,170,150));
 }
 static void draw_srcterm_panel(void){
     int s = whale_slot_of(G.store_pi);

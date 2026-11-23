@@ -214,6 +214,7 @@ typedef struct {
     int crt_best_pos, crt_best_time;  // SUPER BUDDY CART records: best finish (0 = none) as cp, best race time in deciseconds as cq
     int crt_cupbest;                  // best Grand Prix rank per cup, packed: home + far*8 (0 = unranked), as cr
     int crt_tbest[8];                 // MEDAL TIMES (v1.25 feat 3): best race time per track in deciseconds (0 = none), as mc; medals DERIVE from these
+    int crt_medal_best[8];            // v1.27: best Cart medal EARNED per track (0..3), as md — a finish earns its time tier capped by placement (podium only), so the medal is banked at the finish, not derived from the time. Saves with mc but no md are pre-v1.27: their medals migrate from the times at load (crt_migrate_medals)
     int plat_tbest[16];               // MEDAL TIMES: best clear time per Run level 1..16 in deciseconds (0 = none), as mr
     int war_prog;                     // WAR! record: regions conquered (0..8); the world map unlocks region war_prog next, as wr
     int top_earned, top_worn;         // HAT TOPPERS (v1.25 feat 5): earned bitmask (bit id-1), worn topper id 0..8; saved as tp/tw

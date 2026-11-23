@@ -48,6 +48,19 @@
 // guard refills only from surplus). Check 33 soaks it; check 34
 // covers the same version's DEMOLISH sell-back (half the build
 // cost, floored, two-step arm + confirm; never on the Core).
+// v1.27 widens the field roll again: bit nodes jitter off the
+// table (±90 x / ±70 y, amounts ±20% — war_jitter_nodes), terrain
+// scatters 44..80 features under a per-battle kind-mix profile,
+// ~30% of barrier lines run HORIZONTAL, hive x rolls 220 wide and
+// garrisons roll 2-3 guards. Consequences for this suite: the
+// node-total assertions read the count exactly and the total
+// inside its ±20% band (nodesInBand below — the nominal totals
+// are the table's 8,200 campaign / 4,550 SMALL); checks 12 and 23
+// identify VERTICAL barrier lines from the segment field instead
+// of assuming every line is vertical; check 30's move-order
+// target is scanned clear of the field instead of assumed to be
+// the (430,430) node's clearing. The WAR! cabinet also rose 70px
+// in the Arcade: its stand point is (0, -12000+184+58) = (0,-11758).
 const { chromium } = require('playwright-core');
 const EXE = process.env.HOME + '/.cache/ms-playwright/chromium-1248/chrome-linux64/chrome';
 const URL = 'http://localhost:8903/the-survival-game.html';
@@ -99,6 +112,11 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   }
   const unxy = v => [Math.floor(v / 10000), v % 10000];        // world packings: x*10000+y
   const unpos = v => [v % 10000, Math.floor(v / 10000)];       // screen packing: x + y*10000
+  // v1.27: dbg_warnodes packs count*100000 + total bits; node
+  // amounts jitter ±20% each, so assert the count exactly and the
+  // total inside [0.8, 1.2] x the table's nominal total
+  const nodesInBand = (v, count, nominal) => Math.floor(v / 100000) === count
+    && (v % 100000) >= Math.floor(nominal * 0.8) && (v % 100000) <= Math.ceil(nominal * 1.2);
 
   await key('Space', 400);
   if ((await call('dbg_state')) !== 1) { await key('Enter', 400); }
@@ -115,7 +133,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   ok((await poll('dbg_inarcade', [], v => v === 1)) === 1, 'in the arcade');
   await call('dbg_tp', 256, -11898); await sleep(200);
   ok((await call('dbg_cabinet')) === 5, 'the CART cabinet is still cabinet 5', await call('dbg_cabinet'));
-  await call('dbg_tp', 0, -11688); await sleep(200);
+  await call('dbg_tp', 0, -11758); await sleep(200);   // v1.27: WAR! stand point = (ARC_SX[6], ARC_CY + ARC_ROWY[6] + 58) = (0, -12000+184+58) — the cabinet rose 70px (ROWY 254 -> 184)
   ok((await call('dbg_cabinet')) === 6, 'standing at the WAR! cabinet (cabinet 6, third row)', await call('dbg_cabinet'));
   await key('KeyE', 250);
   ok((await poll('dbg_arcgate', [], v => v === 1)) === 1, 'WAR! cabinet panel opened');
@@ -138,7 +156,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   await tap(320, 73);
   ok((await poll('dbg_warstate', [], v => v === 1, 5000)) === 1, 'tapping region 1 launched its battle');
   ok((await call('dbg_warbits')) === 300, 'v1.19 check 1: starting purse is 300 bits (was 250)', await call('dbg_warbits'));
-  ok((await call('dbg_warnodes')) === 1108200, 'v1.19 check 1: eleven bit nodes totalling 8,200 bits on the field (was nine / 4,800)', await call('dbg_warnodes'));
+  ok(nodesInBand(await call('dbg_warnodes'), 11, 8200), 'v1.19 check 1: eleven bit nodes on the field, total inside the v1.27 ±20% amount-jitter band of the nominal 8,200 (was nine / 4,800)', await call('dbg_warnodes'));
   ok((await call('dbg_warunits', 0, 0)) === 1, 'one harvester at the start');
   ok((await call('dbg_warunits', 0, 1)) === 1, 'one melee buddy at the start');
   ok((await call('dbg_warunits', 0, 2)) === 0, 'no ranged buddies yet');
@@ -421,10 +439,40 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   // cannot walk through the line
   ok((await call('dbg_warenter', 0)) === 1, 'fresh battle for the firewall checks');
   await call('dbg_waraddbits', 500);
-  const w1 = await call('dbg_warbuildxy', 3, 500, 400);
-  const w2 = await call('dbg_warbuildxy', 3, 500, 424);
-  const w3 = await call('dbg_warbuildxy', 3, 500, 448);
-  const w4 = await call('dbg_warbuildxy', 3, 524, 448);
+  // v1.27: the four spots are picked by LIVE clearance, not fixed at
+  // (500,400) — the broadened field roll (denser debris, jittered
+  // nodes) can now sit on the old spots, and war_place_space refuses
+  // within rad+26 of a node and rad+trad+4 of a feature (use 40u for
+  // both). The anchor stays on the game's snap grid (x a multiple of
+  // 24, y = 400 mod 24) and every downstream constant translates
+  // with it: bug spawn (ax+136, ay+32), scan box, the ax-14 crossing
+  // line — the originals at anchor (504,400) are exactly these.
+  const fwBlock = [];
+  { const tn = await call('dbg_warterrain');
+    for (let t = 0; t < tn; t++) { const v = await call('dbg_warfeatxy', t); if (v >= 0) fwBlock.push(unxy(v)); }
+    const nn = Math.floor((await call('dbg_warnodes')) / 100000);
+    for (let n = 0; n < nn; n++) { const v = await call('dbg_warnodexy', n); if (v >= 0) fwBlock.push(unxy(v)); } }
+  // war_place_space ALSO refuses near existing structures (the Core
+  // and the hives stand in war_s from the first frame): a wall needs
+  // rad + other_rad + 8, worst case 13+34+8 = 55 — structures are
+  // scanned with a 58u margin, features/nodes with 40u.
+  const fwStruct = [];
+  for (let s = 0; s < 28; s++) { const v = await call('dbg_warstructxy', s); if (v >= 0) fwStruct.push(unxy(v)); }
+  const fwClear = (x, y) => !fwBlock.some(([bx, by]) => Math.hypot(bx - x, by - y) < 40)
+                        && !fwStruct.some(([bx, by]) => Math.hypot(bx - x, by - y) < 58);
+  const fwSnap = v => Math.round(v / 24) * 24;   // clearance is judged at the SNAPPED spots — warbuildxy snaps before placing (400 lands on 408)
+  let ax = -1, ay = -1;
+  outer: for (const cx of [504, 480, 528, 456, 552, 432, 576, 408, 600, 384, 624]) {
+    for (const cy of [400, 376, 424, 352, 448, 328, 472]) {
+      const sy = fwSnap(cy);
+      if (fwClear(cx, sy) && fwClear(cx, sy + 24) && fwClear(cx, sy + 48) && fwClear(cx + 24, sy + 48)) { ax = cx; ay = cy; break outer; }
+    }
+  }
+  ok(ax >= 0, 'firewall checks: found a clear anchor for the wall', 'anchor=' + ax + ',' + ay);
+  const w1 = await call('dbg_warbuildxy', 3, ax, ay);
+  const w2 = await call('dbg_warbuildxy', 3, ax, ay + 24);
+  const w3 = await call('dbg_warbuildxy', 3, ax, ay + 48);
+  const w4 = await call('dbg_warbuildxy', 3, ax + 24, ay + 48);
   ok(w1 >= 0 && w2 >= 0 && w3 >= 0 && w4 >= 0 && (await call('dbg_warstructs', 3)) === 4,
      'four firewall segments placed', [w1, w2, w3, w4].join(','));
   const snap = v => Math.round(v / 24) * 24;
@@ -432,13 +480,13 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   const [w2x, w2y] = unxy(await call('dbg_warstructxy', w2));
   const [w3x, w3y] = unxy(await call('dbg_warstructxy', w3));
   const [w4x, w4y] = unxy(await call('dbg_warstructxy', w4));
-  ok(w1x === snap(500) && w2x === w1x && w3x === w1x && w2y - w1y === 24 && w3y - w2y === 24
+  ok(w1x === snap(ax) && w2x === w1x && w3x === w1x && w2y - w1y === 24 && w3y - w2y === 24
      && w4y === w3y && w4x - w3x === 24,
      'segments snapped to the 24u grid, shoulder to shoulder',
      `${w1x},${w1y} ${w2x},${w2y} ${w3x},${w3y} ${w4x},${w4y}`);
   await call('dbg_warcam', w1x, w2y); await sleep(400);
   await cv.screenshot({ path: __dirname + '/war2-wall.png' });
-  await call('dbg_warspawnbug', 640, 432);
+  await call('dbg_warspawnbug', ax + 136, ay + 32);
   let bugIdx = -1, minBugX = 1e9;
   for (let s = 0; s < 10; s++) {
     await sleep(500);
@@ -446,10 +494,10 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
       const v = await call('dbg_warunitxy', i);
       if (v < 0) continue;
       const [ux, uy] = unxy(v);
-      if (ux > 560 && ux < 700 && uy > 380 && uy < 490) { bugIdx = i; if (ux < minBugX) minBugX = ux; }
+      if (ux > ax + 56 && ux < ax + 196 && uy > ay - 20 && uy < ay + 90) { bugIdx = i; if (ux < minBugX) minBugX = ux; }
     }
   }
-  ok(bugIdx >= 0 && minBugX > 490, 'the firewall line held: the crawler never crossed',
+  ok(bugIdx >= 0 && minBugX > ax - 14, 'the firewall line held: the crawler never crossed',
      'bugIdx=' + bugIdx + ' minX=' + minBugX);
 
   // ================= round 3 (Nov 16): destructible debris ========
@@ -461,7 +509,8 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   ok(alive0 === tn3 && tn3 > 30, 'debris: every feature starts standing', alive0 + '/' + tn3);
   const featHp = async t => { const f = await call('dbg_warfeat', t); return f < 0 ? -1 : Math.floor(f / 100); };
   // low-hp features (tree 35 / rubble 25) in the western half, well
-  // clear of the firewall line and its crawler (510,432) — and
+  // clear of the firewall line and its crawler (ax+6, ay+32 — the
+  // v1.27 live anchor; 510,432 at the original anchor) — and
   // (v1.18) with >=55u of open ground around them: a tree penned in
   // by barrier segments can be impossible to stand next to, so the
   // check works down a CANDIDATE LIST and fells the first one the
@@ -474,7 +523,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     if (xy[0] >= 0) pts3.push([t, f % 100, xy]);
   }
   const cand3 = pts3.filter(([t, kind, xy]) =>
-    (kind === 0 || kind === 4) && xy[0] <= 700 && Math.hypot(xy[0] - 510, xy[1] - 432) >= 220 &&
+    (kind === 0 || kind === 4) && xy[0] <= 700 && Math.hypot(xy[0] - (ax + 6), xy[1] - (ay + 32)) >= 220 &&
     !pts3.some(([t2, , xy2]) => t2 !== t && Math.hypot(xy2[0] - xy[0], xy2[1] - xy[1]) < 55));
   ok(cand3.length > 0, 'debris: found a reachable tree/rubble feature to fell', 'candidates=' + cand3.length);
   let featT = -1, featXY = null, hpStart = -1, hpMid = -1;
@@ -777,20 +826,47 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   ok((await call('dbg_warenter', 0)) === 1, 'v1.17 check 4: fresh battle');
   await sleep(400);
   await call('dbg_waraddbits', 2000);
+  // v1.27: the line's column is picked by LIVE clearance (check 5's
+  // method, extended to nodes and structures): the broadened roll
+  // can park debris or a jittered node on the old fixed x=360, and
+  // war_place_space refuses within rad+26 of a node / rad+trad+4 of
+  // a feature (40u scan margin covers both) and rad+other_rad+8 of
+  // an existing structure — the Core and hives included (58u scan
+  // margin). Westernmost column with >=16 of 17 spots clear wins,
+  // so the line stays west of the nodes as the check intends; the
+  // crossing line is lineX4+20 (380 at x=360).
+  const block4 = [];
+  { const tn = await call('dbg_warterrain');
+    for (let t = 0; t < tn; t++) { const v = await call('dbg_warfeatxy', t); if (v >= 0) block4.push(unxy(v)); }
+    const nn = Math.floor((await call('dbg_warnodes')) / 100000);
+    for (let n = 0; n < nn; n++) { const v = await call('dbg_warnodexy', n); if (v >= 0) block4.push(unxy(v)); } }
+  // structures too (Core + hives, 58u margin — see the firewall scan)
+  const struct4 = [];
+  for (let s = 0; s < 28; s++) { const v = await call('dbg_warstructxy', s); if (v >= 0) struct4.push(unxy(v)); }
+  const open4 = (lx, y) => !block4.some(([bx, by]) => Math.hypot(bx - lx, by - y) < 40)
+                        && !struct4.some(([bx, by]) => Math.hypot(bx - lx, by - y) < 58);
+  const cand4 = [360, 336, 384, 312, 408, 288, 432].map(lx => {
+    let open = 0;
+    for (let y = 408; y <= 792; y += 24) { if (y === 600) continue; if (open4(lx, y)) open++; }
+    return [lx, open];
+  });
+  const clear4 = cand4.filter(([, open]) => open >= 16);
+  const pick4 = clear4.length ? clear4.reduce((a, b) => (b[0] < a[0] ? b : a)) : cand4.reduce((a, b) => (b[1] > a[1] ? b : a));
+  const lineX4 = pick4[0];
   let wallN4 = 0;
-  for (let y = 408; y <= 792; y += 24) { if (y === 600) continue; if ((await call('dbg_warbuildxy', 3, 360, y)) >= 0) wallN4++; }
-  ok(wallN4 >= 14, 'v1.17 check 4: the wall line went up west of the nodes (gap at y=600)', 'segments=' + wallN4);
+  for (let y = 408; y <= 792; y += 24) { if (y === 600) continue; if ((await call('dbg_warbuildxy', 3, lineX4, y)) >= 0) wallN4++; }
+  ok(wallN4 >= 14, 'v1.17 check 4: the wall line went up west of the nodes (gap at y=600)', 'segments=' + wallN4 + ' at x=' + lineX4);
   const bitsPath0 = await call('dbg_warbits');
   const harvP = await call('dbg_warfind', 0);
   let crossed4 = false;
   const tPath0 = Date.now();
   while (Date.now() - tPath0 < 90000) {
     const v = await call('dbg_warunitxy', harvP);
-    if (v >= 0 && Math.floor(v / 10000) > 380) crossed4 = true;
+    if (v >= 0 && Math.floor(v / 10000) > lineX4 + 20) crossed4 = true;
     if (crossed4 && (await call('dbg_warbits')) >= bitsPath0 + 25) break;
     await sleep(250);
   }
-  ok(crossed4, 'v1.17 check 4: the harvester crossed the wall line (x>380)');
+  ok(crossed4, 'v1.17 check 4: the harvester crossed the wall line (x>lineX+20)');
   ok((await call('dbg_warbits')) >= bitsPath0 + 25, 'v1.17 check 4: ...and delivered bits through the gap', 'bits=' + (await call('dbg_warbits')));
 
   // check 5: a bug paths around a firewall line to reach its target.
@@ -825,17 +901,46 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     const f = await call('dbg_warfeat', t);
     if (f >= 0 && f % 100 === 5 && xy[0] < barWest5) barWest5 = xy[0];
   }
+  // v1.27: nodes block placement too (war_place_space refuses within
+  // rad+26 of a node) and they jitter now — fold their live positions
+  // into the same clearance scan (they are not barriers, so they stay
+  // out of barWest5 above).
+  { const nn = Math.floor((await call('dbg_warnodes')) / 100000);
+    for (let n = 0; n < nn; n++) { const v = await call('dbg_warnodexy', n); if (v >= 0) feats5.push(unxy(v)); } }
+  // structures too (Core + hives, 58u margin — see the firewall scan)
+  const struct5 = [];
+  for (let s = 0; s < 28; s++) { const v = await call('dbg_warstructxy', s); if (v >= 0) struct5.push(unxy(v)); }
   const baseX5 = Math.max(440, Math.min(720, barWest5 - 200));
-  let lineX5 = baseX5, bestOpen5 = -1;
-  for (const lx of [baseX5, baseX5 - 60, baseX5 + 60, baseX5 - 120, baseX5 + 120]) {
-    if (lx < 380 || lx > 760) continue;
-    if (lx + 110 > barWest5) continue;   // the bug's spawn (lx+90) and its whole approach stay WEST of the first barrier line
-    let open = 0;
-    for (let y = 384; y <= 816; y += 24) { if (y === 600) continue; if (!feats5.some(([fx, fy]) => Math.hypot(fx - lx, fy - y) < 40)) open++; }
-    if (open > bestOpen5) { bestOpen5 = open; lineX5 = lx; }
+  // v1.27 (cont.): the widened roll can close EVERY column of the
+  // old candidate set. In the pinned field the barrier constraint
+  // (lx+110 <= barWest5) leaves a single column, and it is blocked
+  // twice over — a debris cluster on its mid-span and a jittered
+  // node on its south end — so only 14 of the 18 spots build there
+  // (probe-verified against war_place_space's exact rules; the
+  // game is right, the search was too narrow). The search now also
+  // slides the wall's SPAN (the 384..816 window, the gap still at
+  // y=600) in 24u steps: (column, shift) pairs are scored by the
+  // same live clearance model, preferring the most open, then the
+  // column nearest the ~200-west anchor, then the unshifted span.
+  // In the pinned field the winner is the anchor column with the
+  // span slid 48 north (336..768): the node falls outside the span
+  // and 16 of 18 build. The bait, the spawn and the crossing line
+  // all key off lineX5 exactly as before, and the assertion is
+  // unchanged: >=16 of the 18 spots must actually build, and the
+  // bug must still cross gap-or-end, never through.
+  let lineX5 = baseX5, shift5 = 0, bestOpen5 = -1, bestPref5 = 1e9;
+  for (let lx = 336; lx <= 760 && lx + 110 <= barWest5; lx += 24) {
+    for (const sh of [0, -24, 24, -48]) {
+      let open = 0;
+      for (let y = 384 + sh; y <= 816 + sh; y += 24) { if (y === 600) continue;
+        if (!feats5.some(([fx, fy]) => Math.hypot(fx - lx, fy - y) < 40)
+         && !struct5.some(([fx, fy]) => Math.hypot(fx - lx, fy - y) < 58)) open++; }
+      const pref = Math.abs(lx - baseX5) * 100 + Math.abs(sh);
+      if (open > bestOpen5 || (open === bestOpen5 && pref < bestPref5)) { bestOpen5 = open; bestPref5 = pref; lineX5 = lx; shift5 = sh; }
+    }
   }
   let wallN5 = 0;
-  for (let y = 384; y <= 816; y += 24) { if (y === 600) continue; if ((await call('dbg_warbuildxy', 3, lineX5, y)) >= 0) wallN5++; }
+  for (let y = 384 + shift5; y <= 816 + shift5; y += 24) { if (y === 600) continue; if ((await call('dbg_warbuildxy', 3, lineX5, y)) >= 0) wallN5++; }
   ok(wallN5 >= 16, 'v1.17 check 5: the wall line went up (gap at y=600)', 'segments=' + wallN5 + ' at x=' + lineX5);
   const miBait = await call('dbg_warfind', 1);
   await call('dbg_warmove', miBait, lineX5 - 60, 430);
@@ -930,10 +1035,18 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   const tn12 = await call('dbg_warterrain');
   const feats12 = [];
   const barrierXs = new Set();
-  for (let t = 0; t < tn12; t++) {
-    feats12.push(unxy(await call('dbg_warfeatxy', t)));
-    const f = await call('dbg_warfeat', t);
-    if (f >= 0 && f % 100 === 5) barrierXs.add(feats12[t][0]);
+  { // v1.27: ~30% of barrier lines run HORIZONTAL — a horizontal
+    // line crosses any column at a single spot (the clearance scan
+    // below already prices single spots), so barrierXs keeps only
+    // VERTICAL lines: an x is one when >=4 barrier segments share
+    // it (a horizontal line contributes at most one segment per x)
+    const segX12 = new Map();
+    for (let t = 0; t < tn12; t++) {
+      feats12.push(unxy(await call('dbg_warfeatxy', t)));
+      const f = await call('dbg_warfeat', t);
+      if (f >= 0 && f % 100 === 5) segX12.set(feats12[t][0], (segX12.get(feats12[t][0]) || 0) + 1);
+    }
+    for (const [bx, n] of segX12) if (n >= 4) barrierXs.add(bx);
   }
   let lineX = -1, gateY = -1, bestClear = -1;
   for (const lx of [816, 864, 912, 960]) {
@@ -1317,9 +1430,10 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   ok((await poll('dbg_warpause', [], v => v === 1, 4000)) === 1, 'pause menu up for RESTART');
   await tap(320, 190);   // RESTART BATTLE (panel button 2)
   ok((await poll('dbg_warpause', [], v => v === 0, 4000)) === 0 && (await call('dbg_warstate')) === 1, 'v1.17 check 8: RESTART relaunched the battle');
-  ok((await call('dbg_warbits')) === 300 && (await call('dbg_warunits', 0, -1)) === 2 && (await call('dbg_warnodes')) === 1108200,
-     'v1.19 check 8: fresh start — 300 bits, the two starting units, full nodes',
-     'bits=' + (await call('dbg_warbits')) + ' units=' + (await call('dbg_warunits', 0, -1)) + ' nodes=' + (await call('dbg_warnodes')));
+  const nodesFresh8 = await call('dbg_warnodes');   // v1.27: this fresh battle's exact node reading — the restore below must match IT, not a fixed total
+  ok((await call('dbg_warbits')) === 300 && (await call('dbg_warunits', 0, -1)) === 2 && nodesInBand(nodesFresh8, 11, 8200),
+     'v1.19 check 8: fresh start — 300 bits, the two starting units, full nodes (v1.27 jitter band)',
+     'bits=' + (await call('dbg_warbits')) + ' units=' + (await call('dbg_warunits', 0, -1)) + ' nodes=' + nodesFresh8);
   ok((await call('dbg_warregion')) === 1, 'v1.17 check 8: still region 2');
   // "no snapshot of the OLD fight survives" can't be read off
   // dbg_warsnap directly: the game autosaves every 5s and a live
@@ -1334,9 +1448,9 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   await key('Escape', 300);
   ok((await poll('dbg_bwmode', [], v => v === -1, 4000)) === -1, 'check 8: left WAR!');
   await call('dbg_bwentm', 8); await sleep(500);
-  ok((await poll('dbg_warstate', [], v => v === 1, 4000)) === 1 && (await call('dbg_warnodes')) === 1108200,
-     'v1.17 check 8: re-entering restores the FRESH battle — the old parked fight is gone',
-     'nodes=' + (await call('dbg_warnodes')));
+  ok((await poll('dbg_warstate', [], v => v === 1, 4000)) === 1 && (await call('dbg_warnodes')) === nodesFresh8,
+     'v1.17 check 8: re-entering restores the FRESH battle — the old parked fight is gone (nodes match the fresh reading exactly)',
+     'nodes=' + (await call('dbg_warnodes')) + ' vs fresh ' + nodesFresh8);
 
   // park THIS battle, so the save-file round trip below has one to
   // restore (v1.17 check 9)
@@ -1481,7 +1595,14 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     const [fx, fy] = unxy(await call('dbg_warfeatxy', t));
     segs23.push([t, fx, fy]);
   }
-  let lineX23 = 1e9; for (const [, sx] of segs23) lineX23 = Math.min(lineX23, sx);
+  // v1.27: lines can run horizontal now, so "the west barrier
+  // line" is read as the VERTICAL line — the x the most barrier
+  // segments share (a horizontal line spreads one segment per x
+  // across its whole span and can never win this count)
+  let lineX23 = -1, lineCount23 = 0;
+  { const byX23 = new Map();
+    for (const [, sx] of segs23) byX23.set(sx, (byX23.get(sx) || 0) + 1);
+    for (const [sx, n] of byX23) if (n > lineCount23) { lineCount23 = n; lineX23 = sx; } }
   const lineYs = segs23.filter(([, sx]) => Math.abs(sx - lineX23) < 6).map(([, , sy]) => sy).sort((a, b) => a - b);
   // the passage: the widest internal gap in the line, else an open end
   let gapY23 = -1, widest = 0;
@@ -1490,7 +1611,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     if (jump > widest) { widest = jump; gapY23 = (lineYs[i] + lineYs[i - 1]) / 2; }
   }
   if (widest < 96) gapY23 = lineYs[0] >= 200 ? lineYs[0] - 70 : lineYs[lineYs.length - 1] + 70;
-  ok(lineYs.length >= 8 && gapY23 > 0, 'v1.18 check 23: the west barrier line has a passage', 'segments=' + lineYs.length + ' gapY=' + Math.round(gapY23));
+  ok(lineYs.length >= 8 && gapY23 > 0, 'v1.18 check 23: the vertical barrier line has a passage', 'segments=' + lineYs.length + ' gapY=' + Math.round(gapY23));
   const mi23 = await call('dbg_warfind', 1);
   await call('dbg_warmove', mi23, lineX23 - 80, Math.round(gapY23));
   ok((await call('dbg_wartapunit', mi23)) === 1, 'v1.18 check 23: melee selected');
@@ -1552,7 +1673,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   // is NOT a skirmish; winning it returns to the map
   ok((await call('dbg_warenter', 0)) === 1, 'v1.19 check 25: fresh campaign battle');
   await sleep(500);
-  ok((await call('dbg_warnodes')) === 1108200, 'v1.19 check 25: eleven nodes totalling 8,200 bits', await call('dbg_warnodes'));
+  ok(nodesInBand(await call('dbg_warnodes'), 11, 8200), 'v1.19 check 25: eleven nodes, total inside the v1.27 ±20% jitter band of the nominal 8,200', await call('dbg_warnodes'));
   ok((await call('dbg_warskirmish')) === 0, 'v1.19 check 25: a campaign battle is not a skirmish');
   await call('dbg_warhurt', 1, 1, 99999);
   ok((await poll('dbg_warstate', [], v => v === 0, 9000)) === 0, 'v1.19 check 25: won and back on the map');
@@ -1567,7 +1688,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   await tap(320, 208);   // LAUNCH
   ok((await poll('dbg_warstate', [], v => v === 1, 5000)) === 1, 'v1.19 check 26: LAUNCH started the battle');
   ok((await call('dbg_warskirmish')) === 1, 'v1.19 check 26: the battle is a skirmish');
-  ok((await call('dbg_warnodes')) === 604550, 'v1.19 check 26: SMALL field — six nodes, 4,550 bits (standard-table indices {0,1,4,5,6,10}, amounts as-is)', await call('dbg_warnodes'));
+  ok(nodesInBand(await call('dbg_warnodes'), 6, 4550), 'v1.19 check 26: SMALL field — six nodes (standard-table indices {0,1,4,5,6,10}), total inside the v1.27 ±20% jitter band of the nominal 4,550', await call('dbg_warnodes'));
   ok((await call('dbg_warhives')) === 1, 'v1.19 check 26: EASY fields exactly one hive');
   ok((await call('dbg_warbits')) === 250, 'v1.19 check 26: SMALL starts with 250 bits', await call('dbg_warbits'));
   await cv.screenshot({ path: __dirname + '/war-skirmish-small.png' });
@@ -1690,17 +1811,31 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   ok((await poll('dbg_warstructhp', [0], v => v >= coreFull30 - 36, 30000, 250)) >= coreFull30 - 36,
      'v1.19 check 30: AUTOSEEK — the idle patcher repaired the Core unbidden', 'hp=' + (await call('dbg_warstructhp', 0)));
   // ...and a manual move order interrupts it: hurt the Core again,
-  // let the patcher start, then order it away — the target is the
-  // (430,430) node's clearing: terrain and barriers keep their
-  // distance from nodes by construction, so the point is always
-  // reachable (an arbitrary far point can sit inside a debris
-  // disc, where separation would hold the unit off its arrival
-  // threshold forever and autoseek would never resume)
+  // let the patcher start, then order it away — the target is a
+  // scanned clearing >200u from the Core and >=48u clear of every
+  // terrain feature. (The target used to be the (430,430) node's
+  // clearing, guaranteed open because terrain kept its distance
+  // from nodes; v1.27's node jitter moved the node, not the
+  // guarantee's centre, so the clearing is scanned for instead —
+  // the (430,430) candidate still leads the list. An arbitrary far
+  // point can sit inside a debris disc, where separation would
+  // hold the unit off its arrival threshold forever and autoseek
+  // would never resume.)
   await call('dbg_warhurt', 1, 0, 60);
   await sleep(1500);   // autoseek has it walking / starting the channel
   ok((await call('dbg_wartapunit', patcher30)) === 1, 'v1.19 check 30: patcher selected for the interrupt');
-  await call('dbg_warcam', 430, 430); await sleep(250);
-  await tap(320, 157);   // the node's clearing, ~225u from the Core: a move order
+  const tn30 = await call('dbg_warterrain');
+  const feats30 = [];
+  for (let t = 0; t < tn30; t++) { const v = await call('dbg_warfeatxy', t); if (v >= 0) feats30.push(unxy(v)); }
+  let away30 = null;
+  for (const [cx, cy] of [[430, 430], [500, 380], [380, 380], [560, 430], [430, 300], [620, 380], [500, 500], [350, 500]]) {
+    if (Math.hypot(cx - 280, cy - 600) <= 200) continue;
+    if (feats30.some(([fx, fy]) => Math.hypot(fx - cx, fy - cy) < 48)) continue;
+    away30 = [cx, cy]; break;
+  }
+  ok(!!away30, 'v1.19 check 30: a clear away-point exists for the interrupt');
+  await call('dbg_warcam', away30[0], away30[1]); await sleep(250);
+  await tap(320, 157);   // the scanned clearing, >200u from the Core: a move order
   ok((await poll('dbg_warunitxy', [patcher30], v => { if (v < 0) return false; const [ux, uy] = unxy(v); return Math.hypot(ux - 280, uy - 600) > 200; }, 20000, 250)) >= 0,
      'v1.19 check 30: the move order pulled the patcher off the repair');
   ok((await call('dbg_warstructhp', 0)) < coreFull30 - 10, 'v1.19 check 30: the Core is still hurt — the repair really stopped',
@@ -1834,12 +1969,16 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   for (let k = 0; k < 2; k++) { const bi = await call('dbg_warfind', 8); if (bi >= 0) await call('dbg_warhurt', 0, bi, 99999); }
   await call('dbg_warhurt', 0, await call('dbg_warfind', 0), 99999);   // your harvester too: no income on either side, both purses frozen
   ok((await call('dbg_warunits', 1, 8)) === 0, 'v1.21 check 33: both bug harvesters are dead');
+  // v1.27: the hive's garrison is rolled per battle now (2-3 guard
+  // crawlers, war_build_battle) — count it live, before the 45s tick
+  // buys anything, and hold the wave to exactly +2 against it.
+  const garrison33 = await call('dbg_warunits', 1, 3);
   await sleep(19000);
   ok((await call('dbg_warhbits')) === 150, 'v1.21 check 33: no harvesters, no income — the purse is still exactly 150', await call('dbg_warhbits'));
   ok((await poll('dbg_warhbits', [], v => v === 30, 40000, 250)) === 30,
      'v1.21 check 33 (b): the 45s tick bought replacements first (2 x 40) then the wave (2 x 20): 150 -> 30', 'hbits=' + (await call('dbg_warhbits')));
   ok((await call('dbg_warunits', 1, 8)) === 2, 'v1.21 check 33 (b): the workforce was replaced before the wave was bought');
-  ok((await call('dbg_warunits', 1, 3)) === 4, 'v1.21 check 33 (b): two garrison crawlers + the two the wave bought', await call('dbg_warunits', 1, 3));
+  ok((await call('dbg_warunits', 1, 3)) === garrison33 + 2, 'v1.21 check 33 (b): the garrison crawlers (counted live) + the two the wave bought', await call('dbg_warunits', 1, 3));
   for (let k = 0; k < 2; k++) { const bi = await call('dbg_warfind', 8); if (bi >= 0) await call('dbg_warhurt', 0, bi, 99999); }
   ok((await call('dbg_warunits', 1, 8)) === 0, 'v1.21 check 33: the replacements are dead too — the hive is starving');
   ok((await poll('dbg_warhbits', [], v => v === 10, 45000, 250)) === 10,

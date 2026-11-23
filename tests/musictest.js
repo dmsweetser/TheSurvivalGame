@@ -93,7 +93,7 @@ function T(name, cond, extra) {
     { tp: [-256, -11898], cab: 3, mode: 5, piece: 7,  name: 'TANK RESCUE (Infernal Galop)' },
     { tp: [0, -11898],    cab: 4, mode: 6, piece: 8,  name: 'CASTLE (Greensleeves)' },
     { tp: [256, -11898],  cab: 5, mode: 7, piece: 9,  name: 'CART (William Tell finale)' },
-    { tp: [0, -11688],    cab: 6, mode: 8, piece: 10, name: 'WAR! (Ride of the Valkyries)', probe: 6000, minNotes: 6 },
+    { tp: [0, -11758],    cab: 6, mode: 8, piece: 10, name: 'WAR! (Ride of the Valkyries)', probe: 6000, minNotes: 6 },   // v1.27: WAR! stand point = (0, -12000+184+58) — cabinet rose 70px (ARC_ROWY[6] 254 -> 184)
   ];
   const probeSets = {};
   for (const c of CABS) {

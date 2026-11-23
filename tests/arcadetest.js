@@ -94,6 +94,18 @@ function T(name, cond, extra) { if (cond) { pass++; } else { fail++; console.log
   await call('dbg_bwexit'); await sleep(300);
   T('back in the arcade after Entrances', (await call('dbg_inarcade')) === 1, await call('dbg_inarcade'));
 
+  // cabinet 7: WAR! — v1.27 raised it 70px (ARC_ROWY[6] 254 -> 184)
+  // and the room's south clamp followed (ARC_CY+328 -> ARC_CY+258).
+  // Stand point derivation: (ARC_SX[6], ARC_CY + ARC_ROWY[6] + 58)
+  // = (0, -12000+184+58) = (0,-11758); the clamp sits at -11742.
+  await call('dbg_tp', 0, -11758); await sleep(200);
+  T('standing at the WAR! cabinet', (await call('dbg_cabinet')) === 6, await call('dbg_cabinet'));
+  // the clamp lives in arcade_collide, which runs on the movement
+  // path only (players.c) — so prove it the player's way: stand at
+  // the cabinet and WALK south into the room's edge.
+  await page.keyboard.down('ArrowDown'); await sleep(700); await page.keyboard.up('ArrowDown'); await sleep(150);
+  T('the south clamp followed the cabinet up (y clamps to ARC_CY+258 = -11742)', (await call('dbg_py')) === -11742, await call('dbg_py'));
+
   // out the west door, back to the mall proper
   await call('dbg_tp', -330, -11976); await sleep(200);
   await key('KeyE', 250);

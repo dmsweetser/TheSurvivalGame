@@ -166,6 +166,21 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   const SQ = 2752682;   // quests 0-5 done (170 + 2<<18 + 2<<20) + Zed bit 17 (131072)
   const setTok = (line, tok, val) => line.replace(new RegExp(' ' + tok + '=-?[0-9,]+'), ' ' + tok + '=' + val);
   const crafted = blobA.split('\n').map(line => {
+    if (line.startsWith('wk=')) {
+      // The veteran's weekly ledger must agree with his records.
+      // blobA's wk= line is the FRESH slot-1 run's — current week,
+      // nothing done, baselines zeroed at its start — and splicing
+      // it under the records crafted below makes the live weekly
+      // poll "complete" a delta challenge on load (this week: WAR,
+      // target 2, against war_prog 8) and pay 50 XP, which the XP
+      // assertions then read as corruption. A real save can never
+      // be in that state (its baselines snapshot its own records);
+      // a champion with every plaque full has, of course, already
+      // finished this week's job: done_week := week.
+      const f = line.slice(3).split(',');
+      if (f.length >= 2 && f[0] !== '0') { f[1] = f[0]; return 'wk=' + f.join(','); }
+      return line;
+    }
     if (!line.startsWith('pl= 0 ')) return line;
     let L = line;
     L = setTok(L, 'sq', SQ); L = setTok(L, 'sq2', 170);

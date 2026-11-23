@@ -187,7 +187,18 @@ static void plat_update(int pi, float dt, const BwIn *in){
     if (S->plat_ground) S->plat_coyote = 0.10f; else if (S->plat_coyote>0) S->plat_coyote -= dt;
     if (S->plat_jbuf>0 && S->plat_coyote>0){
         float sp2 = S->plat_vx<0? -S->plat_vx : S->plat_vx;
-        S->plat_vy = -560 - (sp2*0.35f>95? 95 : sp2*0.35f);
+        // jump power (v1.27, Daniel: some platforms were out of
+        // reach): PL_TILE is 24 and the tallest REQUIRED rise in the
+        // levels is the row-8 gap platform — 5 tiles = 120px above
+        // the ground. Held-jump apex = v^2/(2*g), g = 1500 below:
+        // the old 560 gave 560^2/3000 = ~104px, short of 120, so
+        // that platform was unreachable from a standstill. 650
+        // gives 650^2/3000 = ~141px — the 120px rise clears with
+        // ~21px to spare, and the 96px rises (row-9 platforms, the
+        // row-5 upper tier off them) get ~45px. The speed bonus
+        // term and the -210 early-release cut below are unchanged,
+        // so short hops stay short.
+        S->plat_vy = -650 - (sp2*0.35f>95? 95 : sp2*0.35f);
         S->plat_jbuf = 0; S->plat_coyote = 0; S->plat_ground = 0; S->plat_jumpheld = 1; sfx(6);
     }
     if (S->plat_jumpheld){

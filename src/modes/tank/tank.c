@@ -12,6 +12,15 @@
 // once per level into the session. The record (deepest level cleared)
 // lives on the Buddy as td.
 // ===========================================================================
+// v1.27 POWERUPS (Daniel: the tank game is too hard): kind 6 is a
+// HEALTH medkit (+50 hull), kind 7 is the GRENADE LAUNCHER upgrade
+// (endless grenades, faster lob, for the rest of the run). The
+// launcher flag and the patrol-kill counter live here rather than
+// in BwSim: the launcher must survive tank_load_level (it is reset
+// only by tank_enter, a fresh cabinet entry), and the counter only
+// feeds the deterministic drop roll in tank_kill_en.
+static int tank_glauncher_st[MAXP];
+static int tank_killct[MAXP];
 static int tank_pad_ty(int k){ return TANK_LEN - 30 - k*28; }   // helipad rows, marching north
 // 0 ground, 1 water (blocks the tank, not shells), 2 concrete (blocks,
 // indestructible), 3 trees (blocks, destructible), 4 sandbags (blocks,
@@ -60,6 +69,7 @@ static void tank_load_level(int pi, int lvl){
     S->tank_hull = 100; S->tank_pass = 0;
     S->tank_deliv = 0; S->tank_quota = 3; S->tank_obj = 0; S->tank_obj_x = 12.5f*BW_TILE; S->tank_obj_y = 60*BW_TILE;
     S->tank_fire_cd = 0; S->tank_grace = 0; S->tank_deadt = 0; S->tank_cleart = 0;
+    tank_killct[pi] = 0;   // the patrol-drop roll restarts with the level's seed (the launcher flag above does NOT reset here — it lasts the run)
     S->tank_fx = 0; S->tank_fy = -1;
     for (int i=0;i<TANK_W*TANK_LEN;i++){ S->tank_dead[i]=0; S->tank_hit[i]=0; }
     for (int i=0;i<24;i++){ S->tank_cap_a[i]=0; S->tank_sh_a[i]=0; }
@@ -142,6 +152,41 @@ static void tank_load_level(int pi, int lvl){
             else { e->lo = ey-span; e->hi = ey+span; e->aim = e->dir>0? PI/2 : -PI/2; }
         }
     }
+    // v1.27 POWERUPS, guaranteed placements (the scatter's wrenches
+    // can land anywhere, so a struggling driver needs these on the
+    // route): one HEALTH medkit a short drive north of the spawn,
+    // and one GRENADE LAUNCHER in the mid-field south of the
+    // blockade. Both want open ground with open neighbours (so the
+    // drive-over is never walled off), the usual 115px entity
+    // clearance, spine-near columns first, and a spine fallback —
+    // the spine lane is open by construction.
+    { static const int porder[6] = { 12, 13, 11, 14, 10, 15 };
+      int done6 = 0, done7 = 0;
+      for (int a=0; a<6 && !done6; a++) for (int ty=TANK_LEN-14; ty<=TANK_LEN-8 && !done6; ty++){
+          int tx = porder[a];
+          if (tank_tile(S, tx, ty)!=0 || tank_tile(S, tx-1, ty)!=0 || tank_tile(S, tx+1, ty)!=0) continue;
+          float ex = tx*BW_TILE+24, ey = ty*BW_TILE+24;
+          int clear = 1;
+          for (int i=0;i<S->tank_en_n;i++){ float dx=S->tank_en[i].x-ex, dy=S->tank_en[i].y-ey; if (dx*dx+dy*dy < 115*115){ clear=0; break; } }
+          if (clear && tank_en_add(S, 6, ex, ey, 1)) done6 = 1;
+      }
+      if (!done6) for (int ty=TANK_LEN-14; ty<=TANK_LEN-8 && !done6; ty++){
+          float ex = 12*BW_TILE+24, ey = ty*BW_TILE+24;
+          int clear = 1;
+          for (int i=0;i<S->tank_en_n;i++){ float dx=S->tank_en[i].x-ex, dy=S->tank_en[i].y-ey; if (dx*dx+dy*dy < 115*115){ clear=0; break; } }
+          if (clear && tank_en_add(S, 6, ex, ey, 1)) done6 = 1;
+      }
+      if (!done6) tank_en_add(S, 6, 12*BW_TILE+24, (TANK_LEN-10)*BW_TILE+24, 1);
+      for (int a=0; a<6 && !done7; a++) for (int ty=TANK_MID_TY+6; ty<=TANK_LEN-24 && !done7; ty++){
+          int tx = porder[a];
+          if (tank_tile(S, tx, ty)!=0 || tank_tile(S, tx-1, ty)!=0 || tank_tile(S, tx+1, ty)!=0) continue;
+          float ex = tx*BW_TILE+24, ey = ty*BW_TILE+24;
+          int clear = 1;
+          for (int i=0;i<S->tank_en_n;i++){ float dx=S->tank_en[i].x-ex, dy=S->tank_en[i].y-ey; if (dx*dx+dy*dy < 115*115){ clear=0; break; } }
+          if (clear && tank_en_add(S, 7, ex, ey, 1)) done7 = 1;
+      }
+      if (!done7) tank_en_add(S, 7, 12*BW_TILE+24, (TANK_MID_TY+6)*BW_TILE+24, 1);
+    }
     b->x = 12.5f*BW_TILE; b->y = (TANK_LEN-3)*BW_TILE + 24;
     S->tank_respawn_y = b->y;
 }
@@ -149,6 +194,7 @@ static void tank_enter(int pi){
     BwSim *S=&BWS[pi]; Buddy *b=&G.bud[pi];
     S->tank_score=0; S->tank_lives=3; S->tank_t=0;
     S->tank_wep=0; S->tank_gren=8;
+    tank_glauncher_st[pi]=0;   // a fresh cabinet entry starts without the launcher; level loads and respawns keep it
     for (int i=0;i<10;i++) S->tank_gr_a[i]=0;
     for (int i=0;i<6;i++) S->tank_boom_t[i]=0;
     tank_load_level(pi, b->tank_done+1);
@@ -163,7 +209,15 @@ static void tank_kill_en(int pi, TankEn *e){
         scpy(S->note, "A CAPTIVE! DRIVE OVER TO PICK THEM UP.", 72); S->note_t=2.4f;
         S->tank_score += 200;
     } else if (kind==0) S->tank_score += 100;
-    else if (kind==1) S->tank_score += 150;
+    else if (kind==1){ S->tank_score += 150;
+        // v1.27: a dead patrol drops a HEALTH medkit at the wreck,
+        // 35% of the time — rolled on the per-level kill counter
+        // against the level seed, so a run's drops are set the
+        // moment the level is (no rand(), same as the field).
+        tank_killct[pi]++;
+        u32 dh = hash2((u32)tank_killct[pi]*7u + 1u, (u32)S->tank_lvl*13u + 5u, (u32)S->tank_seed ^ 0xD20Du);
+        if ((int)(dh % 100) < 35) tank_en_add(S, 6, e->x, e->y, 1);
+    }
     else if (kind==5){
         S->tank_score += 500; S->tank_mid_hp = 0;
         for (int i=0;i<32;i++) S->tank_es_a[i]=0;   // same courtesy as the core: its shells die with it
@@ -205,7 +259,7 @@ static void tank_boom(int pi, float x, float y){
     splat(x, y, COL(255,170,70), 18, 150); splat(x, y, COL(255,120,60), 10, 110); sfx(7);
     for (int j=0;j<S->tank_en_n;j++){
         TankEn *e=&S->tank_en[j];
-        if (e->kind<0 || e->kind==3) continue;
+        if (e->kind<0 || e->kind==3 || e->kind==6 || e->kind==7) continue;   // pickups are blast-proof: a stray burst never eats your medkit
         float dx=e->x-x, dy=e->y-y;
         if (dx*dx+dy*dy < 62*62){
             e->hp -= 15;
@@ -256,7 +310,7 @@ static void tank_update_shells(int pi, float dt){
         }
         for (int j=0;j<S->tank_en_n;j++){
             TankEn *e=&S->tank_en[j];
-            if (e->kind<0 || e->kind==3) continue;
+            if (e->kind<0 || e->kind==3 || e->kind==6 || e->kind==7) continue;   // shells fly over pickups, same as the wrench
             float rr = e->kind==4? 48.0f : e->kind==5? 30.0f : e->kind==2? 24.0f : 18.0f;
             float dx=sx-e->x, dy=sy-e->y;
             if (dx*dx+dy*dy < rr*rr){
@@ -419,7 +473,7 @@ static void tank_update(int pi, float dt, const BwIn *in){
     // circles (a push-out slides you along the wall, never a dead stop)
     for (int j=0;j<S->tank_en_n;j++){
         TankEn *e=&S->tank_en[j];
-        if (e->kind<0 || e->kind==3) continue;
+        if (e->kind<0 || e->kind==3 || e->kind==6 || e->kind==7) continue;   // pickups don't shove the tank — you roll straight over them
         float rr = e->kind==4? 50.0f : e->kind==5? 34.0f : e->kind==2? 26.0f : 20.0f;
         float dx=b->x-e->x, dy=b->y-e->y;
         float d2=dx*dx+dy*dy, want=(rr+16)*(rr+16);
@@ -440,8 +494,12 @@ static void tank_update(int pi, float dt, const BwIn *in){
                 sfx(4);
                 break;
             }
-        } else if (S->tank_gren>0){
-            S->tank_fire_cd = 0.5f; S->tank_gren--;
+        } else if (S->tank_gren>0 || tank_glauncher_st[pi]){
+            // v1.27: with the GRENADE LAUNCHER aboard the pouch is
+            // bottomless (no decrement, no empty block) and the lob
+            // cycles faster; without it the pouch rules are untouched
+            S->tank_fire_cd = tank_glauncher_st[pi]? 0.38f : 0.5f;
+            if (!tank_glauncher_st[pi]) S->tank_gren--;
             for (int i=0;i<10;i++) if (!S->tank_gr_a[i]){
                 S->tank_gr_a[i]=1; S->tank_gr_t[i]=0.62f;
                 S->tank_gr_x[i]=b->x + S->tank_fx*26; S->tank_gr_y[i]=b->y + S->tank_fy*26;
@@ -462,6 +520,28 @@ static void tank_update(int pi, float dt, const BwIn *in){
             e->kind=-1; S->tank_hull += 40; if (S->tank_hull>100) S->tank_hull=100;
             S->tank_gren += 2; if (S->tank_gren>12) S->tank_gren=12;
             scpy(S->note, "PATCHED UP! +40 HULL, +2 GRENADES", 72); S->note_t=2.2f; sfx(11);
+        }
+    }
+    // --- v1.27 powerups: the medkit and the grenade launcher ---
+    for (int j=0;j<S->tank_en_n;j++){
+        TankEn *e=&S->tank_en[j];
+        if (e->kind!=6 && e->kind!=7) continue;
+        float dx=b->x-e->x, dy=b->y-e->y;
+        if (dx*dx+dy*dy < 26*26){
+            if (e->kind==6){
+                e->kind=-1; S->tank_hull += 50; if (S->tank_hull>100) S->tank_hull=100;
+                scpy(S->note, "MEDKIT! +50 HULL", 72); S->note_t=2.2f; sfx(11);
+            } else {
+                e->kind=-1;
+                if (tank_glauncher_st[pi]){   // already packing it: the spare rack just tops the pouch up
+                    S->tank_gren += 4; if (S->tank_gren>12) S->tank_gren=12;
+                    scpy(S->note, "SPARE LAUNCHER RACK! +4 GRENADES", 72);
+                } else {
+                    tank_glauncher_st[pi]=1;   // for the REST OF THE RUN: level loads and respawns keep it, a fresh cabinet entry resets it
+                    scpy(S->note, "GRENADE LAUNCHER! ENDLESS GRENADES!", 72);
+                }
+                S->note_t=2.4f; sfx(11);
+            }
         }
     }
     // --- captives: four seats, no standing room ---

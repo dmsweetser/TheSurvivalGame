@@ -331,7 +331,7 @@ typedef struct {
 // their own sim — own roamers, own battle, own notes — so in split-screen
 // co-op one player can be in Banzai World in their half while the other
 // keeps playing the field. LAN play never enters (denied at the gate).
-#define WAR_MAXT 160   // WAR! terrain capacity (debris + barrier segments): v1.18 raised it from 72 — worst case is 68 debris + ~81 barrier segments = 149 (defined here, before BwSim; the WAR! block below points back at this)
+#define WAR_MAXT 256   // WAR! terrain capacity (debris + barrier segments): v1.18 raised it from 72 — worst case was 68 debris + ~81 barrier segments = 149; v1.27 widened the scatter roll to 80 and kept the lines, so the cap rises to 256 rather than let a fat field truncate a barrier line (defined here, before BwSim; the WAR! block below points back at this)
 typedef struct {
     BwBattle bat;
     BWHack roam[BW_ROAMN];

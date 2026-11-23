@@ -124,14 +124,30 @@ static int crt_medal[8][3] = {
     { 620, 680, 790 }, { 700, 760, 880 }, { 770, 840, 970 }, { 830, 900, 1040 },
 };
 static const char *CRT_SHORT[8] = { "MEADOWS", "SPAGHETTI", "LEGACY", "BADLANDS", "FROZEN", "NEON RAM", "JUNGLE", "DEPTHS" };
-// TROPHY CASE (v1.25 feat 4): how many of this buddy's tracks derive
-// to a given medal tier (0 = a best exists but earned no medal). The
-// case is a pure view — it counts through here so the medal table
-// keeps exactly one reader per piece.
+// TROPHY CASE (v1.25 feat 4): how many of this buddy's tracks hold
+// a given medal tier (0 = a best time exists but no medal was
+// earned). The case is a pure view — it counts through here so the
+// medal record keeps exactly one reader per piece.
+// v1.27: the count reads the EARNED medals (Buddy.crt_medal_best,
+// banked at each finish under the podium rule) — a fast time alone
+// no longer derives a medal here.
 static int crt_medal_count(Buddy *b, int tier){
     int n=0;
-    for (int t=0;t<8;t++) if (medal_tier(b->crt_tbest[t], crt_medal[t])==tier && (tier>0 || b->crt_tbest[t]>0)) n++;
+    for (int t=0;t<8;t++){
+        if (tier>0){ if (b->crt_medal_best[t]==tier) n++; }
+        else if (b->crt_tbest[t]>0 && b->crt_medal_best[t]==0) n++;
+    }
     return n;
+}
+// v1.27 legacy migration: a pre-v1.27 save carries per-track best
+// times (mc) but no earned-medal record (md). Those medals were
+// earned under the old time-only rule, so they stand: seed the
+// earned record from the times, exactly as the game used to derive
+// them. Called from the loader only when the md token is absent;
+// once the save is re-written it carries md and this never runs
+// for it again.
+static void crt_migrate_medals(Buddy *b){
+    for (int t=0;t<8;t++) b->crt_medal_best[t] = medal_tier(b->crt_tbest[t], crt_medal[t]);
 }
 // append a decisecond time as m:ss.d (the finish panel's format)
 static char *sapp_time(char *q, int tds){

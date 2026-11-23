@@ -347,8 +347,12 @@ function kb_sync(){
   // out one per frame, ahead of any queued characters.
   BSQ += kbVal.length - p;
   // spaces never type: the desktop path never offered them, and a
-  // space inside a name would break the save summary's format
-  for (const ch of v.slice(p)){ const c = ch.charCodeAt(0); if (c>=33 && c<127) TYPEQ.push(c); }
+  // space inside a name would break the save summary's format.
+  // v1.27 exception: in the Source Room editor (mode 5) a space is
+  // ordinary source text, and on a touch device this bridge is the
+  // only keyboard there is — the C side accepts a typed space only
+  // on mobile sessions, so desktop paths are unchanged.
+  for (const ch of v.slice(p)){ const c = ch.charCodeAt(0); if ((c>=33 && c<127) || (c===32 && kbLive===5)) TYPEQ.push(c); }
   kbVal = v;
   if (kbVal.length > 400){ KB.value = kbVal.slice(-320); kbVal = KB.value; }
 }

@@ -514,6 +514,47 @@ static void war_place_nodes(BwSim *S, const float (*nd)[2], const int *na, int n
     S->war_nn = nn;
     for (int n=0;n<nn;n++){ S->war_nx[n]=WAR_OX+nd[n][0]*sx; S->war_ny[n]=WAR_OY+nd[n][1]*sy; S->war_namt[n]=na[n]; }
 }
+// v1.27: NODE JITTER (Daniel: "needs more randomization") —
+// war_place_nodes lays the fixed table out before the battle
+// exists; once the Core and the hives stand (war_build_battle),
+// every node rolls off its table spot by a bseed-derived offset
+// (±90 x, ±70 y, clamped 60 inside the arena) and its amount by
+// ±20%. A candidate spot must clear the Core by 130, every hive
+// by 110 and every other node by 120 — 24 bounded tries, then the
+// node keeps its table spot (its amount is still rolled). The
+// battle snapshot serializes the JITTERED nodes (the wg key) and
+// restore never re-runs this, so a parked battle returns with
+// exactly the field it left.
+static void war_jitter_nodes(BwSim *S){
+    float corex = WAR_OX+280.0f, corey = WAR_OY+S->war_ah*0.5f;
+    for (int n=0;n<S->war_nn;n++){
+        int amt = (int)((float)S->war_namt[n] * (0.8f + hash_f(n, 103, S->war_bseed)*0.4f) + 0.5f);
+        S->war_namt[n] = amt<1? 1 : amt;
+        float bx = S->war_nx[n], by = S->war_ny[n];
+        for (int t=0;t<24;t++){
+            float x = bx + (hash_f(n*31+t, 101, S->war_bseed)*2.0f - 1.0f) * 90.0f;
+            float y = by + (hash_f(n*31+t, 102, S->war_bseed)*2.0f - 1.0f) * 70.0f;
+            if (x < WAR_OX+60.0f) x = WAR_OX+60.0f;
+            if (x > WAR_OX+S->war_aw-60.0f) x = WAR_OX+S->war_aw-60.0f;
+            if (y < WAR_OY+60.0f) y = WAR_OY+60.0f;
+            if (y > WAR_OY+S->war_ah-60.0f) y = WAR_OY+S->war_ah-60.0f;
+            float dx = x-corex, dy = y-corey;
+            if (dx*dx+dy*dy < 130.0f*130.0f) continue;   // the Core's surroundings stay clear
+            int bad = 0;
+            for (int s=0;s<WAR_MAXS && !bad;s++){
+                if (S->war_shp[s]<=0 || S->war_stype[s]!=WAR_S_HIVE) continue;
+                dx = x-S->war_sx[s]; dy = y-S->war_sy[s]; if (dx*dx+dy*dy < 110.0f*110.0f) bad = 1;
+            }
+            for (int m=0;m<S->war_nn && !bad;m++){
+                if (m==n) continue;
+                dx = x-S->war_nx[m]; dy = y-S->war_ny[m]; if (dx*dx+dy*dy < 120.0f*120.0f) bad = 1;
+            }
+            if (bad) continue;
+            S->war_nx[n]=x; S->war_ny[n]=y;
+            break;
+        }
+    }
+}
 // the shared battle build: seed, purse, Core, starting units,
 // hives (banded), terrain, fog, camera, banner. The caller has
 // already cleared the field, set the field geometry (war_aw /
@@ -552,20 +593,25 @@ static void war_build_battle(int pi, int region, int bits, int nh){
     // its spot inside its own band (x deep in the east, y anywhere
     // in the band), so the swarm is always spread out but never
     // where it stood last time. No more "just go to the far right".
-    // (At the campaign's 1600x1200: x 1240..1390, margin 130.)
+    // (At the campaign's 1600x1200: x 1240..1460, margin 130 —
+    // v1.27 widened the x roll from 150 to 220.)
     { float band_h = S->war_ah / (float)nh;
       float hmargin = S->war_ah*(130.0f/1200.0f);
       for (int h=0;h<nh;h++){
-          float hx = (S->war_aw-360.0f) + hash_f(h, 11, S->war_bseed) * 150.0f;
+          float hx = (S->war_aw-360.0f) + hash_f(h, 11, S->war_bseed) * 220.0f;
           float hy = (float)h * band_h + hmargin + hash_f(h, 12, S->war_bseed) * (band_h - 2.0f*hmargin);
           int hi = war_spawn_struct(S, WAR_S_HIVE, 1, WAR_OX+hx, WAR_OY+hy);
-          war_spawn_bug(S, hi, 0); war_spawn_bug(S, hi, 0);
+          // v1.27: garrison jitter — 2-3 guards by hash (was a
+          // flat 2); the region>=2 bonus bug still stacks on top
+          int guards = 2 + (hash_f(h, 41, S->war_bseed) < 0.5f? 1 : 0);
+          for (int g=0;g<guards;g++) war_spawn_bug(S, hi, 0);
           if (region>=2) war_spawn_bug(S, hi, 0);
           if (hi>=0){   // v1.21: every hive opens its purse and fields its workforce — two bug harvesters, free at the start like the garrison
               S->war_hbits[hi] = war_hive_start_bits(S);
               war_spawn_bharv(S, hi); war_spawn_bharv(S, hi);
           }
       } }
+    war_jitter_nodes(S);   // v1.27: nodes roll off the table BEFORE terrain generation reads them for clearances
     war_gen_terrain(S, S->war_bseed);
     for (int i=0;i<WAR_FOG_W*WAR_FOG_H;i++) S->war_fog[i]=0;   // a fresh battle starts in the dark
     war_fog_update(S);

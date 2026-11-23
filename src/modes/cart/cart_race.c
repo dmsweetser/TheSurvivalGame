@@ -128,8 +128,15 @@ static void crt_save_record(int who, int place, int tds, int track){
     // MEDAL TIMES (feat 3): the per-track best rides the SAME shared
     // race clock for host and guest alike (the legacy co-op rule), but
     // — standing records rule — a Zen run sets no records.
-    if (!G.zen_run && track >= 0 && track < 8)
+    if (!G.zen_run && track >= 0 && track < 8){
         if (!bb->crt_tbest[track] || tds < bb->crt_tbest[track]) bb->crt_tbest[track] = tds;
+        // v1.27 PODIUM RULE: the medal this finish EARNS — its time
+        // tier capped by its placement (medal_tier_finish) — is
+        // banked as the track's medal record if it beats the one
+        // held. A 4th-place finish banks its time and nothing else.
+        { int earned = medal_tier_finish(tds, crt_medal[track], place);
+          if (earned > bb->crt_medal_best[track]) bb->crt_medal_best[track] = earned; }
+    }
 }
 static void crt_finish_floater(int who, int place){
     Player *p = &G.p[who]; char buf[64]; char *q = buf;

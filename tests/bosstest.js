@@ -108,9 +108,26 @@ const TERM = [[3230, -2460], [3570, -2460], [3400, -2210]];
       if ((await call('dbg_bwbattle')) > 0) await winBattle('gate');
       await call('dbg_bwtp', 5800, 3760);
       await sleep(200);
-      await page.keyboard.down('ArrowUp'); await sleep(1200); await page.keyboard.up('ArrowUp');
-      await sleep(150);
-      if ((await call('dbg_bwbattle')) > 0) continue;
+      // Pulse-and-poll the walk instead of one fixed 1200 ms hold: under
+      // battery load a single hold can end before the buddy reaches the
+      // gate, faking the outcome (the v1.26 battery flake: "gate opens
+      // with the crank" failed at site -1 solo-clean). Outcomes are the
+      // original ones — site 3 for entry; for a hold, site !== 3 with
+      // y < 3745 AND y stable across two polls (stopped at the fence,
+      // not merely passing the line mid-walk).
+      const t0 = Date.now();
+      let prevY = null, outcome = false, fought = false;
+      while (Date.now() - t0 < 12000) {
+        await page.keyboard.down('ArrowUp'); await sleep(250); await page.keyboard.up('ArrowUp');
+        await sleep(120);
+        if ((await call('dbg_bwbattle')) > 0) { fought = true; break; }
+        const site = await call('dbg_site'), y = await call('dbg_bwy');
+        if (wantIn) { if (site === 3) { outcome = true; break; } }
+        else if (site !== 3 && y < 3745 && prevY !== null && Math.abs(y - prevY) < 2) { outcome = true; break; }
+        prevY = y;
+      }
+      if (outcome) return true;
+      if (fought) continue;
       const site = await call('dbg_site'), y = await call('dbg_bwy');
       if (wantIn) { if (site === 3) return true; }
       else if (site !== 3 && y < 3745) return true;

@@ -98,6 +98,14 @@ function T(name, cond, extra) { if (cond) { pass++; } else { fail++; console.log
   T('...right back at the cart cabinet', Math.abs(ry - (-11890)) < 130, 'py=' + ry);
   T('best finish saved (P1 via the skip)', (await call('dbg_crtbest')) === 1, await call('dbg_crtbest'));
   T('best time saved', (await call('dbg_crtbesttime')) > 0, await call('dbg_crtbesttime'));
+  // v1.27 PODIUM RULE: the four GP wins were P1 finishes on fast
+  // skip clocks (well under each track's gold threshold), so all
+  // four home tracks hold GOLD medals — banked at the finish under
+  // the placement cap, in the Grand Prix context as in single
+  // races (dbg_crtmedal reads the earned record). The P3/P4
+  // boundary itself is asserted in medaltest Phase F.
+  for (let t = 0; t < 4; t++)
+    T('GP win banked a GOLD medal on track ' + t, (await call('dbg_crtmedal', t)) === 3, await call('dbg_crtmedal', t));
 
   // relaunch: the record greets you, and Escape leaves cleanly
   await call('dbg_tp', 256, -11898); await sleep(200);

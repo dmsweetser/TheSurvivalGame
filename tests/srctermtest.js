@@ -120,6 +120,47 @@ function srcFiles() {
   T('the localStorage overlay is gone', after === null, after);
   T('back at the browser after reset', (await call('dbg_srcterm')) === 1, await call('dbg_srcterm'));
 
+  // v1.27 wrap check: open the file whose lines wrap the most at the
+  // editor's full-width cols (60). The expected display-row count is
+  // computed here from the raw BYTES on disk (the editor counts
+  // bytes), independently of the game's own wrap math.
+  const COLS = 60;
+  let wrapFile = null, wrapExpect = 0;
+  for (const f of files) {
+    const buf = fs.readFileSync(path.join(__dirname, '..', 'src', f));
+    let dr = 0, mx = 0, llen = 0;
+    const lens = [];
+    for (const b of buf) { if (b === 10) { lens.push(llen); llen = 0; } else llen++; }
+    lens.push(llen);
+    for (const l of lens) { dr += l === 0 ? 1 : Math.ceil(l / COLS); if (l > mx) mx = l; }
+    if (mx > COLS && dr > wrapExpect) { wrapFile = f; wrapExpect = dr; }
+  }
+  T('a long-line file exists for the wrap check', !!wrapFile, wrapFile);
+  const wtarget = files.indexOf(wrapFile);
+  for (let i = 0; i < wtarget; i++) await key('ArrowDown', 30);
+  await key('Space', 300);
+  let wopened = await poll('dbg_srcfile', v => v === wtarget, 4000);
+  if (wopened !== wtarget) {   // selection drifted: correct from the row we landed on
+    await key('Escape', 300);
+    const diff = wtarget - wopened;
+    const dir = diff > 0 ? 'ArrowDown' : 'ArrowUp';
+    for (let i = 0; i < Math.abs(diff); i++) await key(dir, 30);
+    await key('Space', 300);
+    wopened = await poll('dbg_srcfile', v => v === wtarget, 4000);
+  }
+  T('editor opens the wrap file', wopened === wtarget, wopened);
+  T('soft wrap: display rows match the byte-exact expectation', (await call('dbg_srcdrows')) === wrapExpect, (await call('dbg_srcdrows')) + ' vs ' + wrapExpect);
+  // PageDown steps DISPLAY rows (10 per press): after 3 presses the
+  // cursor sits on display row 30 and the window has followed it
+  for (let i = 0; i < 3; i++) await key('PageDown', 150);
+  const drow1 = await call('dbg_srcdrow'), top1 = await call('dbg_srctop');
+  T('wrap: PageDown lands the cursor on display row 30', drow1 === 30, drow1);
+  T('wrap: the window scrolled and the cursor is inside it', top1 > 0 && top1 <= drow1 && drow1 < top1 + 18, 'top=' + top1 + ' drow=' + drow1);
+  await key('ArrowUp', 150);
+  T('wrap: ArrowUp steps one DISPLAY row (not one logical line)', (await call('dbg_srcdrow')) === 29, await call('dbg_srcdrow'));
+  await key('Escape', 300);
+  T('back at the browser after the wrap check', (await poll('dbg_srcterm', v => v === 1)) === 1, await call('dbg_srcterm'));
+
   // close the panel and leave by the exit mat
   await key('Escape', 300);
   T('panel closed', (await poll('dbg_srcterm', v => v === 0)) === 0, await call('dbg_srcterm'));

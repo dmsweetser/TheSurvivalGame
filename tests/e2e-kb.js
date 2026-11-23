@@ -274,7 +274,7 @@ function T(name, cond, extra) {
     T('cart: the kart drives and gains ground', (await call('dbg_crtprog')) > p0 + 120, p0 + ' -> ' + (await call('dbg_crtprog')));
   });
   // WAR!: map -> 'S' skirmish panel -> LAUNCH -> battle -> pause SAVE & QUIT -> map -> Esc out
-  await call('dbg_tp', 0, -11688); await sleep(250);
+  await call('dbg_tp', 0, -11758); await sleep(250);   // v1.27: WAR! stand point = (0, -12000+184+58) — the cabinet rose 70px (ARC_ROWY[6] 254 -> 184)
   T('standing at the WAR! cabinet', (await call('dbg_cabinet')) === 6, await call('dbg_cabinet'));
   await key('KeyE', 250, 300);
   T('WAR! cabinet panel opens', (await poll('dbg_arcgate', v => v === 1, 5000)) === 1);

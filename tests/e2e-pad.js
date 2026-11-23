@@ -172,7 +172,7 @@ const PADSCRIPT = () => {
   T('P1 walked to the arcade door on the stick', await padWalkTo(350, -5976, 14));
   await btn(0, B, 200, 350);
   T('entered the Arcade on pad B', (await poll('dbg_inarcade', v => v === 1, 6000)) === 1, await call('dbg_inarcade'));
-  await call('dbg_tp', 0, -11688); await sleep(250);   // position staging only
+  await call('dbg_tp', 0, -11758); await sleep(250);   // position staging only — v1.27: WAR! stand point = (0, -12000+184+58), the cabinet rose 70px (ARC_ROWY[6] 254 -> 184)
   T('standing at the WAR! cabinet', (await call('dbg_cabinet')) === 6, await call('dbg_cabinet'));
   T('WAR! cabinet panel opens on pad B', await openPanel(async () => (await call('dbg_arcgate')) === 1), await call('dbg_arcgate'));
   await btn(0, A, 200, 400);

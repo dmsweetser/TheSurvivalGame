@@ -20,8 +20,14 @@
 // A THIRD ROW (Nov 15, for WAR!): the room grew ~110px south (the
 // south wall, the y-clamp and the floor text moved with it) and
 // WAR! stands alone, centred, on its own row at ARC_ROWY +254.
+// v1.27 (Daniel: "its physical location in the arcade is too
+// low"): WAR! rises 70px to ARC_ROWY +184 and the room's south
+// growth shrinks with it — the south clamp below is ARC_CY+258
+// (was +328), and the south wall / floor dressing in draw_arcade
+// moved up the same 70px. Other cabinets and the north extent
+// are untouched. WAR!'s interact point is now (0, ARC_CY+242).
 static const int ARC_SX[7] = { -256, 0, 256, -256, 0, 256, 0 };
-static const int ARC_ROWY[7] = { -166, -166, -166, 44, 44, 44, 254 };
+static const int ARC_ROWY[7] = { -166, -166, -166, 44, 44, 44, 184 };
 static const char *ARC_NAME[7] = { "ENTRANCES", "SUPER BUDDY RUN", "BUDDY CRAFT", "TANK RESCUE", "CASTLE", "SUPER BUDDY CART", "WAR!" };
 static const int ARC_MODE[7] = { 2, 3, 4, 5, 6, 7, 8 };         // the bw_mode each cabinet launches
 static int arcgate[MAXP], arcgate_sel[MAXP], arc_cab[MAXP];   // the cabinet panel (per player)
@@ -271,7 +277,7 @@ static void mall_collide(Player *p){
 static void arcade_collide(Player *p){
     if (p->x < -356) p->x = -356; if (p->x > 356) p->x = 356;
     if (p->y < ARC_CY-164) p->y = ARC_CY-164;
-    if (p->y > ARC_CY+328) p->y = ARC_CY+328;   // the room grew south for the WAR! row (Nov 15)
+    if (p->y > ARC_CY+258) p->y = ARC_CY+258;   // the room grew south for the WAR! row (Nov 15); v1.27: the row rose 70px and the clamp followed (+328 -> +258)
     for (int s=0;s<7;s++){
         float hx=66, hy0=ARC_CY + ARC_ROWY[s] + 8, hy1=ARC_CY + ARC_ROWY[s] + 40, rad=11;
         if (p->x > ARC_SX[s]-hx-rad && p->x < ARC_SX[s]+hx+rad && p->y > hy0-rad && p->y < hy1+rad){

@@ -2,6 +2,10 @@
 // Unity-build piece: #included by survival.c in a fixed order (see the map there).
 // Split from save.c lines 791-1315 in the Nov 2026 fine-grained refactor; code unchanged.
 
+// v1.27: defined with the Cart medal record (modes/cart/cart_track.c,
+// later in the unity order) — the loader calls it for pre-v1.27 saves.
+static void crt_migrate_medals(Buddy *b);
+
 static void start_run(int net_mode){
     G.edit_field = 0;   // a run never owns a menu text field (Nov 9)
     reset_world();
@@ -197,6 +201,7 @@ static void continue_run(int slot){
                   int tcw_bn=0, tcw_x[48], tcw_y[48], tcw_k[48], tcw_h[48];
                   int tcd_gn=0, tcd_g[96];
                   int tmc[8]={0}, tmr[16]={0};   // MEDAL TIMES temps (feat 3): absent token = all zeros = no medals
+                  int tmd[8]={0}, tmd_on=0;   // v1.27: earned Cart medals (md); absent token = a pre-v1.27 save, whose medals migrate from the mc times below
                   // HAT PORTRAIT BOOTH temps (feat 9): the pt= token's
                   // twelve ints + the frozen stack's kind digits.
                   // Absent token = dial 0, no portrait. This player's
@@ -240,6 +245,12 @@ static void continue_run(int slot){
                               tmc[ti++]=parse_int(q); while (*q && *q!=',' && *q!=' ' && *q!='\n') q++; if (*q==',') q++;
                           }
                           while (*q && *q!=' ' && *q!='\n') q++;   // consume any overflow exactly to the delimiter (Nov 5 lesson)
+                      } else if (kk[0]=='m' && kk[1]=='d' && kk[2]==0){   // v1.27: 8 comma-separated EARNED cart medals (0..3)
+                          int ti=0; tmd_on=1;
+                          while (*q && *q!=' ' && *q!='\n' && ti<8){
+                              tmd[ti++]=parse_int(q); while (*q && *q!=',' && *q!=' ' && *q!='\n') q++; if (*q==',') q++;
+                          }
+                          while (*q && *q!=' ' && *q!='\n') q++;
                       } else if (kk[0]=='m' && kk[1]=='r' && kk[2]==0){   // MEDAL TIMES: 16 comma-separated run bests (ds)
                           int ti=0;
                           while (*q && *q!=' ' && *q!='\n' && ti<16){
@@ -377,6 +388,8 @@ static void continue_run(int slot){
                       bd->crt_best_pos = bcp<0? 0 : bcp;
                       bd->crt_cupbest = bcr<0? 0 : bcr;
                       for (int ti=0; ti<8; ti++) bd->crt_tbest[ti] = tmc[ti]<0? 0 : tmc[ti];    // MEDAL TIMES (feat 3)
+                      for (int ti=0; ti<8; ti++) bd->crt_medal_best[ti] = tmd[ti]<0? 0 : tmd[ti]>3? 3 : tmd[ti];   // v1.27: earned medals, clamped to tier range
+                      if (!tmd_on) crt_migrate_medals(bd);   // v1.27: a pre-v1.27 save's medals stand — seed them from its best times
                       for (int ti=0; ti<16; ti++) bd->plat_tbest[ti] = tmr[ti]<0? 0 : tmr[ti];
                       bd->war_prog = bwr<0? 0 : bwr>8? 8 : bwr;
                       bd->top_earned = btp<0? 0 : (btp & TOP_ALL);   // HAT TOPPERS (feat 5)

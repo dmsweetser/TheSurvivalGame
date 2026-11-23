@@ -75,6 +75,22 @@ static void tank_render(int pi){
             shadow_ellipse(x, y+10, 10, 3);
             rect_fill(x-10, y-8+bob, 20, 16, COL(238,240,244)); rect_line(x-10, y-8+bob, 20, 16, COL(150,60,60));
             rect_fill(x-2, y-6+bob, 4, 12, COL(200,50,50)); rect_fill(x-6, y-2+bob, 12, 4, COL(200,50,50));
+        } else if (e->kind==6){   // HEALTH (v1.27): a medkit — bigger than the wrench box, bold red cross, pale halo so it reads as HELP from across the field
+            int bob = (int)(fsin(S->tank_t*3 + j)*2.0f);
+            shadow_ellipse(x, y+12, 13, 3);
+            disc_fill(x, y+bob, 19, COL(196,246,208));
+            disc_fill(x, y+bob, 16, COL(232,250,238));
+            rect_fill(x-13, y-10+bob, 26, 20, COL(248,250,252));
+            rect_line(x-13, y-10+bob, 26, 20, COL(200,40,40)); rect_line(x-12, y-9+bob, 24, 18, COL(200,40,40));
+            rect_fill(x-3, y-7+bob, 6, 14, COL(224,32,32)); rect_fill(x-7, y-3+bob, 14, 6, COL(224,32,32));
+        } else if (e->kind==7){   // the GRENADE LAUNCHER (v1.27): a fat lobber tube on a crate, orange muzzle band — a gun silhouette, nothing like the medkit
+            int bob = (int)(fsin(S->tank_t*3 + j)*2.0f);
+            shadow_ellipse(x, y+12, 14, 3);
+            rect_fill(x-13, y+3+bob, 26, 9, COL(122,84,46)); rect_line(x-13, y+3+bob, 26, 9, COL(84,56,28));
+            line_thick(x-9, y+5+bob, x+8, y-10+bob, 8, COL(52,84,44));
+            line_thick(x+5, y-7+bob, x+10, y-12+bob, 9, COL(244,140,36));
+            disc_fill(x-9, y+5+bob, 4, COL(28,38,22));
+            disc_fill(x+13, y+6+bob, 4, COL(52,84,44)); disc_fill(x+13, y+5+bob, 1, COL(200,230,180));   // a spare grenade by the crate
         } else if (e->kind==2){   // a prison hut
             shadow_ellipse(x, y+16, 24, 6);
             rect_fill(x-22, y-8, 44, 26, COL(146,104,62)); rect_line(x-22, y-8, 44, 26, COL(96,66,36));
@@ -187,12 +203,16 @@ static void tank_render(int pi){
       q=sappend(q, "   LIVES "); q=sapp_int(q, S->tank_lives);
       q=sappend(q, "   ABOARD "); q=sapp_int(q, S->tank_pass); q=sappend(q, "/4");
       *q=0; draw_text(vx+8, vy+6, buf, 1, COL(240,244,250)); }
-    { char buf[96]; char *q=buf;
+    { char buf[128]; char *q=buf;
+      // v1.27: while the GRENADE LAUNCHER is aboard its tag rides the
+      // weapon line for the whole run, and the grenade count reads
+      // "--" (bottomless) instead of a number
       if (S->tank_wep==0){ q=sappend(q, "WEAPON: CANNON  ("); q=sappend(q, lbl_wall()); q=sappend(q, ": GRENADES x"); }
       else { q=sappend(q, "WEAPON: GRENADE x"); }
-      q=sapp_int(q, S->tank_gren);
+      if (tank_glauncher_st[pi]) q=sappend(q, "--"); else q=sapp_int(q, S->tank_gren);
       if (S->tank_wep) { q=sappend(q, "  ("); q=sappend(q, lbl_wall()); q=sappend(q, ": CANNON)"); }
       else q=sappend(q, ")");
+      if (tank_glauncher_st[pi]) q=sappend(q, "  [GRENADE LAUNCHER]");
       *q=0; draw_text(vx+8, vy+24, buf, 1, S->tank_wep? COL(255,190,90) : COL(170,190,200)); }
     { int bw3 = 120, bx = vx+vw2-bw3-10, by = vy+6;
       draw_text(bx-32, by, "HULL", 1, COL(240,244,250));

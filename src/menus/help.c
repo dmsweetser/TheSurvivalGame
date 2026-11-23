@@ -16,7 +16,7 @@ static void render_help(void){
             "DIFFICULTY: EASY IS CLASSIC; THE REST MAKE BUGS MEANER.",
             "",
             "THE OLD BUG BOUNTY HUT IS NOW THE BUG MALL - PRESS",
-            "INTERACT AT THE HUT TO STEP INSIDE. NINE STOPS,",
+            "INTERACT AT THE HUT TO STEP INSIDE. TEN STOPS,",
             "ONE BUILDING: THE COUNTER SELLS EVERYTHING IT",
             "ALWAYS DID.",
             "",

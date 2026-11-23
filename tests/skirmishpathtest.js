@@ -59,7 +59,7 @@ async function enterWarMap(page) {
   await call(page, 'dbg_tp', 350, -5976); await sleep(200);
   await key(page, 'KeyE', 250);
   if ((await poll(page, 'dbg_inarcade', v => v === 1)) !== 1) return false;
-  await call(page, 'dbg_tp', 0, -11688); await sleep(200);
+  await call(page, 'dbg_tp', 0, -11758); await sleep(200);   // v1.27: WAR! stand point = (0, -12000+184+58) — the cabinet rose 70px (ARC_ROWY[6] 254 -> 184)
   if ((await call(page, 'dbg_cabinet')) !== 6) return false;
   await key(page, 'KeyE', 250);
   if ((await poll(page, 'dbg_arcgate', v => v === 1)) !== 1) return false;

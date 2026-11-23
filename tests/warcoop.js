@@ -96,11 +96,14 @@ async function stepTo(page, P, pi, hlFn, want) {
   return (await call(page, hlFn)) === want;
 }
 // P2 from their Arcade cabinet into WAR!, verify-and-retry on the
-// panel pick (same idiom)
+// panel pick (same idiom). v1.27: the WAR! cabinet stand point is
+// (ARC_SX[6], ARC_CY + ARC_ROWY[6] + 58) = (0, -12000+184+58) =
+// (0,-11758) — the cabinet rose 70px (ROWY 254 -> 184); every
+// dbg_tp/dbg_tp2 to it in this suite uses the new point.
 async function p2Cabinet(page, P) {
   for (let t = 0; t < 4; t++) {
     if ((await call(page, 'dbg_war2state')) !== -1) return true;
-    await call(page, 'dbg_tp2', 0, -11688); await sleep(250);
+    await call(page, 'dbg_tp2', 0, -11758); await sleep(250);
     await P.tap(1, 1, 180); await sleep(350);
     await P.tap(1, 0, 180); await sleep(350);
   }
@@ -152,7 +155,7 @@ async function enterWar(page, P, pi) {
     await call(page, 'dbg_tp', 0, 80); await key(page, 'KeyE', 250); await sleep(300);
     await call(page, 'dbg_tp', 350, -5976); await key(page, 'KeyE', 250);
     if ((await poll(page, 'dbg_inarcade', v => v === 1, 5000)) !== 1) return false;
-    await call(page, 'dbg_tp', 0, -11688); await sleep(250);
+    await call(page, 'dbg_tp', 0, -11758); await sleep(250);
     if ((await call(page, 'dbg_cabinet')) !== 6) return false;
     await key(page, 'KeyE', 250);
     if ((await poll(page, 'dbg_arcgate', v => v === 1, 5000)) !== 1) return false;
@@ -161,7 +164,7 @@ async function enterWar(page, P, pi) {
   }
   await call(page, 'dbg_tp2', 0, 80); await P.tap(1, 1, 180); await sleep(400);
   await call(page, 'dbg_tp2', 350, -5976); await P.tap(1, 1, 180); await sleep(400);
-  await call(page, 'dbg_tp2', 0, -11688); await sleep(250);
+  await call(page, 'dbg_tp2', 0, -11758); await sleep(250);
   await P.tap(1, 1, 180); await sleep(400);   // P2's own cabinet panel
   await P.tap(1, 0, 180);                      // pad A picks PLAY on it
   return true;   // the caller polls the mode-specific reader

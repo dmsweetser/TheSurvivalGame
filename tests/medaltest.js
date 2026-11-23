@@ -1,8 +1,13 @@
 // medaltest.js — v1.25 MEDAL TIMES (feature #3): per-track Cart bests
 // and per-level Run bests, medals DERIVED from the stored bests.
-// Phase A: exact tier boundaries via a crafted save (mc=/mr= tokens at
-// gold, gold+1, silver+1, bronze+1 values) — derivation is pure, so the
-// boundaries are asserted exactly through dbg_crtmedal/dbg_platmedal.
+// v1.27: Cart medals are now EARNED at the finish, capped by
+// placement (podium only — medal_tier_finish), and banked per track
+// (md= token). Phase A still asserts the exact tier boundaries via a
+// crafted save: a save with mc= but no md= is pre-v1.27, so its
+// medals MIGRATE from the times at load — the same pure derivation,
+// asserted exactly through dbg_crtmedal/dbg_platmedal. Phase F is
+// the new podium boundary on live finishes. (Run medals are a solo
+// time trial and still derive from the stored bests.)
 // Phase B: a real skip-driven Cart finish banks a per-track best via
 // the shared race clock; a slower re-run does not replace it; the blob
 // carries mc=.
@@ -163,8 +168,8 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
         pdD = await call('dbg_platdone');
   const blobD = (await saveSlot(2)) || '';
   ok(blobD.includes('mc=') && blobD.includes('mr='), 'D: slot 2 blob carries both medal tokens');
-  const stripped = blobD.replace(/ mc=[0-9,]+/g, '').replace(/ mr=[0-9,]+/g, '');
-  ok(!stripped.includes('mc=') && !stripped.includes('mr='), 'D: stripped blob is medal-free');
+  const stripped = blobD.replace(/ mc=[0-9,]+/g, '').replace(/ mr=[0-9,]+/g, '').replace(/ md=[0-9,]+/g, '');
+  ok(!stripped.includes('mc=') && !stripped.includes('mr=') && !stripped.includes(' md='), 'D: stripped blob is medal-free');
   await page.evaluate(s => localStorage.setItem('tsg_save3', s), stripped);
   ok(await loadSlot(3, 2), 'D: pre-feature slot 3 loads into play');
   ok((await call('dbg_crttbest', 0)) === 0 && (await call('dbg_crtmedal', 0)) === 0, 'D: no cart medals on the old save');
@@ -236,6 +241,89 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   ok((await poll('dbg_platlvl', v => v === 2, 12000)) === 2, 'E: Zen replay finished');
   ok((await call('dbg_plattbest', 1)) === 0, 'E: Zen replay banked NO level best', await call('dbg_plattbest', 1));
   await call('dbg_bwexit');
+
+  // ================= PHASE F: the v1.27 podium boundary ============
+  // A Cart finish earns its time tier CAPPED by placement: 3rd with
+  // a gold-tier clock earns BRONZE; 4th with an even faster clock
+  // earns NOTHING (the time still banks as a time). The fresh run
+  // overwrites slot 3 (Phase E's Zen run, no longer needed) so the
+  // medal record starts empty and every step is observable.
+  // Rival finishes are staged with dbg_crtfin (a rival parked past
+  // the line registers its place on the next frame).
+  await page.reload({ waitUntil: 'load' });
+  await page.waitForFunction(() => window.__TSG && window.__TSG.dbg_state() === 0, null, { timeout: 20000 });
+  // Title navigation is verify-and-retry throughout this phase: a
+  // bare key press can fall between frames right after a reload
+  // (the hazard Phases D/E document — the first version of this
+  // phase lost exactly one ArrowDown that way), so the selection is
+  // driven to its row by polling, never by counting presses.
+  { let mc2 = await call('dbg_menucount');
+    const t0 = Date.now();
+    while (Date.now() - t0 < 15000) { await sleep(300); const v = await call('dbg_menucount'); if (v === mc2) break; mc2 = v; } }
+  async function menuGoto(row) {
+    for (let t = 0; t < 14; t++) {
+      const sel = await call('dbg_menusel'), cnt = await call('dbg_menucount');
+      if (sel === row) return true;
+      const down = ((row - sel) % cnt + cnt) % cnt, up = (cnt - down) % cnt;
+      await key(down <= up ? 'ArrowDown' : 'ArrowUp', 160);
+    }
+    return (await call('dbg_menusel')) === row;
+  }
+  if ((await call('dbg_mzen')) === 1) {
+    // Phase E left the Zen preference on; a fresh start would copy
+    // it in and bank nothing — turn it back off like a player.
+    ok(await menuGoto(5), 'F: selection reached the ZEN row');
+    await key('Space', 350);
+    ok((await poll('dbg_mzen', v => v === 0, 4000)) === 0, 'F: Zen toggled back off');
+  }
+  ok((await call('dbg_mzen')) === 0, 'F: Zen preference off for the fresh run');
+  ok(await menuGoto(1), 'F: selection on START', await call('dbg_menusel'));
+  // The game has THREE slots; the picker preselects the current
+  // one (slot 3, Phase E's Zen run) and an occupied slot in START
+  // mode takes two Enters — the first arms the overwrite confirm,
+  // the second starts fresh. (An earlier draft of this phase
+  // aimed at a "slot 4" that does not exist: picker row 3 is the
+  // BACK row.) Enters are fed one at a time against the live
+  // state, so a press eaten between frames just means one more
+  // Enter, never a wrong action: in the picker an Enter can only
+  // arm or confirm THIS slot's overwrite. Freshness is then
+  // proven by the seams (no medal, no best finish, not Zen).
+  await key('Space', 400);   // the slot picker, preselecting slot 3
+  ok((await poll('dbg_state', v => v === 7, 4000)) === 7, 'F: slot picker open', await call('dbg_state'));
+  let startedF = false;
+  for (let e = 0; e < 4 && !startedF; e++) {
+    await key('Enter', 400);
+    startedF = (await poll('dbg_state', v => v === 1, 3000)) === 1;
+  }
+  ok(startedF, 'F: fresh run started (slot 3 overwritten)');
+  ok((await call('dbg_zen')) === 0, 'F: the fresh run is not Zen', await call('dbg_zen'));
+  ok((await call('dbg_crtbest')) === 0, 'F: no best finish on the fresh buddy', await call('dbg_crtbest'));
+  await call('dbg_adopt', 0);
+  ok((await call('dbg_crtmedal', 0)) === 0, 'F: no medal on the fresh buddy');
+  // P3 with a gold-tier clock: two rivals staged home first
+  ok(await startRace(), 'F: race 1 running (track 0)');
+  await call('dbg_crtskip');
+  await call('dbg_crtfin', 1); await call('dbg_crtfin', 2);
+  await sleep(300);
+  await call('dbg_crtsettime', 150);
+  await hold('Space', 1600);
+  ok((await poll('dbg_crtstate', v => v === 4 || v === 5, 12000)) >= 4, 'F: P3 finish banked, standings up');
+  ok((await call('dbg_crtbest')) === 3, 'F: the finish really was P3', await call('dbg_crtbest'));
+  const tbF = await call('dbg_crttbest', 0);
+  ok(tbF > 150 && tbF <= 230, 'F: the gold-tier time banked', tbF);
+  ok((await call('dbg_crtmedal', 0)) === 1, 'F: P3 caps the gold time at BRONZE', await call('dbg_crtmedal', 0));
+  await call('dbg_bwexit'); await sleep(400);
+  // P4 with an even faster clock: the time improves, the medal cannot
+  ok(await startRace(), 'F: race 2 running');
+  await call('dbg_crtskip');
+  await call('dbg_crtfin', 1); await call('dbg_crtfin', 2); await call('dbg_crtfin', 3);
+  await sleep(300);
+  await call('dbg_crtsettime', 140);
+  await hold('Space', 1600);
+  ok((await poll('dbg_crtstate', v => v === 4 || v === 5, 12000)) >= 4, 'F: P4 finish banked, standings up');
+  ok((await call('dbg_crttbest', 0)) < tbF, 'F: the faster P4 time replaced the track best', await call('dbg_crttbest', 0));
+  ok((await call('dbg_crtmedal', 0)) === 1, 'F: P4 earned NO medal — still the P3 bronze', await call('dbg_crtmedal', 0));
+  await call('dbg_bwexit'); await sleep(400);
 
   console.log(`\nMEDALTEST: ${pass} passed, ${fail} failed`);
   await browser.close();

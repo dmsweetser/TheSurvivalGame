@@ -9,6 +9,7 @@ static void crt_draw_driver(int cx, int seat_y, int w, int species, u32 coat){
     if (species == 3)   // platypus: the flat tail rides behind the seat
         ellipse_fill(hx, seat_y + w*20/100, hr + hr/3, hr/2 + 1, dark);
     rect_fill(cx - w*23/100, seat_y, w*46/100, w*23/100, dark);   // shoulders and back
+    rect_fill(cx - w*23/100, seat_y + w*2/100, w*46/100, w*5/100 > 1? w*5/100 : 1, col_shade(dark, 1.30f));   // shoulder sheen (v1.27 polish)
     if (species == 5){   // KITCHEN SINK: basin silhouette, faucet on top
         rect_fill(hx - hr, hy - hr/2, hr*2, hr + hr/2, coat);
         rect_line(hx - hr, hy - hr/2, hr*2, hr + hr/2, dark);
@@ -40,6 +41,8 @@ static void crt_draw_driver(int cx, int seat_y, int w, int species, u32 coat){
             line_thick(hx + hr + hr/3, hy - hr - hr/5, hx + hr + hr/2, hy - hr*3/4, lw > 1? 2 : 1, ant);
         }
     }
+    if (species != 5 && w >= 12)   // a sunlit crest on the head (v1.27 polish)
+        disc_fill(hx - hr/3, hy - hr/3, hr/4 > 1? hr/4 : 1, col_shade(coat, 1.30f));
     if (w >= 15){   // the famous glasses, oversized as is traditional
         int gr = hr * 2 / 5; if (gr < 2) gr = 2;
         circle_out(hx - hr/2, hy, gr, COL(20,18,26));
@@ -77,7 +80,10 @@ static void crt_render_view(int sim_pi, int viewer_pi){
           disc_fill(cx - KTS(48), cy + KTS(35), KTS(17), COL(16, 14, 24));
           disc_fill(cx + KTS(48), cy + KTS(35), KTS(17), COL(16, 14, 24));
           rect_fill(cx - KTS(61), cy - KTS(38), KTS(122), KTS(77), KCOL2[mycol]);
+          rect_fill(cx - KTS(10), cy - KTS(38), KTS(20), KTS(77), col_shade(KCOL2[mycol], 1.22f));   // racing stripe (v1.27)
           rect_line(cx - KTS(61), cy - KTS(38), KTS(122), KTS(77), COL(255, 255, 255));
+          disc_fill(cx, cy + KTS(18), KTS(11), COL(245, 245, 245));   // number roundel (v1.27)
+          disc_fill(cx, cy + KTS(18), KTS(7), col_shade(KCOL2[mycol], 0.65f));
           crt_draw_driver(cx, cy - KTS(28), KTS(118), b->species, crt_coat_for(b->species, b->color, viewer_pi));
           tri_fill(cx - KTS(92), cy - KTS(16), cx - KTS(92), cy + KTS(16), cx - KTS(70), cy, COL(255, 255, 255));
           tri_fill(cx + KTS(92), cy - KTS(16), cx + KTS(92), cy + KTS(16), cx + KTS(70), cy, COL(255, 255, 255));
@@ -91,7 +97,7 @@ static void crt_render_view(int sim_pi, int viewer_pi){
                 int tr = S->crt_cup * 4 + ti;
                 if (ti) q = sappend(q, " | ");
                 q = sappend(q, CRT_SHORT[tr]); q = sappend(q, " ");
-                q = sappend(q, medal_name(medal_tier(b->crt_tbest[tr], crt_medal[tr])));
+                q = sappend(q, medal_name(b->crt_medal_best[tr]));   // v1.27: the EARNED medal (podium rule), not a derivation from the best time
             }
             *q = 0;
             draw_text_center(vx + vw2/2, vy + 112, buf, 1, COL(200, 214, 200));
@@ -150,10 +156,10 @@ static void crt_render_view(int sim_pi, int viewer_pi){
             { // MEDAL TIMES (feat 3): your medal on the cup's last track
               char buf2[96]; char *q2 = buf2; int tb = vb->crt_tbest[S->crt_track];
               q2 = sappend(q2, "YOUR "); q2 = sappend(q2, CRT_SHORT[S->crt_track]); q2 = sappend(q2, " BEST ");
-              if (tb){ q2 = sapp_time(q2, tb); q2 = sappend(q2, " - "); q2 = sappend(q2, medal_name(medal_tier(tb, crt_medal[S->crt_track]))); }
+              if (tb){ q2 = sapp_time(q2, tb); q2 = sappend(q2, " - "); q2 = sappend(q2, medal_name(vb->crt_medal_best[S->crt_track])); }
               else q2 = sappend(q2, "- NO TIME YET");
               *q2 = 0;
-              draw_text_center(vx + vw2/2, vy + 92 + 6 * 30 + 30, buf2, 1, medal_col(medal_tier(tb, crt_medal[S->crt_track]))); }
+              draw_text_center(vx + vw2/2, vy + 92 + 6 * 30 + 30, buf2, 1, medal_col(vb->crt_medal_best[S->crt_track])); }
             if (S->crt_gprank[vk] == 1) draw_text_center(vx + vw2/2, vy + 92 + 6 * 30 + 48, "CHAMPION OF THE CUP!", 1, COL(250, 200, 50));
         } else {
             char buf[80]; char *q = buf;
@@ -163,10 +169,10 @@ static void crt_render_view(int sim_pi, int viewer_pi){
               Buddy *vb = &G.bud[viewer_pi];
               char buf2[96]; char *q2 = buf2; int tb = vb->crt_tbest[S->crt_track];
               q2 = sappend(q2, "YOUR "); q2 = sappend(q2, CRT_SHORT[S->crt_track]); q2 = sappend(q2, " BEST ");
-              if (tb){ q2 = sapp_time(q2, tb); q2 = sappend(q2, " - "); q2 = sappend(q2, medal_name(medal_tier(tb, crt_medal[S->crt_track]))); }
+              if (tb){ q2 = sapp_time(q2, tb); q2 = sappend(q2, " - "); q2 = sappend(q2, medal_name(vb->crt_medal_best[S->crt_track])); }
               else q2 = sappend(q2, "- NO TIME YET");
               *q2 = 0;
-              draw_text_center(vx + vw2/2, vy + 92 + 6 * 30 + 30, buf2, 1, medal_col(medal_tier(tb, crt_medal[S->crt_track]))); }
+              draw_text_center(vx + vw2/2, vy + 92 + 6 * 30 + 30, buf2, 1, medal_col(vb->crt_medal_best[S->crt_track])); }
         }
         if (S->note_t > 0){
             rect_fill(vx, vy + vh2 - 22, vw2, 22, COL(10, 12, 10));
@@ -210,6 +216,17 @@ static void crt_render_view(int sim_pi, int viewer_pi){
         rect_fill(vx, vy + sh/4, vw2, sh/4 + 1, skyT);
         rect_fill(vx, vy + sh/2, vw2, sh/4 + 1, col_shade(skyH, 0.93f));
         rect_fill(vx, vy + 3*sh/4, vw2, sh - 3*sh/4 + 1, skyH); }
+      if (dark){   // stars over the dark countries (and every country at night) — v1.27 polish
+          int skyh2 = horizon - vy; if (skyh2 < 12) skyh2 = 12;
+          for (int st = 0; st < 26; st++){
+              u32 hv = hash2(st * 5 + 2, 17, 0x57A2u);
+              int sxp = vx + (int)(hv % (u32)(vw2 > 4? vw2 - 2 : 3));
+              int syp = vy + 3 + (int)((hv >> 8) % (u32)(skyh2 - 8));
+              rect_fill(sxp, syp, ((hv >> 16) & 3u)? 1 : 2, 1, COL(226, 230, 246));
+          }
+      }
+      disc_fill(vx + vw2 - 90, vy + 44, 45, col_mix(skyH, dark? COL(200, 204, 225) : COL(255, 236, 150), 0.30f));   // sun/moon glow (v1.27)
+      disc_fill(vx + vw2 - 90, vy + 44, 37, col_mix(skyH, dark? COL(200, 204, 225) : COL(255, 236, 150), 0.55f));
       disc_fill(vx + vw2 - 90, vy + 44, 31, dark? COL(200, 204, 225) : COL(255, 246, 196));
       disc_fill(vx + vw2 - 90, vy + 44, 20, dark? COL(226, 230, 242) : COL(255, 236, 150));
       { int slide = (int)(kh * 260.0f);
@@ -223,6 +240,21 @@ static void crt_render_view(int sim_pi, int viewer_pi){
             ellipse_fill(cxp2 + cw/5, cyp2 - cw/10, cw/3, cw/7, col_shade(cloudc, 1.03f));
             ellipse_fill(cxp2 - cw/4, cyp2 + 2, cw/3, cw/8, col_shade(cloudc, 0.94f));
         }
+        { int slide2 = (int)(kh * 130.0f);   // the FAR ridge (v1.27 polish): paler, slower
+                                             // parallax than the hill line in front of it, with
+                                             // the odd distant stand block sitting on it
+          u32 ridgec = col_mix(col_shade(REGION_GA[rg], 0.85f), skyH, 0.45f);
+          for (int ri = -1; ri < vw2 / 210 + 2; ri++){
+              int rxp = vx + ri * 210 - ((slide2 % 210) + 210) % 210;
+              int ridx = ri + slide2 / 210;
+              int rh = 36 + (int)(hash2(ridx, 19, 0xB1D6u) % 30);
+              tri_fill(rxp, horizon, rxp + 105, horizon - rh, rxp + 210, horizon, ridgec);
+              if ((hash2(ridx, 23, 0x51D3u) % 3u) == 0u){
+                  int bw3 = 40 + (int)(hash2(ridx, 29, 0x51D3u) % 26);
+                  rect_fill(rxp + 82, horizon - 15, bw3, 15, col_shade(ridgec, 0.88f));
+                  rect_fill(rxp + 82 - 3, horizon - 18, bw3 + 6, 3, col_shade(ridgec, 0.78f));
+              }
+          } }
         for (int hi2 = -1; hi2 < vw2 / 130 + 2; hi2++){
             int hxp = vx + hi2 * 130 - ((slide % 130) + 130) % 130;
             int hh = 20 + (int)(hash2(hi2 + slide / 130, 7, 0x411u) % 22);
@@ -291,6 +323,38 @@ static void crt_render_view(int sim_pi, int viewer_pi){
                 tri_fill((int)(cxj - ux*hw), (int)(cyj - uy*hw), (int)(cxj + ux*hw), (int)(cyj + uy*hw), (int)(cxn + uxn*hwn), (int)(cyn + uyn*hwn), COL(228, 228, 210));
                 tri_fill((int)(cxj - ux*hw), (int)(cyj - uy*hw), (int)(cxn + uxn*hwn), (int)(cyn + uyn*hwn), (int)(cxn - uxn*hwn), (int)(cyn - uyn*hwn), COL(228, 228, 210));
             }
+            // trackside dressing (v1.27 polish): red-capped barrier
+            // posts at the rumble edge, verge tufts and the odd flower
+            // at the apron edge — all keyed off the ABSOLUTE segment
+            // index via unsigned hash2, so a given spot of verge looks
+            // the same every frame and every lap (no flicker), and
+            // nothing here touches the road's geometry or its reads.
+            if (rf[j] > 14.0f && rf[j] < 320.0f){
+                int segi = startseg + j;
+                int ph = (int)(11.0f * F / rf[j]); if (ph < 3) ph = 3; if (ph > 24) ph = 24;
+                if ((segi % 4) == 0){
+                    for (int sd = 0; sd < 2; sd++){
+                        int px = sd? rrx[j] : lrx[j], py = sd? rry[j] : lry[j];
+                        int pwd = ph/4; if (pwd < 1) pwd = 1;
+                        rect_fill(px - pwd/2, py - ph, pwd, ph, COL(238, 240, 242));
+                        rect_fill(px - pwd/2, py - ph, pwd, ph/3 + 1, COL(205, 50, 45));
+                        rect_fill(px - pwd/2, py - ph/2, pwd, 1, COL(150, 154, 160));
+                    }
+                }
+                for (int sd = 0; sd < 2; sd++){
+                    u32 hv = hash2(segi * 2 + sd, 47, 0xCE27u);
+                    if ((hv % 5u) >= 2u) continue;
+                    int px = sd? arx[j] : alx[j], py = sd? ary[j] : aly[j];
+                    int th2 = ph/2; if (th2 < 2) th2 = 2;
+                    u32 tc = col_shade(REGION_GA[rg], 0.62f);
+                    rect_fill(px, py - th2, 1, th2, tc);
+                    if (th2 > 2) rect_fill(px + 2, py - th2 + 2, 1, th2 - 2, col_shade(tc, 1.2f));
+                    if (((hv >> 5) % 6u) == 0u){
+                        static const u32 FLW[3] = { COL(250, 214, 90), COL(248, 244, 238), COL(240, 150, 180) };
+                        disc_fill(px + 1, py - th2 - 1, th2/3 > 1? th2/3 : 1, FLW[(hv >> 9) % 3u]);
+                    }
+                }
+            }
         }
         // the checkered start line, when it is in view
         { float fx, fy, fhx, fhy; crt_point_at(CRT_OFF, 0, &fx, &fy, &fhx, &fhy);
@@ -299,14 +363,30 @@ static void crt_render_view(int sim_pi, int viewer_pi){
           float fl = fdx * (-chy) + fdy * chx;
           if (ff > 8.0f && ff < 620.0f && fl < ff * 1.1f + 50.0f && fl > -(ff * 1.1f + 50.0f)){
               float nx = -fhy, ny = fhx;
+              // white border strips either side of the chequer band (v1.27 polish)
+              for (int b3 = 0; b3 < 2; b3++){
+                  float d0 = b3? 16.0f : -2.5f, d1 = b3? 18.5f : 0.0f;
+                  int ax, ay, bx, by, cx2, cy2, dx2, dy2; float tf;
+                  CRT_PROJ(fx - nx * CRT_HW + fhx * d0, fy - ny * CRT_HW + fhy * d0, tf, ax, ay);
+                  CRT_PROJ(fx + nx * CRT_HW + fhx * d0, fy + ny * CRT_HW + fhy * d0, tf, bx, by);
+                  CRT_PROJ(fx + nx * CRT_HW + fhx * d1, fy + ny * CRT_HW + fhy * d1, tf, cx2, cy2);
+                  CRT_PROJ(fx - nx * CRT_HW + fhx * d1, fy - ny * CRT_HW + fhy * d1, tf, dx2, dy2);
+                  tri_fill(ax, ay, bx, by, cx2, cy2, COL(245, 245, 245));
+                  tri_fill(ax, ay, cx2, cy2, dx2, dy2, COL(245, 245, 245));
+              }
+              // the chequer band proper: TWO rows deep, offset like a
+              // real flag (was a single row) — paint only; the line's
+              // timing still lives in CRT_OFF/CRT_CUM, untouched
+              for (int r3 = 0; r3 < 2; r3++)
               for (int c2 = 0; c2 < 8; c2++){
                   float la = (-28.0f + c2 * 7.0f) * CRT_HW / 30.0f, lb = la + 7.0f * CRT_HW / 30.0f;
+                  float d0 = r3 * 8.0f, d1 = d0 + 8.0f;
                   int ax, ay, bx, by, cx2, cy2, dx2, dy2; float tf;
-                  CRT_PROJ(fx + nx * la, fy + ny * la, tf, ax, ay);
-                  CRT_PROJ(fx + nx * lb, fy + ny * lb, tf, bx, by);
-                  CRT_PROJ(fx + fhx * 8.0f + nx * lb, fy + fhy * 8.0f + ny * lb, tf, cx2, cy2);
-                  CRT_PROJ(fx + fhx * 8.0f + nx * la, fy + fhy * 8.0f + ny * la, tf, dx2, dy2);
-                  u32 cc = (c2 & 1)? COL(16, 14, 24) : COL(245, 245, 245);
+                  CRT_PROJ(fx + nx * la + fhx * d0, fy + ny * la + fhy * d0, tf, ax, ay);
+                  CRT_PROJ(fx + nx * lb + fhx * d0, fy + ny * lb + fhy * d0, tf, bx, by);
+                  CRT_PROJ(fx + nx * lb + fhx * d1, fy + ny * lb + fhy * d1, tf, cx2, cy2);
+                  CRT_PROJ(fx + nx * la + fhx * d1, fy + ny * la + fhy * d1, tf, dx2, dy2);
+                  u32 cc = ((c2 + r3) & 1)? COL(16, 14, 24) : COL(245, 245, 245);
                   tri_fill(ax, ay, bx, by, cx2, cy2, cc);
                   tri_fill(ax, ay, cx2, cy2, dx2, dy2, cc);
               }
@@ -320,6 +400,9 @@ static void crt_render_view(int sim_pi, int viewer_pi){
                 }
                 if (ok){
                     for (int p2 = 0; p2 < 2; p2++) rect_fill(gx[p2] - 2, gt[p2], 4, gy[p2] - gt[p2], COL(52, 54, 64));
+                    for (int p2 = 0; p2 < 2; p2++){ int phgt = gy[p2] - gt[p2];   // white bands on the gantry poles (v1.27)
+                        rect_fill(gx[p2] - 2, gt[p2] + phgt/3, 4, 2, COL(238, 240, 242));
+                        rect_fill(gx[p2] - 2, gt[p2] + phgt*2/3, 4, 2, COL(238, 240, 242)); }
                     for (int p2 = 0; p2 < 2; p2++){   // little flags, waving on the poles
                         int fw = (int)(7.0f * F / gf[p2]); if (fw < 3) fw = 3;
                         int dir = p2? -1 : 1;
@@ -329,8 +412,29 @@ static void crt_render_view(int sim_pi, int viewer_pi){
                     int bh = (int)(9.0f * F / ff); if (bh < 3) bh = 3;
                     tri_fill(gx[0], gt[0], gx[1], gt[1], gx[1], gt[1] + bh, COL(198, 52, 48));
                     tri_fill(gx[0], gt[0], gx[1], gt[1] + bh, gx[0], gt[0] + bh, COL(198, 52, 48));
+                    if (gx[1] - gx[0] > 70){   // chequer trim along the banner's hem (v1.27)
+                        int n3 = (gx[1] - gx[0]) / (bh > 2? bh : 2); if (n3 > 24) n3 = 24; if (n3 < 2) n3 = 2;
+                        for (int i3 = 0; i3 < n3; i3++){
+                            int x0t = gx[0] + (gx[1] - gx[0]) * i3 / n3, x1t = gx[0] + (gx[1] - gx[0]) * (i3 + 1) / n3;
+                            int y0t = gt[0] + bh - 2 + (gt[1] - gt[0]) * i3 / n3;
+                            rect_fill(x0t, y0t, x1t - x0t + 1, 2, (i3 & 1)? COL(16, 14, 24) : COL(245, 245, 245));
+                        }
+                    }
                     if (gx[1] - gx[0] > 210) draw_text_center((gx[0] + gx[1]) / 2, (gt[0] + gt[1]) / 2 + bh/2 - 3, REGION_NAME[rg], 1, COL(255, 244, 220));
                 } }
+              // chequer marker boards flanking the line (v1.27 polish)
+              for (int p3 = 0; p3 < 2; p3++){
+                  float la = p3? CRT_HW + 7.0f : -(CRT_HW + 7.0f);
+                  int bx2, by2; float bf;
+                  CRT_PROJ(fx + nx * la, fy + ny * la, bf, bx2, by2);
+                  if (bf < 6.0f) continue;
+                  int bs = (int)(10.0f * F / bf); if (bs < 3) bs = 3; if (bs > 30) bs = 30;
+                  rect_fill(bx2 - 1, by2 - bs, 2, bs, COL(52, 54, 64));
+                  rect_fill(bx2 - bs/2, by2 - bs - bs/2, bs/2, bs/2, COL(245, 245, 245));
+                  rect_fill(bx2, by2 - bs - bs/2, bs - bs/2, bs/2, COL(16, 14, 24));
+                  rect_fill(bx2 - bs/2, by2 - bs, bs/2, bs/2, COL(16, 14, 24));
+                  rect_fill(bx2, by2 - bs, bs - bs/2, bs/2, COL(245, 245, 245));
+              }
           } }
         // boost pads lying on the road
         for (int pd = 0; pd < CRT_NPAD; pd++){
@@ -402,6 +506,7 @@ static void crt_render_view(int sim_pi, int viewer_pi){
             rect_fill(sx - tw/2, base - thh, tw, thh, COL(38, 38, 44));
             rect_fill(sx - tw/2, base - thh*2, tw, thh, COL(226, 226, 226));
             rect_fill(sx - tw/2, base - thh*3, tw, thh, COL(255, 190, 40));
+            if (tw >= 7) rect_fill(sx - tw/4, base - thh*3 + 1, tw/2, 1, COL(255, 226, 140));   // top tyre sheen (v1.27)
             continue;
         }
         if (itk[oi] == 1){
@@ -414,6 +519,11 @@ static void crt_render_view(int sim_pi, int viewer_pi){
                 u32 g1 = (sn % 7 == 3)? REGION_TUFT[rg] : (sn & 1)? col_shade(REGION_GA[rg], 0.62f) : col_shade(REGION_GA[rg], 0.5f);
                 disc_fill(sx, base - th*52/100, th*30/100, g1);
                 disc_fill(sx, base - th*80/100, th*22/100, col_shade(g1, 1.18f));
+                if (th >= 10){   // sunlit crest + grass tufts at the trunk (v1.27 polish)
+                    disc_fill(sx - th/6, base - th*66/100, th/7, col_shade(g1, 1.32f));
+                    rect_fill(sx - th/5, base - 2, 1, 2, REGION_TUFT[rg]);
+                    rect_fill(sx + th/6, base - 2, 1, 2, REGION_TUFT[rg]);
+                }
             } else if (tp == 1){   // a tire stack
                 int tw = (int)(13.0f * F / f); if (tw < 3) continue;
                 if (sx < vx - tw || sx > vx + vw2 + tw) continue;
@@ -421,6 +531,7 @@ static void crt_render_view(int sim_pi, int viewer_pi){
                 rect_fill(sx - tw/2, base - thh, tw, thh, COL(38, 38, 44));
                 rect_fill(sx - tw/2, base - thh*2, tw, thh, COL(226, 226, 226));
                 rect_fill(sx - tw/2, base - thh*3, tw, thh, (sn & 1)? COL(205, 50, 45) : COL(38, 38, 44));
+                if (tw >= 7) rect_fill(sx - tw/4, base - thh*3 + 1, tw/2, 1, COL(238, 240, 242));   // top tyre sheen (v1.27)
             } else {   // the grandstand, watching the top straight
                 // Nov 15 (Daniel's "weird gray wall"): unclamped,
                 // the stand's projection at grid distance filled
@@ -441,6 +552,11 @@ static void crt_render_view(int sim_pi, int viewer_pi){
                 rect_fill(sx - gw/2 - 4, base - gh - gh/6 - 2, gw + 8, gh/6 + 2, COL(64, 70, 88));
                 for (int aw = 0; aw < (gw + 8) / 10; aw++)
                     if (aw & 1) rect_fill(sx - gw/2 - 4 + aw * 10, base - gh - gh/6 - 2, 10, gh/6 + 2, COL(198, 52, 48));
+                rect_fill(sx - gw/2 - 4, base - gh - 3, gw + 8, 3, COL(40, 44, 58));   // shadow line under the roof (v1.27)
+                if (gw > 60){   // support columns + a fascia stripe in the region colour (v1.27)
+                    for (int sp = 0; sp < 3; sp++) rect_fill(sx - gw/3 + sp * (gw/3), base - gh, 3, gh, COL(84, 90, 108));
+                    rect_fill(sx - gw/2, base - 4, gw, 2, col_shade(REGION_GA[rg], 0.9f));
+                }
                 if (gw > 300) draw_text_center(sx, base - gh - gh/6 + gh/12 - 3, "GRAND PRIX", 1, COL(255, 240, 200));
             }
             continue;
@@ -465,10 +581,21 @@ static void crt_render_view(int sim_pi, int viewer_pi){
         rect_fill(sx - kw/2, base - kh2/2, kw/4 + 1, kh2/2, COL(16, 14, 24));
         rect_fill(sx + kw/2 - kw/4, base - kh2/2, kw/4 + 1, kh2/2, COL(16, 14, 24));
         rect_fill(sx - kw/2, base - kh2, kw, kh2 * 3/4, KCOL[S->crt_kcol[i]]);
+        if (kw >= 8) rect_fill(sx - kw/10, base - kh2, kw/5, kh2 * 3/4, col_shade(KCOL[S->crt_kcol[i]], 1.22f));   // centre racing stripe (v1.27)
         rect_line(sx - kw/2, base - kh2, kw, kh2 * 3/4, COL(16, 14, 24));
         if (kw >= 8){
             rect_fill(sx - kw/2 + 2, base - kh2 + 1, kw - 4, kh2/5, col_shade(KCOL[S->crt_kcol[i]], 1.30f));
             rect_fill(sx - kw/2 + kw/5, base - kh2/4, kw * 3/5, kh2/4, col_shade(KCOL[S->crt_kcol[i]], 0.60f));
+        }
+        if (kw >= 12){   // wheel hubs + taillights, so the wheels read as wheels (v1.27)
+            rect_fill(sx - kw/2 + kw/16, base - kh2/8 - 1, kw/8, 2, COL(150, 156, 164));
+            rect_fill(sx + kw/2 - kw/4 + kw/16, base - kh2/8 - 1, kw/8, 2, COL(150, 156, 164));
+            disc_fill(sx - kw/2 + kw/10, base - kh2/8, kw >= 24? 2 : 1, COL(255, 70, 60));
+            disc_fill(sx + kw/2 - kw/10, base - kh2/8, kw >= 24? 2 : 1, COL(255, 70, 60));
+        }
+        if (kw >= 16){   // the number roundel on the kart's back (v1.27)
+            disc_fill(sx, base - kh2*2/5, kw/8, COL(245, 245, 245));
+            disc_fill(sx, base - kh2*2/5, kw/13, col_shade(KCOL[S->crt_kcol[i]], 0.65f));
         }
         crt_draw_driver(sx, base - kh2 + kh2/8 + ((S->crt_v[i] > 60.0f)? (int)(fsin(S->crt_t * 22.0f + i * 1.93f) * kw * 0.012f) : 0), kw, S->crt_species[i], crt_coat_for(S->crt_species[i], S->crt_dcolidx[i], i));
         if (f < 300.0f){
@@ -492,9 +619,20 @@ static void crt_render_view(int sim_pi, int viewer_pi){
       rect_fill(cxp - ow/2, base - oh/3, ow/5, oh/3, COL(16, 14, 24));
       rect_fill(cxp + ow/2 - ow/5, base - oh/3, ow/5, oh/3, COL(16, 14, 24));
       rect_fill(cxp - ow/2 + ow/10, base - oh, ow * 4/5, oh * 3/4, KCOL[S->crt_kcol[vk]]);
+      rect_fill(cxp - ow/12, base - oh, ow/6, oh * 3/4, col_shade(KCOL[S->crt_kcol[vk]], 1.22f));   // centre racing stripe (v1.27)
       rect_line(cxp - ow/2 + ow/10, base - oh, ow * 4/5, oh * 3/4, COL(16, 14, 24));
       rect_fill(cxp - ow/2 + ow/10 + 3, base - oh + 2, ow * 4/5 - 6, oh/6, col_shade(KCOL[S->crt_kcol[vk]], 1.30f));
       rect_fill(cxp - ow/2 + ow/10 + ow/6, base - oh/4, ow * 4/5 - ow/3, oh/4, col_shade(KCOL[S->crt_kcol[vk]], 0.60f));
+      // v1.27 detail: number roundel, wheel hubs, taillights, exhausts, bumper line
+      disc_fill(cxp, base - oh/2, ow/10, COL(245, 245, 245));
+      disc_fill(cxp, base - oh/2, ow/16, col_shade(KCOL[S->crt_kcol[vk]], 0.65f));
+      rect_fill(cxp - ow/2 + ow/20, base - oh/6 - 2, ow/10, 4, COL(150, 156, 164));
+      rect_fill(cxp + ow/2 - ow/5 + ow/20, base - oh/6 - 2, ow/10, 4, COL(150, 156, 164));
+      disc_fill(cxp - ow/2 + ow/10 + ow/14, base - oh/6, 3, COL(255, 70, 60));
+      disc_fill(cxp + ow/2 - ow/10 - ow/14, base - oh/6, 3, COL(255, 70, 60));
+      rect_fill(cxp - ow/9, base - oh/9, ow/13, oh/11, COL(96, 102, 110));
+      rect_fill(cxp + ow/9 - ow/13, base - oh/9, ow/13, oh/11, COL(96, 102, 110));
+      rect_fill(cxp - ow/2 + ow/10, base - oh/4 - 2, ow * 4/5, 2, COL(16, 14, 24));
       crt_draw_driver(cxp, base - oh + oh/8, ow, S->crt_species[vk], crt_coat_for(S->crt_species[vk], S->crt_dcolidx[vk], vk));
     }
     // minimap in the corner: the whole flat circuit, SMK-style.
@@ -558,11 +696,13 @@ static void crt_render_view(int sim_pi, int viewer_pi){
           if (sec < 10) q = sappend(q, "0");
           q = sapp_int(q, sec); q = sappend(q, "."); q = sapp_int(q, tds % 10); *q = 0;
           draw_text_center(vx + vw2/2, vy + vh2/2 + 8, buf, 1, COL(200, 214, 200)); }
-        { // MEDAL TIMES (feat 3): the tier of the time just run, off the
-          // frozen race clock; the record lands mid-panel, so a best set
-          // by this race shows as soon as it banks
+        { // MEDAL TIMES (feat 3): the tier of the finish just run, off
+          // the frozen race clock; the record lands mid-panel, so a
+          // best set by this race shows as soon as it banks.
+          // v1.27: the tier is the EARNED one — time tier capped by
+          // the finish place (medal_tier_finish, podium only).
           int tds = (int)(S->crt_t * 10.0f);
-          int tier = medal_tier(tds, crt_medal[S->crt_track]);
+          int tier = medal_tier_finish(tds, crt_medal[S->crt_track], S->crt_hfin[vk]);
           char buf[80]; char *q = buf;
           if (G.zen_run){ q = sappend(q, "ZEN RUN - NO MEDALS"); *q = 0;
               draw_text_center(vx + vw2/2, vy + vh2/2 + 24, buf, 1, COL(160, 160, 168)); }
@@ -570,6 +710,9 @@ static void crt_render_view(int sim_pi, int viewer_pi){
               if (b->crt_tbest[S->crt_track] == tds) q = sappend(q, "  NEW TRACK BEST!");
               *q = 0;
               draw_text_center(vx + vw2/2, vy + vh2/2 + 24, buf, 1, medal_col(tier)); }
+          else if (S->crt_hfin[vk] > 3 && medal_tier(tds, crt_medal[S->crt_track]) > 0){
+              q = sappend(q, "NO MEDAL - MEDALS ARE FOR THE TOP 3"); *q = 0;
+              draw_text_center(vx + vw2/2, vy + vh2/2 + 24, buf, 1, COL(160, 160, 168)); }
           else { q = sappend(q, "NO MEDAL - BRONZE IS "); q = sapp_time(q, crt_medal[S->crt_track][2]); *q = 0;
               draw_text_center(vx + vw2/2, vy + vh2/2 + 24, buf, 1, COL(160, 160, 168)); } }
     }

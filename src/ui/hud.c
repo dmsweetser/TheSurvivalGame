@@ -225,7 +225,7 @@ static void render_hud(void){
         draw_text_center(361, 31, "SAFE ZONE - NO BUGS", 1, COL(150,230,150));
     } else if (me->in_mall){
         draw_text_center(361, 7, "THE BUG MALL", 1, COL(255,255,255));
-        draw_text_center(361, 19, "NINE FINE STOPS", 1, COL(200,210,230));
+        draw_text_center(361, 19, "TEN FINE STOPS", 1, COL(200,210,230));
         draw_text_center(361, 31, "SAFE ZONE - NO BUGS", 1, COL(150,230,150));
     } else {
     draw_text_center_fit(361, 7, 200, zone_name(d), 1, COL(255,255,255));

@@ -10,21 +10,21 @@ static void draw_arcade(void){
     int gw = (int)(VW/cz/64) + 4, gh = (int)(VH/cz/64) + 4, ts = (int)(64*cz) + 1;
     for (int gy=gy0; gy<gy0+gh; gy++) for (int gx=gx0; gx<gx0+gw; gx++){
         float wx = gx*64+32, wy = gy*64+32;
-        if (wx<-410 || wx>410 || wy<ARC_CY-230 || wy>ARC_CY+430) continue;
+        if (wx<-410 || wx>410 || wy<ARC_CY-230 || wy>ARC_CY+360) continue;   // v1.27: south cull rose 70px with the room (+430 -> +360)
         u32 c = col_shade(((gx+gy)&1)? COL(52,40,84) : COL(46,36,74), 0.96f + hash_f(gx, gy, 91)*0.07f);
         int tx = SX(gx*64), tyy = SY(gy*64);
         rect_fill(tx, tyy, ts, ts, c);
         rect_fill(tx, tyy+ts-2, ts, 1, col_shade(c, 0.85f));
     }
-    draw_text_center(SX(0), SY(ARC_CY+210), "THE ARCADE", 2, COL(140,255,255));
+    draw_text_center(SX(0), SY(ARC_CY+163), "THE ARCADE", 2, COL(140,255,255));   // v1.27: floor text stays in the band between the island row and the raised WAR! row (was +210, north of the old +254 row)
     { u32 wallc = COL(30,24,48);
       rect_fill(SX(-386), SY(ARC_CY-192), (int)(772*cz), (int)(26*cz), wallc);
       rect_fill(SX(-386), SY(ARC_CY-170), (int)(772*cz), 2, COL(120,240,255));
-      rect_fill(SX(-386), SY(ARC_CY+332), (int)(772*cz), (int)(26*cz), wallc);
-      rect_fill(SX(-386), SY(ARC_CY+332), (int)(772*cz), 2, COL(240,120,220));
+      rect_fill(SX(-386), SY(ARC_CY+262), (int)(772*cz), (int)(26*cz), wallc);   // v1.27: south wall rose 70px with the clamp (+332 -> +262, just past the +258 clamp)
+      rect_fill(SX(-386), SY(ARC_CY+262), (int)(772*cz), 2, COL(240,120,220));
       rect_fill(SX(-386), SY(ARC_CY-192), (int)(24*cz), (int)(160*cz), wallc);
-      rect_fill(SX(-386), SY(ARC_CY+52), (int)(24*cz), (int)(306*cz), wallc);
-      rect_fill(SX(362), SY(ARC_CY-192), (int)(24*cz), (int)(550*cz), wallc); }
+      rect_fill(SX(-386), SY(ARC_CY+52), (int)(24*cz), (int)(236*cz), wallc);   // v1.27: west wall's south run shortened 70px to meet the raised south wall (306 -> 236)
+      rect_fill(SX(362), SY(ARC_CY-192), (int)(24*cz), (int)(480*cz), wallc); }   // v1.27: east wall likewise (550 -> 480)
     { int mx0=SX(-360), my0=SY(ARC_CY+6), mw=(int)(40*cz), mh=(int)(38*cz);
       rect_fill(mx0, my0, mw, mh, COL(52,96,60)); rect_line(mx0, my0, mw, mh, COL(120,240,255));
       draw_text_center(SX(-340), SY(ARC_CY+20), "EXIT", 1, COL(240,255,240)); }
@@ -108,16 +108,16 @@ static void draw_arcade(void){
     ui_vignette(clip_x0, clip_y0, clip_x1-clip_x0, clip_y1-clip_y0);
     for (int i=0;i<MAXP;i++) if (G.bud[i].active){
         float by=G.bud[i].y;
-        if (!G.bud[i].in_bw && by>ARC_CY-300 && by<ARC_CY+430) draw_buddy(&G.bud[i]);
+        if (!G.bud[i].in_bw && by>ARC_CY-300 && by<ARC_CY+360) draw_buddy(&G.bud[i]);
     }
     for (int i=0;i<MAXP;i++) if (G.p[i].connected && G.p[i].in_arcade) draw_player_sprite(&G.p[i]);
     for (int i=0;i<MAXPART;i++) if (G.parts[i].alive){
         Particle *q=&G.parts[i];
-        if (q->y>ARC_CY-300 && q->y<ARC_CY+430) rect_fill(SX(q->x), SY(q->y), q->size, q->size, q->col);
+        if (q->y>ARC_CY-300 && q->y<ARC_CY+360) rect_fill(SX(q->x), SY(q->y), q->size, q->size, q->col);
     }
     for (int i=0;i<MAXFLOAT;i++) if (G.floats[i].alive){
         Floater *q=&G.floats[i];
-        if (q->y>ARC_CY-300 && q->y<ARC_CY+430) draw_text_center(SX(q->x), SY(q->y), q->text, 1, q->col);
+        if (q->y>ARC_CY-300 && q->y<ARC_CY+360) draw_text_center(SX(q->x), SY(q->y), q->text, 1, q->col);
     }
 }
 // COMFORT (v1.25 feature 2): the shake consumer. render_world adds

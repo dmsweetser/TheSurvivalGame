@@ -56,7 +56,7 @@ static void draw_store_building(void){
     // "we buy" board on the wall — two lines, so the whole phrase fits
     rect_fill(cx-52, y0+42, 104, 24, COL(250,242,218)); rect_line(cx-52, y0+42, 104, 24, wood_d);
     draw_text_center(cx, y0+45, "WE BUY BUGS", 1, COL(90,60,30));
-    draw_text_center(cx, y0+55, "MALL: 9 STOPS", 1, COL(90,60,30));
+    draw_text_center(cx, y0+55, "MALL: 10 STOPS", 1, COL(90,60,30));
     // counter, crates of stock, a sack, and the golden scale
     int cy=SY(-26);
     rect_fill(cx-62, cy-8, 17, 17, wood); rect_line(cx-62, cy-8, 17, 17, OUTLINE);
