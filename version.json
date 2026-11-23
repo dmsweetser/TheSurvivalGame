@@ -1,6 +1,6 @@
 {
-  "versionCode": 28,
-  "versionName": "1.28",
-  "apkUrl": "https://github.com/dmsweetser/TheSurvivalGame/releases/download/v1.28/TheSurvivalGame.apk",
-  "notes": "THERE AND BACK AGAIN: a new Arcade cabinet - MORDOR FUN RUN. Run the Shire-to-Mordor road, 1000 moose of it, fighting goblins, wolves, spiders and orcs in real time. The run saves itself: leave mid-run and resume at the exact spot, faints return you to the last moose marker, and finishing earns a Trophy Case row."
+  "versionCode": 29,
+  "versionName": "1.29",
+  "apkUrl": "https://github.com/dmsweetser/TheSurvivalGame/releases/download/v1.29/TheSurvivalGame.apk",
+  "notes": "ON THE BUTTON: the Mordor swing answers the FIRE button again (it fired on its own when you ran north - fixed at the cause). The road now provides: health, weapon amplification and speed powerups stand along the way, collected by running over them. And WAR! skirmishes can be saved - park one, close the game, and resume it from the entry panel, beside your campaign battle, never instead of it."
 }
