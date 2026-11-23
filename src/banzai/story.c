@@ -320,6 +320,11 @@ static int bw_level_at(Buddy *b, int cell){
 typedef struct { int cell; float x, y, wt, dir; int lvl; float alert; } BWHack;   // alert: story-mode chase memory (Nov 4)
 typedef struct { float x, y, vx, vy; int kind, state; float t; } PlatEn;   // SUPER BUDDY RUN critters: 0 crawl, 1 shell-bug, 2 shell, 3 piranha, 4 fly, 5 shroom, 6 flower
 typedef struct { float x, y, aim, ft, lo, hi; int kind, hp, dir; } TankEn;   // TANK RESCUE foes: 0 turret, 1 patrol tank, 2 prison hut, 3 repair pickup, 4 fortress core, 5 blockade gun. Patrol dir: +-1 runs on x, +-2 on y (sign = way), lo/hi bound that axis
+typedef struct { float x, y, hp, maxhp, atk_t, hit_t; int kind, chunk, slot; } MorEn;   // MORDOR FUN RUN foes (v1.28): 0 goblin, 1 wolf, 2 spider, 3 orc. chunk/slot name the deterministic spawn they came from, so a kill can be written into the session's dead-bitmap.
+// MORDOR FUN RUN (v1.28): the MOOSE SCALE constants (MOR_MOOSE_PX
+// and friends) live in data/design.c with the Buddy's mor_* fields —
+// the save loader (save/start.c) is included before this file and
+// already needs MOR_LEN/MOR_MILES for its clamps.
 typedef struct {
     int active, phase; float t;         // phases: 5 intro, 0 choose, 1 player msg, 2 foe msg, 3 won, 4 lost, 6 fled
     int lvl, cell, sel, natt, site, boss, strikes, zcharge, zph;
@@ -587,6 +592,19 @@ typedef struct {
     unsigned char war_wpn[80], war_wpi[80];
     float war_ptgx[80], war_ptgy[80];
     float war_stallt[80], war_repath[80], war_stallx[80], war_stally[80];
+    // MORDOR FUN RUN (bw_mode 9, v1.28): one run's SESSION scratch.
+    // The run itself (distance, milestone, HP, clock, on/off) lives
+    // on the Buddy (mu token) so it survives leaving; what lives
+    // here is only what a fresh entry may rebuild: the live foes,
+    // the session's dead-bitmap (chunk*5+slot per bit; a faint
+    // clears the bits at/after the banked milestone, so the current
+    // stretch resets and the banked road stays cleared), the entry
+    // panel, and the timers. MOR_DEAD_BYTES covers the full route:
+    // (460000/300 + 2) chunks * 5 slots / 8 = 960 bytes.
+    MorEn mor_en[40];
+    int mor_en_n, mor_panel, mor_psel, mor_kills;
+    unsigned char mor_dead[960];
+    float mor_t, mor_swing_cd, mor_swing_t, mor_grace, mor_faintt, mor_cleart, mor_spawn_t, mor_confirm_t, mor_hurt_t, mor_pick_lock;
 } BwSim;
 static BwSim BWS[MAXP];
 static int bw_defeated_has(BwSim *S, int key){ for (int i=0;i<S->defeated_n;i++) if (S->defeated[i]==key) return 1; return 0; }

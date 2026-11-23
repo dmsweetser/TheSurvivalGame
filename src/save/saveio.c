@@ -193,6 +193,22 @@ static void do_save(void){
                       if (anymr){ *p++=' '; *p=0; p = put_key(p, "mr");
                           for (int ti=0; ti<16; ti++){ if (ti) *p++=','; p = put_int(p, bd->plat_tbest[ti]); } } }
                     *p++=' '; *p=0; p = put_key(p, "wr"); p = put_int(p, bd->war_prog);
+                    // MORDOR FUN RUN (v1.28): the records ride as mo/mb
+                    // and the in-progress run as one compound mu token
+                    // (on,dist,mile,hp,secs,lat — the bl/pt idiom),
+                    // written only once the mode has anything to say,
+                    // so a Mordor-less save stays byte-identical.
+                    if (bd->mor_done>0 || bd->mor_best>0 || bd->mor_on){
+                        *p++=' '; *p=0; p = put_key(p, "mo"); p = put_int(p, bd->mor_done);
+                        *p++=' '; *p=0; p = put_key(p, "mb"); p = put_int(p, bd->mor_best);
+                        *p++=' '; *p=0; p = put_key(p, "mu");
+                        p = put_int(p, bd->mor_on); *p++=','; *p=0;
+                        p = put_int(p, bd->mor_dist); *p++=','; *p=0;
+                        p = put_int(p, bd->mor_mile); *p++=','; *p=0;
+                        p = put_int(p, bd->mor_hp); *p++=','; *p=0;
+                        p = put_int(p, bd->mor_secs); *p++=','; *p=0;
+                        p = put_int(p, bd->mor_lat);
+                    }
                     // HAT TOPPERS (v1.25 feat 5): the earned mask and
                     // the worn id, written only when set, so a
                     // topper-less save stays byte-identical to before.

@@ -139,6 +139,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     ['WAR!', 'NOT YET'],
     ['CART CUPS', 'HOME -- - FAR --'],
     ['TANK RESCUE', 'NOT YET'],
+    ['MORDOR FUN RUN', 'NOT YET'],
     ['ENTRANCES', 'NOT YET'],
     ['THE SUBFLOOR', 'NOT YET'],
     ['MEDALS + WALK OF FAME', ''],
@@ -189,7 +190,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     L = setTok(L, 'cb', 1250); L = setTok(L, 'cr', 9); L = setTok(L, 'wr', 8);
     L = setTok(L, 'bx', 240); L = setTok(L, 'b1', 3); L = setTok(L, 'b2', 2); L = setTok(L, 'b3', 1);
     L = setTok(L, 'bs', 15); L = setTok(L, 'bn', 26);
-    return L + ' mc=230,271,0,0,0,0,0,880 mr=261,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0';
+    return L + ' mc=230,271,0,0,0,0,0,880 mr=261,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0 mo=2 mb=754';
   }).join('\n').replace(/^fs=.*$/m, 'fs=2,6,0');
   ok(crafted.includes('cb=1250') && crafted.includes('wr=8') && crafted.includes('fs=2,6,0'), 'A: crafted blob carries the record tokens');
   const globA = await pollGlobal('rec_hat=');
@@ -213,6 +214,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     ['WAR!', 'CONQUERED'],
     ['CART CUPS', 'HOME 1ST - FAR 1ST'],
     ['TANK RESCUE', 'LEVEL 6'],
+    ['MORDOR FUN RUN', 'BEST 12:34'],
     ['ENTRANCES', 'OUT x2'],
     ['THE SUBFLOOR', 'B-14'],
     ['MEDALS + WALK OF FAME', ''],
@@ -227,11 +229,13 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     ['BUDDY: FEANOR', 'XP 240'],
     ['TRAINING', 'HP3 ATK2 DEF1'],
   ], 'A');
-  ok((await str('dbg_caseblurb', 11)).includes('CHAMP'), 'A: heaviest-hat blurb names the record holder', await str('dbg_caseblurb', 11));
-  ok((await str('dbg_caseblurb', 17)).includes('PUPPY'), 'A: buddy blurb names the species', await str('dbg_caseblurb', 17));
-  const trainBlurb = await str('dbg_caseblurb', 18);
+  // v1.28: the MORDOR FUN RUN row joined the cabinet shelf after
+  // TANK RESCUE, so every blurb index below it moved down one.
+  ok((await str('dbg_caseblurb', 12)).includes('CHAMP'), 'A: heaviest-hat blurb names the record holder', await str('dbg_caseblurb', 12));
+  ok((await str('dbg_caseblurb', 18)).includes('PUPPY'), 'A: buddy blurb names the species', await str('dbg_caseblurb', 18));
+  const trainBlurb = await str('dbg_caseblurb', 19);
   ok(trainBlurb.includes('MOVES TAUGHT 4 OF 4'), 'A: training blurb carries the moves taught', trainBlurb);
-  ok((await str('dbg_caseblurb', 9)).includes('1 GOLD, 2 SILVER, 0 BRONZE'), 'A: cart medal blurb spells the counts', await str('dbg_caseblurb', 9));
+  ok((await str('dbg_caseblurb', 10)).includes('1 GOLD, 2 SILVER, 0 BRONZE'), 'A: cart medal blurb spells the counts', await str('dbg_caseblurb', 10));
   await page.screenshot({ path: 'tsg-v125-f4-after-case.png' });
   for (let i = 0; i < 10; i++) await key('ArrowDown', 130);
   await sleep(300);
@@ -249,7 +253,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   ok((await call('dbg_buddyxp')) === 240, 'C: buddy XP intact', await call('dbg_buddyxp'));
   ok(await openCase(), 'C: the case renders on the pre-feature save');
   const rowsC = await readCase();
-  ok(rowsC.length === 18, 'C: 18 rows (the First Shift row is absent)', rowsC.length);
+  ok(rowsC.length === 19, 'C: 19 rows (the First Shift row is absent; v1.28 added the Mordor row)', rowsC.length);
   ok(!rowsC.some(r => r[0] === 'FIRST SHIFT'), 'C: no First Shift row on a pre-feature save');
   const byNameC = Object.fromEntries(rowsC.map(r => [r[0], r[1]]));
   ok(byNameC['CASTLE'] === 'BEST 1250', 'C: castle plaque survives (it predates the program)', byNameC['CASTLE']);

@@ -30,7 +30,7 @@ static void draw_arcade(void){
       draw_text_center(SX(-340), SY(ARC_CY+20), "EXIT", 1, COL(240,255,240)); }
     draw_text_center(SX(0), SY(ARC_CY-186), "ARCADE", 2, COL(255,140,230));
     static const u32 CABCOL[7] = { COL(240,140,40), COL(84,190,84), COL(70,130,230), COL(200,70,60), COL(120,220,130), COL(250,200,50), COL(216,64,54) };
-    for (int s=0;s<7;s++){
+    for (int s=0;s<8;s++){
         int cx = SX(ARC_SX[s]);
         { int py2 = SY(ARC_CY + ARC_ROWY[s] + 54);
           ellipse_fill(cx, py2, (int)(68*cz), (int)(17*cz), COL(60,50,96));

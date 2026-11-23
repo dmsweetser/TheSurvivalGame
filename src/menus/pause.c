@@ -4,8 +4,8 @@
 
 // ---------------------------------------------------------------------------
 static void draw_controls_panel(int vx, int vy, int vw2, int vh2, int ctx){
-    static const char *CTX_NAME[9] = { "THE MEADOW + THE MALL", "STORY + FREE PLAY", "ENTRANCES", "SUPER BUDDY RUN", "BUDDY CRAFT", "BUG BOWL", "TANK RESCUE", "SUPER BUDDY CART", "WAR!" };
-    if (ctx<0 || ctx>8) ctx = 0;
+    static const char *CTX_NAME[10] = { "THE MEADOW + THE MALL", "STORY + FREE PLAY", "ENTRANCES", "SUPER BUDDY RUN", "BUDDY CRAFT", "BUG BOWL", "TANK RESCUE", "SUPER BUDDY CART", "WAR!", "MORDOR FUN RUN" };
+    if (ctx<0 || ctx>9) ctx = 0;
     const char *act[10]; const char *btn[10]; int n=0;
     static char mv[40], spr[8], pau[8], btnstore[10][24];
     if (hint_dev()==DEV_PAD) scpy(mv, "STICK / DPAD", 40);
@@ -63,6 +63,11 @@ static void draw_controls_panel(int vx, int vy, int vw2, int vh2, int ctx){
         CTL_ROW("STEER", mv);
         CTL_ROW("GO (HOLD IT!)", lbl_fire());
         CTL_ROW("LEAVE", back);
+        break;
+      case 9:
+        CTL_ROW("RUN THE ROAD", mv);
+        CTL_ROW("ATTACK", lbl_fire());
+        CTL_ROW("LEAVE (THE RUN WAITS FOR YOU)", back);
         break;
       case 8:
         CTL_ROW("SELECT / ORDER", lbla(H_POINT));

@@ -12,6 +12,7 @@ static void bw_render_modes(int pi){
     if (b->bw_mode==5){ tank_render(pi); return; }
     if (b->bw_mode==6){ cas_render(pi); return; }
     if (b->bw_mode==7){ if (S->crt_guest) crt_render_view(S->crt_guest - 1, pi); else crt_render(pi); return; }
+    if (b->bw_mode==9){ mor_render(pi); return; }
     if (b->bw_mode==8){
         if (S->war_guest){   // feat 13: a guest views the OWNER's battle wearing their own view (Cart's crt_render_view, by exchange)
             BwSim *HS = &BWS[S->war_guest-1];

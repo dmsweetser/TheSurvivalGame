@@ -208,6 +208,9 @@
 #include "modes/cart/cart_track.c"
 #include "modes/cart/cart_race.c"
 #include "modes/cart/cart_render.c"
+// --- modes/mordor/ ---
+#include "modes/mordor/mordor.c"
+#include "modes/mordor/mordor_render.c"
 // --- war/ ---
 #include "war/units.c"
 #include "war/coop.c"

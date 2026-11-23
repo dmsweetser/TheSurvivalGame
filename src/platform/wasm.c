@@ -794,6 +794,33 @@ __attribute__((export_name("dbg_tankdeliv"))) int exp_dbg_tankdeliv(void){ int i
 __attribute__((export_name("dbg_tankmid"))) int exp_dbg_tankmid(void){ int id = G.my_id>=0? G.my_id : 0; return BWS[id].tank_mid_hp; }
 __attribute__((export_name("dbg_tankwarp"))) void exp_dbg_tankwarp(int y){ int id = G.my_id>=0? G.my_id : 0; if (G.bud[id].bw_mode==5){ G.bud[id].x = 12.5f*BW_TILE; G.bud[id].y = (float)y; } }
 __attribute__((export_name("dbg_tankboss"))) int exp_dbg_tankboss(void){ int id = G.my_id>=0? G.my_id : 0; return BWS[id].tank_boss_hp; }
+// MORDOR FUN RUN seams (v1.28): observers read the Buddy's saved run
+// and the session's live state; the three setters are the house's
+// usual staging seams (dbg_tankwarp / dbg_tankquota precedent) —
+// mortotal shortens the road BEFORE entry, morwarp stands the
+// runner at a distance, morhurt lands damage through the real
+// mor_hurt path (grace, faint and all). Nothing here is ever saved
+// beyond what the mode itself saves.
+__attribute__((export_name("dbg_morpanel"))) int exp_dbg_morpanel(void){ int id = G.my_id>=0? G.my_id : 0; return BWS[id].mor_panel; }
+__attribute__((export_name("dbg_morpsel"))) int exp_dbg_morpsel(void){ int id = G.my_id>=0? G.my_id : 0; return BWS[id].mor_psel; }
+__attribute__((export_name("dbg_moron"))) int exp_dbg_moron(void){ int id = G.my_id>=0? G.my_id : 0; return G.bud[id].mor_on; }
+__attribute__((export_name("dbg_mordist"))) int exp_dbg_mordist(void){ int id = G.my_id>=0? G.my_id : 0; return G.bud[id].mor_dist; }
+__attribute__((export_name("dbg_mormoose"))) int exp_dbg_mormoose(void){ int id = G.my_id>=0? G.my_id : 0; return G.bud[id].mor_dist*10/MOR_MOOSE_PX; }   // tenths of a moose
+__attribute__((export_name("dbg_mormile"))) int exp_dbg_mormile(void){ int id = G.my_id>=0? G.my_id : 0; return G.bud[id].mor_mile; }
+__attribute__((export_name("dbg_morhp"))) int exp_dbg_morhp(void){ int id = G.my_id>=0? G.my_id : 0; return G.bud[id].mor_hp; }
+__attribute__((export_name("dbg_mortime"))) int exp_dbg_mortime(void){ int id = G.my_id>=0? G.my_id : 0; return G.bud[id].mor_secs; }
+__attribute__((export_name("dbg_mordone"))) int exp_dbg_mordone(void){ int id = G.my_id>=0? G.my_id : 0; return G.bud[id].mor_done; }
+__attribute__((export_name("dbg_morbest"))) int exp_dbg_morbest(void){ int id = G.my_id>=0? G.my_id : 0; return G.bud[id].mor_best; }
+__attribute__((export_name("dbg_moren"))) int exp_dbg_moren(void){ int id = G.my_id>=0? G.my_id : 0; return BWS[id].mor_en_n; }
+__attribute__((export_name("dbg_morkills"))) int exp_dbg_morkills(void){ int id = G.my_id>=0? G.my_id : 0; return BWS[id].mor_kills; }
+__attribute__((export_name("dbg_morx"))) int exp_dbg_morx(void){ int id = G.my_id>=0? G.my_id : 0; return (int)G.bud[id].x; }
+__attribute__((export_name("dbg_mory"))) int exp_dbg_mory(void){ int id = G.my_id>=0? G.my_id : 0; return (int)G.bud[id].y; }
+__attribute__((export_name("dbg_morenx"))) int exp_dbg_morenx(void){ int id = G.my_id>=0? G.my_id : 0; Buddy *b=&G.bud[id]; int bi=-1; float bd=1e18f; for (int i=0;i<BWS[id].mor_en_n;i++){ float dx=BWS[id].mor_en[i].x-b->x, dy=BWS[id].mor_en[i].y-b->y, d=dx*dx+dy*dy; if (d<bd){ bd=d; bi=i; } } return bi<0? -1 : (int)BWS[id].mor_en[bi].x; }
+__attribute__((export_name("dbg_moreny"))) int exp_dbg_moreny(void){ int id = G.my_id>=0? G.my_id : 0; Buddy *b=&G.bud[id]; int bi=-1; float bd=1e18f; for (int i=0;i<BWS[id].mor_en_n;i++){ float dx=BWS[id].mor_en[i].x-b->x, dy=BWS[id].mor_en[i].y-b->y, d=dx*dx+dy*dy; if (d<bd){ bd=d; bi=i; } } return bi<0? -1 : (int)BWS[id].mor_en[bi].y; }
+__attribute__((export_name("dbg_morenhp"))) int exp_dbg_morenhp(void){ int id = G.my_id>=0? G.my_id : 0; Buddy *b=&G.bud[id]; int bi=-1; float bd=1e18f; for (int i=0;i<BWS[id].mor_en_n;i++){ float dx=BWS[id].mor_en[i].x-b->x, dy=BWS[id].mor_en[i].y-b->y, d=dx*dx+dy*dy; if (d<bd){ bd=d; bi=i; } } return bi<0? -1 : (int)BWS[id].mor_en[bi].hp; }
+__attribute__((export_name("dbg_mortotal"))) void exp_dbg_mortotal(int moose){ mor_set_test_total(moose); }
+__attribute__((export_name("dbg_morwarp"))) void exp_dbg_morwarp(int dist){ int id = G.my_id>=0? G.my_id : 0; if (G.bud[id].bw_mode==9 && G.bud[id].in_bw) mor_warp(id, dist); }
+__attribute__((export_name("dbg_morhurt"))) void exp_dbg_morhurt(int dmg){ int id = G.my_id>=0? G.my_id : 0; if (G.bud[id].bw_mode==9 && G.bud[id].in_bw) mor_hurt(id, dmg); }
 __attribute__((export_name("dbg_tanklives"))) int exp_dbg_tanklives(void){ int id = G.my_id>=0? G.my_id : 0; return BWS[id].tank_lives; }
 __attribute__((export_name("dbg_tankquota"))) void exp_dbg_tankquota(void){ int id = G.my_id>=0? G.my_id : 0; BWS[id].tank_deliv = BWS[id].tank_quota; }
 __attribute__((export_name("dbg_craftmat"))) int exp_dbg_craftmat(void){ int id = G.my_id>=0? G.my_id : 0; Buddy *b=&G.bud[id]; return b->craft_wood + b->craft_stone*1000 + b->craft_fiber*1000000; }

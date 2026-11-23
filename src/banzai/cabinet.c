@@ -25,13 +25,13 @@ static void arc_gate_try(int pi){
 // LEAVE. The two unlocks are independent; each panel checks its
 // own buddy's own record.
 static int arc_gate_rows(int pi){
-    if (arc_cab[pi]%7==4 && G.bud[pi].cas_best>0) return 3;
-    if (arc_cab[pi]%7==0 && G.bud[pi].ent_done>0) return 3;
+    if (arc_cab[pi]%8==4 && G.bud[pi].cas_best>0) return 3;
+    if (arc_cab[pi]%8==0 && G.bud[pi].ent_done>0) return 3;
     return 2;
 }
 static void arc_gate_draw(int pi, int vx, int vy, int vw2, int vh2){
     Buddy *b=&G.bud[pi];
-    int cab = arc_cab[pi]%7;
+    int cab = arc_cab[pi]%8;
     int rows = arc_gate_rows(pi);
     int w = vw2<340? vw2-16 : 320, h = rows==3? 152 : 132;
     int x = vx + (vw2-w)/2, y = vy + (vh2-h)/2;
@@ -40,14 +40,15 @@ static void arc_gate_draw(int pi, int vx, int vy, int vw2, int vh2){
     draw_text_center(x+w/2, y+10, ARC_NAME[cab], 2, COL(140,255,255));
     { char buf[64]; char *q=buf; q=sappend(q, BUD_ELF[b->name_idx%BUD_NAMES_N]); q=sappend(q, " THE "); q=sappend(q, BUD_NAME[b->species%BUDN]); q=sappend(q, " GRABS THE CONTROLS"); *q=0;
       draw_text_center(x+w/2, y+32, buf, 1, COL(200,214,200)); }
-    static const char *DESC[7] = {
+    static const char *DESC[8] = {
         "A COZY HOTEL OF DOORS. HIDE IN THE BUSHES. MIND THE ZIP BUG.",
         "A SIDE-SCROLLING RUN. STOMP BUGS. PLANT THE FLAG.",
         "AN ENDLESS WILD. CHOP, MINE, CRAFT, BUILD.",
         "DRIVE THE TANK. FREE THE CAPTIVES. BREAK THE BOSS.",
         "A CASTLE TO PLUNDER! 13 TREASURES, ONE KEY, ONE GATE.",
         "GRAND PRIX! 4 RACES, 8 REGIONS, 2 CUPS. RANK BY POINTS.",
-        "A TAP-FIRST RTS. HARVEST BITS, RAISE BUDDIES, CONQUER 8 REGIONS." };
+        "A TAP-FIRST RTS. HARVEST BITS, RAISE BUDDIES, CONQUER 8 REGIONS.",
+        "THE SHIRE TO MORDOR. 1000 MOOSE. SAVE + RESUME THE RUN." };
     for (int r=0;r<rows;r++){
         int ry = y + 52 + r*20;
         const char *nm = rows==3? (cab==0? (r==0? "CHAPTER 1" : r==1? "DEEPER DOORS" : "LEAVE")   // DEEPER DOORS (feat 11)
@@ -65,7 +66,7 @@ static void arc_gate_draw(int pi, int vx, int vy, int vw2, int vh2){
 static void arc_gate_pick(int pi){
     int rows = arc_gate_rows(pi);
     if (arcgate_sel[pi]==0 || (arcgate_sel[pi]==1 && rows==3)){
-        int cab = arc_cab[pi]%7;
+        int cab = arc_cab[pi]%8;
         arcgate[pi]=0;
         bw_arc_src[pi]=1; bw_arc_cab[pi]=cab;
         // both pending requests are cabinet-specific (feat 11):
@@ -124,14 +125,14 @@ static void pi_view_rect(int pi, int *x, int *y, int *w, int *h){
 static void bw_exit(int pi, int fainted){
     BwSim *S = &BWS[pi];
     Player *p=&G.p[pi]; Buddy *b=&G.bud[pi];
-    if (b->bw_mode==2 || b->bw_mode==3 || b->bw_mode==5 || b->bw_mode==6 || b->bw_mode==7 || b->bw_mode==8){ b->bw_x = 0; b->bw_y = 56; }
+    if (b->bw_mode==2 || b->bw_mode==3 || b->bw_mode==5 || b->bw_mode==6 || b->bw_mode==7 || b->bw_mode==8 || b->bw_mode==9){ b->bw_x = 0; b->bw_y = 56; }
     else if (b->bw_mode==4){ b->craft_x = b->x; b->craft_y = b->y; }
     else { b->bw_x = b->x; b->bw_y = b->y; }
     S->bat.active = 0;
     S->bw_menu = 0;
     mus_bw_note(pi, 0.0f);   // feat 15: the danger stays behind the gate
     b->in_bw = 0;
-    if (S->from_arcade){ int cb2 = S->arc_cab%7; p->x = ARC_SX[cb2]; p->y = ARC_CY + ARC_ROWY[cb2] + 66; }   // back to your cabinet, whichever row it stands in
+    if (S->from_arcade){ int cb2 = S->arc_cab%8; p->x = ARC_SX[cb2]; p->y = ARC_CY + ARC_ROWY[cb2] + 66; }   // back to your cabinet, whichever row it stands in
     else { p->x = BW_SX; p->y = MALL_CY+136; }
     S->from_arcade = 0;
     p->aim = -PI/2;

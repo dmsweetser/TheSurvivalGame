@@ -14,12 +14,12 @@
 // ---------------------------------------------------------------------------
 enum { CR_HDR_CAB, CR_CASTLE, CR_STORY, CR_WAR, CR_CUPS, CR_TANK, CR_ENT, CR_SUB,
        CR_HDR_MED, CR_CMED, CR_RMED, CR_HAT, CR_KILLS, CR_BOWL, CR_LONG,
-       CR_HDR_CREW, CR_FS, CR_BUDDY, CR_TRAIN };
+       CR_HDR_CREW, CR_FS, CR_BUDDY, CR_TRAIN, CR_MORDOR };
 static int case_row_ids(Player *p, int *ids){
     int n=0;
     ids[n++]=CR_HDR_CAB;
     ids[n++]=CR_CASTLE; ids[n++]=CR_STORY; ids[n++]=CR_WAR; ids[n++]=CR_CUPS;
-    ids[n++]=CR_TANK; ids[n++]=CR_ENT; ids[n++]=CR_SUB;
+    ids[n++]=CR_TANK; ids[n++]=CR_MORDOR; ids[n++]=CR_ENT; ids[n++]=CR_SUB;
     ids[n++]=CR_HDR_MED;
     ids[n++]=CR_CMED; ids[n++]=CR_RMED; ids[n++]=CR_HAT; ids[n++]=CR_KILLS; ids[n++]=CR_BOWL; ids[n++]=CR_LONG;
     ids[n++]=CR_HDR_CREW;
@@ -53,6 +53,7 @@ static int case_earned(Player *p, int id){
         case CR_WAR: return b->war_prog>=8;
         case CR_CUPS: return (b->crt_cupbest%8)==1 || (b->crt_cupbest/8)==1;
         case CR_TANK: return b->tank_done>0;
+        case CR_MORDOR: return b->mor_done>0;
         case CR_ENT: return b->ent_done>0;
         case CR_SUB: return b->ent_sub_best>0;
         case CR_CMED: return crt_medal_count(b,1)+crt_medal_count(b,2)+crt_medal_count(b,3)>0;
@@ -85,6 +86,7 @@ static const char *case_row_name(Player *p, int row, char *buf){
         case CR_WAR: return "WAR!";
         case CR_CUPS: return "CART CUPS";
         case CR_TANK: return "TANK RESCUE";
+        case CR_MORDOR: return "MORDOR FUN RUN";
         case CR_ENT: return "ENTRANCES";
         case CR_SUB: return "THE SUBFLOOR";
         case CR_CMED: return "CART MEDALS";
@@ -121,6 +123,9 @@ static const char *case_row_right(Player *p, int row, char *buf){
             q=sappend(q," - FAR "); q=sappend(q,case_rank(b->crt_cupbest/8)); *q=0; return buf;
         case CR_TANK:
             if (b->tank_done>0){ q=sappend(q,"LEVEL "); q=sapp_int(q,b->tank_done); *q=0; return buf; }
+            return "NOT YET";
+        case CR_MORDOR:
+            if (b->mor_done>0){ int t=b->mor_best; q=sappend(q,"BEST "); q=sapp_int(q,t/60); q=sappend(q,":"); if (t%60<10) q=sappend(q,"0"); q=sapp_int(q,t%60); *q=0; return buf; }
             return "NOT YET";
         case CR_ENT:
             if (b->ent_done>0){ q=sappend(q,"OUT x"); q=sapp_int(q,b->ent_done); *q=0; return buf; }
@@ -184,6 +189,8 @@ static const char *case_row_blurb(Player *p, int row){
             return "WIN A GRAND PRIX - HOME OR FAR COUNTRY - AND THE CUP LIVES HERE.";
         case CR_TANK: return b->tank_done>0? "THE TANK CAME BACK. THEY ALWAYS COME BACK - DEEPER, NEXT TIME."
                                            : "RESCUE DEEP IN TANK RESCUE. THE PLAQUE COUNTS YOUR DEEPEST LEVEL.";
+        case CR_MORDOR: return b->mor_done>0? "SHIRE TO MORDOR, ON FOOT, THE WHOLE THOUSAND MOOSE. THE CASE BOWS."
+                                            : "RUN THE WHOLE ROAD, THE SHIRE TO MORDOR. A THOUSAND MOOSE LONG. THE PLAQUE IS WAITING.";
         case CR_ENT:
             if (b->ent_done>0) return "EVERY ENTRANCE, CLEARED. THE DOORS BEHAVE THEMSELVES NOW. MOSTLY.";
             if (b->ent_best>0) return "FIFTY-ONE ROOMS DEEP, THE EXIT. HOW FAR DID YOU GET LAST TIME?";

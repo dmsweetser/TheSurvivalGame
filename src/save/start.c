@@ -214,6 +214,12 @@ static void continue_run(int slot){
                   // read (the feat-9 portrait pattern).
                   int tbl_on=0, tbl[14]={0};
                   smemset(&G.blg[idx], 0, sizeof(BowlLeague));
+                  // MORDOR FUN RUN temps (v1.28): mo/mb are plain
+                  // ints; mu is the compound run token's six ints.
+                  // Absent tokens = no completions, no run on the
+                  // road. This player's record re-zeros with the
+                  // smemset of the Buddy in the bsp block below.
+                  int bmo=0, bmb=0, tmu_on=0, tmu[6]={0};
                   // WAR! snapshot (v1.17): the six values ride as raw
                   // text (',' inside records, ';' between them, never
                   // a space) and are rebuilt into war_snap[idx] below.
@@ -257,6 +263,13 @@ static void continue_run(int slot){
                               tmr[ti++]=parse_int(q); while (*q && *q!=',' && *q!=' ' && *q!='\n') q++; if (*q==',') q++;
                           }
                           while (*q && *q!=' ' && *q!='\n') q++;
+                      } else if (kk[0]=='m' && kk[1]=='u' && kk[2]==0){   // MORDOR FUN RUN (v1.28): 6 comma-separated run ints (on,dist,mile,hp,secs,lat)
+                          tmu_on=1;
+                          int ti=0;
+                          while (*q && *q!=' ' && *q!='\n' && ti<6){
+                              tmu[ti++]=parse_int(q); while (*q && *q!=',' && *q!=' ' && *q!='\n') q++; if (*q==',') q++;
+                          }
+                          while (*q && *q!=' ' && *q!='\n') q++;   // consume any overflow exactly to the delimiter (Nov 5 lesson)
                       } else if (kk[0]=='b' && kk[1]=='l' && kk[2]==0){   // BUG BOWL LEAGUE (feat 10): 14 comma-separated league-book ints
                           tbl_on=1;
                           int ti=0;
@@ -326,6 +339,8 @@ static void continue_run(int slot){
                       else if (kk[0]=='c' && kk[1]=='q') bcq=vv;
                       else if (kk[0]=='c' && kk[1]=='r') bcr=vv;
                       else if (kk[0]=='w' && kk[1]=='r') bwr=vv;
+                      else if (kk[0]=='m' && kk[1]=='o' && kk[2]==0) bmo=vv;   // MORDOR FUN RUN (v1.28): completions
+                      else if (kk[0]=='m' && kk[1]=='b' && kk[2]==0) bmb=vv;   // MORDOR FUN RUN (v1.28): best time, seconds
                       else if (kk[0]=='t' && kk[1]=='p') btp=vv;
                       else if (kk[0]=='t' && kk[1]=='w') btw=vv;
                       else if (kk[0]=='c' && kk[1]=='x') bcx=vv;
@@ -392,6 +407,21 @@ static void continue_run(int slot){
                       if (!tmd_on) crt_migrate_medals(bd);   // v1.27: a pre-v1.27 save's medals stand — seed them from its best times
                       for (int ti=0; ti<16; ti++) bd->plat_tbest[ti] = tmr[ti]<0? 0 : tmr[ti];
                       bd->war_prog = bwr<0? 0 : bwr>8? 8 : bwr;
+                      // MORDOR FUN RUN (v1.28): the records and the
+                      // in-progress run, clamped field by field — a
+                      // hand-edited token can ask for anything; the
+                      // road only ever holds what the mode can use.
+                      bd->mor_done = bmo<0? 0 : bmo;
+                      bd->mor_best = bmb<0? 0 : bmb;
+                      if (tmu_on){
+                          bd->mor_on = tmu[0]? 1 : 0;
+                          bd->mor_dist = tmu[1]<0? 0 : tmu[1]>MOR_LEN? MOR_LEN : tmu[1];
+                          bd->mor_mile = tmu[2]<0? 0 : tmu[2]>MOR_MILES? MOR_MILES : tmu[2];
+                          bd->mor_hp = tmu[3]<0? 0 : tmu[3]>100000? 100000 : tmu[3];
+                          bd->mor_secs = tmu[4]<0? 0 : tmu[4];
+                          bd->mor_lat = tmu[5]<-1000? -1000 : tmu[5]>1000? 1000 : tmu[5];
+                          if (!bd->mor_on){ bd->mor_dist=0; bd->mor_mile=0; bd->mor_hp=0; bd->mor_secs=0; bd->mor_lat=0; }
+                      }
                       bd->top_earned = btp<0? 0 : (btp & TOP_ALL);   // HAT TOPPERS (feat 5)
                       bd->top_worn = (btw>=1 && btw<=TOP_N && (bd->top_earned & TOP_BIT(btw)))? btw : 0;
                       // HAT PORTRAIT BOOTH (feat 9): the dial and the

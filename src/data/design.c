@@ -168,6 +168,25 @@ typedef struct {
 // (The AI AGENT robot clones were retired on Nov 2 — Daniel: the
 // Banzai Buddies replace them. The system is gone end to end.)
 
+// MORDOR FUN RUN — THE MOOSE SCALE (v1.28): the whole Shire->Mordor
+// road is 1000 MOOSE long, one moose being 460 world units at the
+// game's scale (the living ruler stands by the start line in
+// mordor_render.c). Total route 460,000 units: at buddy speeds
+// (118-195 u/s) that is roughly 40-65 minutes of running, a long-haul
+// goal chipped across sessions — exactly what the save/resume is for.
+// 20 milestone markers, one every 50 moose (23,000 units, ~2 minutes
+// apart). The route's distance axis s runs 0 (the Shire, y=MOR_Y0)
+// to MOR_LEN (Mordor, y=MOR_Y0-MOR_LEN), northward like Tank's field.
+// (Defined here, ahead of the Buddy struct, because save/start.c —
+// included before the mode itself — clamps the mu token with them.)
+#define MOR_MOOSE_PX 460
+#define MOR_TOTAL_MOOSE 1000
+#define MOR_LEN (MOR_TOTAL_MOOSE * MOR_MOOSE_PX)
+#define MOR_Y0 460000
+#define MOR_MILES 20
+#define MOR_CHUNK 300
+#define MOR_MAXEN 40
+
 // BANZAI BUDDY: a fighting companion bought at the mall — puppy, kitty
 // or moose. Follows its owner, fights beside them, earns XP from kills,
 // and spends it on training and taught moves at the buddy store.
@@ -217,6 +236,8 @@ typedef struct {
     int crt_medal_best[8];            // v1.27: best Cart medal EARNED per track (0..3), as md — a finish earns its time tier capped by placement (podium only), so the medal is banked at the finish, not derived from the time. Saves with mc but no md are pre-v1.27: their medals migrate from the times at load (crt_migrate_medals)
     int plat_tbest[16];               // MEDAL TIMES: best clear time per Run level 1..16 in deciseconds (0 = none), as mr
     int war_prog;                     // WAR! record: regions conquered (0..8); the world map unlocks region war_prog next, as wr
+    int mor_done, mor_best;           // MORDOR FUN RUN records (v1.28): completions, best total time in seconds (0 = none); saved as mo/mb
+    int mor_on, mor_dist, mor_mile, mor_hp, mor_secs, mor_lat;   // MORDOR FUN RUN: the in-progress run itself (v1.28) — on the road or not, distance along the route in world units, milestone banked (0..20), HP at save, elapsed seconds, lateral offset at save; saved packed as mu. The run lives here, not in BwSim, so leaving the cabinet / quitting / closing the browser all keep it.
     int top_earned, top_worn;         // HAT TOPPERS (v1.25 feat 5): earned bitmask (bit id-1), worn topper id 0..8; saved as tp/tw
     float roll;                       // the pet rock's rolling angle
     float steady_t;                   // pet rock's ROCK STEADY: unhurtable while > 0

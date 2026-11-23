@@ -62,7 +62,7 @@ static void bw_fill_p1(BwIn *bin, float dt){
     // holding FIRE (or a DRAG hold) in the field-combat modes swings at
     // the weapon's own pace; the single edge above is for menus/throws
     if ((tf || (G.touch_ctl==0 && IN.touch_down)) && !S->bat.active && !S->craft_menu && !S->bw_menu
-        && (b->bw_mode==2 || b->bw_mode==4) && b->atk_cd<=0) bin->sel = 1;
+        && (b->bw_mode==2 || b->bw_mode==4 || b->bw_mode==9) && b->atk_cd<=0) bin->sel = 1;
     // DRAG in Banzai World: steer toward the finger, meadow-style. The
     // buddy sits at his view's centre in the top-down modes; in the
     // platformer, run toward the finger and jump when it rides high.
@@ -220,6 +220,7 @@ static void bw_update(int pi, float dt, const BwIn *in){
     if (b->bw_mode==6){ cas_update(pi, dt, in); return; }
     if (b->bw_mode==7){ crt_update(pi, dt, in); return; }
     if (b->bw_mode==8){ war_update(pi, dt, in); return; }
+    if (b->bw_mode==9){ mor_update(pi, dt, in); return; }
     float mx=0, my=0; int k=in->keys;
     if (k&K_UP) my-=1; if (k&K_DOWN) my+=1; if (k&K_LEFT) mx-=1; if (k&K_RIGHT) mx+=1;
     if (mx!=0 || my!=0){
