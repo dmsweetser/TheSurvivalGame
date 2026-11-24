@@ -40,22 +40,42 @@
   <a class="play" href="play.html">&#9654; PLAY IN YOUR BROWSER</a>
   <p class="note">Runs right on this site — nothing to install. Best with a keyboard; touch works too.</p>
 
-  <h2>Download v1.16</h2>
+  <h2>Download <span id="dlver">the latest version</span></h2>
   <p class="sub">Native builds also host online co-op: run one, and up to four friends join from their browsers.</p>
   <div class="grid">
-    <a class="dl" href="https://github.com/dmsweetser/TheSurvivalGame/releases/download/v1.16/TheSurvivalGame.exe"><span class="os">Windows</span><span class="fn">TheSurvivalGame.exe</span></a>
-    <a class="dl" href="https://github.com/dmsweetser/TheSurvivalGame/releases/download/v1.16/TheSurvivalGame-linux"><span class="os">Linux</span><span class="fn">TheSurvivalGame-linux</span></a>
-    <a class="dl" href="https://github.com/dmsweetser/TheSurvivalGame/releases/download/v1.16/TheSurvivalGame-mac.zip"><span class="os">Mac</span><span class="fn">TheSurvivalGame-mac.zip</span></a>
-    <a class="dl" href="https://github.com/dmsweetser/TheSurvivalGame/releases/download/v1.16/TheSurvivalGame.apk"><span class="os">Android</span><span class="fn">TheSurvivalGame.apk</span></a>
+    <a class="dl" id="dl-win" href="https://github.com/dmsweetser/TheSurvivalGame/releases"><span class="os">Windows</span><span class="fn">TheSurvivalGame.exe</span></a>
+    <a class="dl" id="dl-linux" href="https://github.com/dmsweetser/TheSurvivalGame/releases"><span class="os">Linux</span><span class="fn">TheSurvivalGame-linux</span></a>
+    <a class="dl" id="dl-mac" href="https://github.com/dmsweetser/TheSurvivalGame/releases"><span class="os">Mac</span><span class="fn">TheSurvivalGame-mac.zip</span></a>
+    <a class="dl" id="dl-android" href="https://github.com/dmsweetser/TheSurvivalGame/releases"><span class="os">Android</span><span class="fn">TheSurvivalGame.apk</span></a>
   </div>
   <p class="more"><a href="https://github.com/dmsweetser/TheSurvivalGame/releases">All releases</a> &middot;
   <a href="https://github.com/dmsweetser/TheSurvivalGame">Source code on GitHub</a></p>
 
   <footer>
-    A game by Daniel Sweetser. Current version: 1.4 — FOLLOW THE YELLOW ARROW
-    (Tank Rescue mission chain, the Walk of Fame, wider arcade cabinets).<br>
+    A game by Daniel Sweetser. Current version: <span id="footver">latest</span>.<br>
     SQUASH BUGS. WEAR THE EVIDENCE.
   </footer>
 </main>
+<script>
+  // The version on this page is rendered from version.json — the file
+  // the ship process updates every release — so the landing page can
+  // never go stale again. The static HTML above links at the releases
+  // page (never wrong); this script points the cards at the current
+  // release's own files the moment the version is known.
+  fetch('version.json', { cache: 'no-store' })
+    .then(function (r) { return r.json(); })
+    .then(function (v) {
+      if (!v || !v.versionName) return;
+      var tag = 'v' + v.versionName;
+      var base = 'https://github.com/dmsweetser/TheSurvivalGame/releases/download/' + tag + '/';
+      document.getElementById('dlver').textContent = tag;
+      document.getElementById('footver').textContent = v.versionName;
+      document.getElementById('dl-win').href = base + 'TheSurvivalGame.exe';
+      document.getElementById('dl-linux').href = base + 'TheSurvivalGame-linux';
+      document.getElementById('dl-mac').href = base + 'TheSurvivalGame-mac.zip';
+      document.getElementById('dl-android').href = v.apkUrl || (base + 'TheSurvivalGame.apk');
+    })
+    .catch(function () { /* fallbacks above stay in place */ });
+</script>
 </body>
 </html>
