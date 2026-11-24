@@ -361,12 +361,12 @@ static void craft_render(int pi){
       if (b->craft_fish>0){ q=sappend(q, "  FISH "); q=sapp_int(q, b->craft_fish); }
       if (b->craft_pies>0){ q=sappend(q, "  PIES "); q=sapp_int(q, b->craft_pies); }
       if (b->craft_stews>0){ q=sappend(q, "  STEWS "); q=sapp_int(q, b->craft_stews); }
-      *q=0; draw_text(vx+8, vy+5, buf, 1, COL(240,244,250)); }
+      *q=0; draw_text(vx+8+bw_chip_dx(pi), vy+5, buf, 1, COL(240,244,250)); }   // v1.30 (audit C3): clear of the START chip
     { const char *tn = dk>0.55f? "NIGHT" : b->craft_tod<15 || b->craft_tod>=225? "DAWN" : b->craft_tod>=140? "DUSK" : "DAY";
       u32 tc = tn[0]=='N'? COL(170,190,240) : tn[1]=='A' && tn[0]=='D'? COL(250,200,130) : COL(255,226,140);
       draw_text(vx+vw2-8-text_w(tn,1), vy+5, tn, 1, tc); }
-    rect_fill(vx+8, vy+21, 104, 6, COL(60,30,34));
-    rect_fill(vx+8, vy+21, (int)(104 * (b->maxhp>0? b->hp/b->maxhp : 0)), 6, COL(230,84,96));
+    rect_fill(vx+8+bw_chip_dx(pi), vy+21, 104, 6, COL(60,30,34));
+    rect_fill(vx+8+bw_chip_dx(pi), vy+21, (int)(104 * (b->maxhp>0? b->hp/b->maxhp : 0)), 6, COL(230,84,96));
     { char buf[160]; char *q=buf;
       if (b->craft_gear&1) q=sappend(q, "AXE ");
       if (b->craft_gear&2) q=sappend(q, "PICK ");
@@ -453,11 +453,14 @@ static void craft_render(int pi){
           draw_text(x+w-28-text_w(sst,1), dy2+8, sst, 1, COL(200,214,200)); } }
         { char buf[96]; char *q=buf;
           if (S->craft_search){
-              draw_text_center(x+w/2, y+h-14, "TYPE TO FILTER - ESC WHEN DONE", 1, COL(150,170,190));
-          } else if (mobile_ui() && !pad_mode()){
+              // v1.30 (audit F15): the exit verb is the viewer's own —
+              // pad leaves with the Back button, touch by tapping the
+              // search row again; "ESC" was unconditional.
+              draw_text_center(x+w/2, y+h-14, hint_dev()==DEV_PAD? "TYPE TO FILTER - BACK WHEN DONE" : (hint_dev()==DEV_TOUCH? "TYPE TO FILTER - TAP THE SEARCH ROW WHEN DONE" : "TYPE TO FILTER - ESC WHEN DONE"), 1, COL(150,170,190));
+          } else if (hint_dev()==DEV_TOUCH){
               draw_text_center(x+w/2, y+h-14, G.touch_ctl? "STICK PICKS - FIRE CRAFTS - TAP ROWS TOO" : "TAP A ROW - TAP IT AGAIN TO CRAFT - TAP OUTSIDE TO CLOSE", 1, COL(150,170,190));
           } else {
-              q=sappend(q, pad_mode()? "DPAD/STICK" : "ARROWS"); q=sappend(q, " PICK - ");
+              q=sappend(q, hint_dev()==DEV_PAD? "DPAD/STICK" : "ARROWS"); q=sappend(q, " PICK - ");
               q=sappend(q, lbl_fire()); q=sappend(q, " CRAFTS - ");
               q=sappend(q, lbl_wall()); q=sappend(q, " CLOSES"); *q=0;
               draw_text_center(x+w/2, y+h-14, buf, 1, COL(150,170,190)); } }

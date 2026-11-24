@@ -68,7 +68,7 @@ static void crt_start_race(int pi){
     }
     b->x = CRT_OX + S->crt_x[0]; b->y = CRT_OY + S->crt_y[0];
     b->bw_x = b->x; b->bw_y = b->y; b->aim = S->crt_h[0];
-    { char *q = S->note; q = sappend(q, "RACE "); q = sapp_int(q, S->crt_race + 1); q = sappend(q, "/4 - "); q = sappend(q, REGION_NAME[S->crt_track]); q = sappend(q, ". HOLD "); q = sappend(q, lbla(H_FIRE)); q = sappend(q, " TO GO!"); *q = 0; S->note_t = 2.4f; }
+    { char *q = S->note; q = sappend(q, "RACE "); q = sapp_int(q, S->crt_race + 1); q = sappend(q, "/4 - "); q = sappend(q, REGION_NAME[S->crt_track]); q = sappend(q, ". HOLD "); if (!(hint_dev()==DEV_TOUCH && !G.touch_ctl)){ q = sappend(q, lbla(H_FIRE)); q = sappend(q, " "); } q = sappend(q, "TO GO!"); *q = 0; S->note_t = 2.4f; }   // v1.30 (audit F8): DRAG reads "HOLD TO GO", never "HOLD TAP"
     if (S->crt_duo >= 0){ Buddy *gb = &G.bud[S->crt_duo];
         gb->x = CRT_OX + S->crt_x[1]; gb->y = CRT_OY + S->crt_y[1];
         gb->bw_x = gb->x; gb->bw_y = gb->y; gb->aim = S->crt_h[1]; }
@@ -232,10 +232,10 @@ static void crt_update(int pi, float dt, const BwIn *in){
             int gedges = g->keys & ~S->crt_gprevk; S->crt_gprevk = g->keys;
             if (gedges & K_LEFT){ do { S->crt_colsel2 = (S->crt_colsel2 + 5) % 6; } while (S->crt_colsel2 == S->crt_colsel); }
             if (gedges & K_RIGHT){ do { S->crt_colsel2 = (S->crt_colsel2 + 1) % 6; } while (S->crt_colsel2 == S->crt_colsel); }
-            if (g->sel && S->crt_t > 0.35f) S->crt_ready |= 2;
-            if (in->sel && S->crt_t > 0.35f) S->crt_ready |= 1;
+            if ((g->sel || g->interact) && S->crt_t > 0.35f) S->crt_ready |= 2;
+            if ((in->sel || in->interact) && S->crt_t > 0.35f) S->crt_ready |= 1;   // v1.30 (audit D3): a DRAG tap arrives as interact — it readies/starts too
             if (S->crt_ready == 3) crt_gp_begin(pi);
-        } else if (in->sel && S->crt_t > 0.35f){
+        } else if ((in->sel || in->interact) && S->crt_t > 0.35f){
             crt_gp_begin(pi);
         }
         return;

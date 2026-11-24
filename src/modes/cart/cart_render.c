@@ -88,7 +88,7 @@ static void crt_render_view(int sim_pi, int viewer_pi){
           tri_fill(cx - KTS(92), cy - KTS(16), cx - KTS(92), cy + KTS(16), cx - KTS(70), cy, COL(255, 255, 255));
           tri_fill(cx + KTS(92), cy - KTS(16), cx + KTS(92), cy + KTS(16), cx + KTS(70), cy, COL(255, 255, 255));
           draw_text_center(cx, cy + KTS(64), COLNAME[mycol], 2, COL(255, 255, 255)); }
-        { char b[96]; char *q=b; q=sappend(q, "IN THE RACE: HOLD "); q=sappend(q, lbla(H_FIRE)); q=sappend(q, " TO GO, "); q=sappend(q, lbl_steer()); *q=0;
+        { char b[96]; char *q=b; q=sappend(q, "IN THE RACE: HOLD "); if (!(hint_dev()==DEV_TOUCH && !G.touch_ctl)){ q=sappend(q, lbla(H_FIRE)); q=sappend(q, " "); } q=sappend(q, "TO GO, "); q=sappend(q, lbl_steer()); *q=0;   // v1.30 (audit F8)
           draw_text_center(vx + vw2/2, vy + 98, b, 1, COL(170, 200, 190)); }
         if (vh2 >= 300){ // MEDAL TIMES (feat 3): your medals on this cup's four tracks (full-height views only — the split room is already a squeeze)
             char buf[128]; char *q = buf;
@@ -110,11 +110,13 @@ static void crt_render_view(int sim_pi, int viewer_pi){
               q = sappend(q, "PARTNER IS HERE, IN THE "); q = sappend(q, COLNAME[(vk == 0)? S->crt_colsel2 : S->crt_colsel]); q = sappend(q, " KART"); *q = 0;
               draw_text_center(vx + vw2/2, vy + vh2 - 82, buf, 1, COL(255, 240, 200)); }
             draw_text_center(vx + vw2/2, vy + vh2 - 62, theyready? "PARTNER: READY!" : "PARTNER: STILL PICKING...", 1, theyready? COL(120, 255, 120) : COL(220, 220, 220));
-            draw_text_center(vx + vw2/2, vy + vh2 - 42, imready? "YOU: READY!" : "FIRE WHEN READY", 1, imready? COL(120, 255, 120) : COL(255, 255, 255));
+            { char b[64]; char *q=b; q=sappend(q, lbla(H_FIRE)); q=sappend(q, " WHEN READY"); *q=0;
+              draw_text_center(vx + vw2/2, vy + vh2 - 42, imready? "YOU: READY!" : b, 1, imready? COL(120, 255, 120) : COL(255, 255, 255)); }   // v1.30 (audit F6)
         } else {
             draw_text_center(vx + vw2/2, vy + vh2 - 82, "NO PARTNER YET", 1, COL(255, 240, 200));
             draw_text_center(vx + vw2/2, vy + vh2 - 62, "THE OTHER PLAYER MUST PICK THE CART TOO", 1, COL(220, 220, 220));
-            draw_text_center(vx + vw2/2, vy + vh2 - 42, "FIRE: START THE GRAND PRIX   -   LEAVE: BACK OUT", 1, COL(255, 255, 255));
+            { char b[80]; char *q=b; q=sappend(q, lbla(H_FIRE)); q=sappend(q, ": START THE GRAND PRIX   -   LEAVE: BACK OUT"); *q=0;
+              draw_text_center(vx + vw2/2, vy + vh2 - 42, b, 1, COL(255, 255, 255)); }   // v1.30 (audit F6)
         }
         if (S->note_t > 0){
             rect_fill(vx, vy + vh2 - 22, vw2, 22, COL(10, 12, 10));
@@ -673,7 +675,7 @@ static void crt_render_view(int sim_pi, int viewer_pi){
         char nb[2] = { (char)('0' + n), 0 };
         draw_text_center(vx + vw2/2, vy + vh2/2 - 66, nb, 8, COL(255, 220, 90));
         draw_text_center(vx + vw2/2, vy + vh2/2 + 22, "GET READY...", 2, COL(255, 255, 255));
-        { char b[96]; char *q=b; q=sappend(q, "HOLD "); q=sappend(q, lbla(H_FIRE)); q=sappend(q, " TO GO - "); q=sappend(q, lbl_steer()); *q=0;
+        { char b[96]; char *q=b; q=sappend(q, "HOLD "); if (!(hint_dev()==DEV_TOUCH && !G.touch_ctl)){ q=sappend(q, lbla(H_FIRE)); q=sappend(q, " "); } q=sappend(q, "TO GO - "); q=sappend(q, lbl_steer()); *q=0;   // v1.30 (audit F8)
           draw_text_center(vx + vw2/2, vy + vh2/2 + 52, b, 1, COL(200, 230, 200)); }
     } else if (S->crt_state == 1 && S->crt_t < 0.9f){
         draw_text_center(vx + vw2/2, vy + vh2/2 - 40, "GO!", 6, COL(120, 255, 120));

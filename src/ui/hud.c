@@ -391,7 +391,10 @@ static const char *store_item_blurb(int sel, Player *p){
         case 3: return "+25 max HP per level. Comfy AND protective.";
         case 4: return "Heavy hats slow you less per level. A bit quicker bare, too.";
         case 5: return "Death? Rolled back. Revive at half HP.";
-        case 7: return "Squeeze him: PBBBT - straight home to the Epicenter. (KEY 6 / TAP)";
+        case 7: { static char bb7[96]; char *q=bb7;   // v1.30 (audit F13): the pad's bean is the Y button — name the viewer's own input
+                  q=sappend(q, "Squeeze him: PBBBT - straight home to the Epicenter. ");
+                  q=sappend(q, hint_dev()==DEV_PAD? "(Y BUTTON)" : (hint_dev()==DEV_TOUCH? "(TAP THE BEAN)" : "(KEY 6)"));
+                  *q=0; return bb7; }
         default: return "A hotfix, applied directly to you. +50 HP.";
     }
 }

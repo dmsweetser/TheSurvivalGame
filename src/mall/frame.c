@@ -212,7 +212,8 @@ static void coop_frame(float dt){
     // P1 at a cabinet panel: same deal (three rows at the unlocked CASTLE panel — feat 7)
     if (arcgate[G.my_id]){
         me->cur_keys=0;
-        if (IN.menu_up || IN.menu_down){ arcgate_sel[G.my_id] = (arcgate_sel[G.my_id]+1)%arc_gate_rows(G.my_id); sfx(6); }
+        if (IN.menu_up){ arcgate_sel[G.my_id] = (arcgate_sel[G.my_id]+arc_gate_rows(G.my_id)-1)%arc_gate_rows(G.my_id); sfx(6); }
+        if (IN.menu_down){ arcgate_sel[G.my_id] = (arcgate_sel[G.my_id]+1)%arc_gate_rows(G.my_id); sfx(6); }
         if (IN.tapped){ int vx,vy,vw2,vh2; p1_view_rect(&vx,&vy,&vw2,&vh2); arc_gate_tap(G.my_id, vx, vy, vw2, vh2); }
         else if (IN.select_pressed || IN.enter_pressed) arc_gate_pick(G.my_id);
         else if (IN.esc_pressed || IN.pause_pressed){ arcgate[G.my_id]=0; sfx(6); }
@@ -263,7 +264,8 @@ static void coop_frame(float dt){
     // P2 at a cabinet panel
     if (arcgate[G.p2_slot]){
         p2->cur_keys=0;
-        if (p2up || p2down){ arcgate_sel[G.p2_slot] = (arcgate_sel[G.p2_slot]+1)%arc_gate_rows(G.p2_slot); sfx(6); }
+        if (p2up){ arcgate_sel[G.p2_slot] = (arcgate_sel[G.p2_slot]+arc_gate_rows(G.p2_slot)-1)%arc_gate_rows(G.p2_slot); sfx(6); }
+        if (p2down){ arcgate_sel[G.p2_slot] = (arcgate_sel[G.p2_slot]+1)%arc_gate_rows(G.p2_slot); sfx(6); }
         if (act2_edge(ACT_FIRE)) arc_gate_pick(G.p2_slot);
         else if (act2_edge(ACT_INTERACT) || act2_edge(ACT_ESC)){ arcgate[G.p2_slot]=0; sfx(6); }
     }
@@ -287,7 +289,11 @@ static void coop_frame(float dt){
         p2->cur_keys=0;
         station_input(G.p2_slot, lstation[1], p2up, p2down, act2_edge(ACT_FIRE));
         if (act2_edge(ACT_INTERACT) || act2_edge(ACT_ESC)){
-            if (!(pay_active && pay_player==G.p2_slot)){ lstore[1]=0; p2->in_store=0; p2->station=-1; bud_stage[G.p2_slot]=0; booth_stage[G.p2_slot]=0; srcterm_on_close(G.p2_slot); }
+            // v1.30 (audit H9): the same srcterm guard P1 has — from an
+            // inner terminal view, P2's close steps back a view instead
+            // of dropping the whole panel.
+            if (lstation[1]==9 && srcterm_blocks_close(G.p2_slot)){ /* the terminal's inner views own the close */ }
+            else if (!(pay_active && pay_player==G.p2_slot)){ lstore[1]=0; p2->in_store=0; p2->station=-1; bud_stage[G.p2_slot]=0; booth_stage[G.p2_slot]=0; srcterm_on_close(G.p2_slot); }
         }
     } else if (act2_edge(ACT_INTERACT) && p2->alive && downed_near(p2)){
         try_revive(G.p2_slot);
@@ -458,6 +464,27 @@ void frame(void){
     g_dev_ctx = -1;   // v1.25: hint labels default to the local player's device each frame
     G.view_pi = G.my_id>=0? G.my_id : 0;   // split passes override per view
     touch_update(dt);
+    // v1.30 (audit D2): on the DRAG scheme a tap IS the interact button in
+    // the main game too — Banzai World always folded it (banzai/input.c),
+    // the meadow/mall frame never did, so a DRAG player could walk into
+    // the mall but open no station panel and never trigger the exit mat:
+    // trapped, with SAVE & QUIT the only way out. The weapon chips and
+    // the bean (consumed inside touch_update) keep first claim on their
+    // taps; every other DRAG tap in play interacts (doors, station
+    // discs, the exit mat). Mouse clicks ride the same channel, so a
+    // desktop click now interacts under DRAG too. The fold stays out of
+    // open panels (co-op P1's lstore and a client's store_open_local run
+    // in GS_PLAY, where their own tap handling owns the tap and an
+    // interact edge would read as "close"). It also stays out of Banzai
+    // World and the gate panels: there a tap has its own meanings (the
+    // WAR! map's SKIRMISH button, battle taps, gate rows) and BW's own
+    // fill folds taps where they belong — an interact edge leaking in
+    // confirmed the selected region instead of opening the skirmish
+    // panel (skirmishpathtest caught the first version of this fold).
+    if (G.touch_ctl==0 && G.state==GS_PLAY && IN.tapped && !lstore[0] &&
+        !(G.net_mode==NET_CLIENT && store_open_local) &&
+        !G.bud[G.my_id].in_bw && !arcgate[G.my_id] && !bwgate[G.my_id])
+        IN.interact_pressed=1;
     update_audio(dt);
     whale_poll(dt);
 
@@ -523,7 +550,7 @@ void frame(void){
                 rect_fill(0, 140, VW, 60, COL(20,18,36));
                 draw_text_center(VW/2, 158, "CONNECTING TO HOST...", 2, COL(255,214,64));
                 draw_text_center(VW/2, 184, hint_dev()==DEV_PAD? "BACK - CANCEL" : (hint_dev()==DEV_TOUCH? "TAP - CANCEL" : "ESC - CANCEL"), 1, COL(190,200,220));
-                if (IN.esc_pressed){ plat_net_stop(); G.net_mode=NET_OFF; G.state=GS_MENU; }
+                if (IN.esc_pressed || IN.tapped){ plat_net_stop(); G.net_mode=NET_OFF; G.state=GS_MENU; }   // v1.30 (audit H3): the touch text says TAP - CANCEL
                 break;
             }
             // client: send inputs, render the host's world
@@ -587,7 +614,8 @@ void frame(void){
             }
             if (G.state==GS_PLAY && arcgate[G.my_id]){
                 me->cur_keys=0;
-                if (IN.menu_up || IN.menu_down){ arcgate_sel[G.my_id] = (arcgate_sel[G.my_id]+1)%arc_gate_rows(G.my_id); sfx(6); }
+                if (IN.menu_up){ arcgate_sel[G.my_id] = (arcgate_sel[G.my_id]+arc_gate_rows(G.my_id)-1)%arc_gate_rows(G.my_id); sfx(6); }
+                if (IN.menu_down){ arcgate_sel[G.my_id] = (arcgate_sel[G.my_id]+1)%arc_gate_rows(G.my_id); sfx(6); }
                 if (IN.tapped) arc_gate_tap(G.my_id, 0, 0, VW, VH);
                 else if (IN.select_pressed || IN.enter_pressed) arc_gate_pick(G.my_id);
                 else if (IN.esc_pressed || IN.pause_pressed){ arcgate[G.my_id]=0; sfx(6); }

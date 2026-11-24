@@ -245,7 +245,7 @@ static void mor_render(int pi){
     if (S->mor_hurt_t>0) blend_rect(vx, vy, vw2, vh2, COL(200,40,30), (int)(90 * S->mor_hurt_t / 0.3f));
     // --- HUD -----------------------------------------------------------------------
     rect_fill(vx, vy, vw2, 20, COL(16,20,28));
-    draw_text(vx+8, vy+6, "MORDOR FUN RUN", 1, COL(255,214,120));
+    draw_text(vx+8+bw_chip_dx(pi), vy+6, "MORDOR FUN RUN", 1, COL(255,214,120));   // v1.30 (audit C3): clear of the START chip
     { int moose_now = b->mor_dist / MOR_MOOSE_PX, moose_tot = mor_total_moose(pi);
       char buf[64]; char *q=buf;
       q=sapp_int(q, moose_now); q=sappend(q, " / "); q=sapp_int(q, moose_tot); q=sappend(q, " MOOSE");
@@ -305,9 +305,13 @@ static void mor_render(int pi){
             if (S->mor_psel==r){ rect_fill(x+10, ry-4, w-20, 16, COL(60,48,16)); draw_text(x+16, ry, ">", 1, COL(255,220,90)); }
             draw_text(x+30, ry, nm, 1, S->mor_psel==r? COL(255,244,210) : COL(170,180,190));
         }
-        if (mobile_ui() && !pad_mode() && pi==G.my_id)
-            draw_text_center(x+w/2, y+h-16, "TAP A ROW", 1, COL(120,132,150));
-        else { char buf[64]; char *q=buf; q=sappend(q, lbl_fire()); q=sappend(q, " - CHOOSE    "); q=sappend(q, lbl_exit()); q=sappend(q, " - LEAVE"); *q=0;
+        // v1.30 (audit F11): the old text told pad players "START -
+        // LEAVE" (START opens the Start menu; leaving is the Back
+        // button) and touch players "TAP - LEAVE" (tap-outside is inert
+        // here — a tap must land on the LEAVE row).
+        if (hint_dev()==DEV_TOUCH)
+            draw_text_center(x+w/2, y+h-16, "TAP A ROW TO CHOOSE", 1, COL(120,132,150));
+        else { char buf[64]; char *q=buf; q=sappend(q, lbla(H_CONFIRM)); q=sappend(q, " - CHOOSE    "); q=sappend(q, hint_dev()==DEV_PAD? "BACK" : "ESC"); q=sappend(q, " - LEAVE"); *q=0;
           draw_text_center(x+w/2, y+h-16, buf, 1, COL(120,132,150)); }
     }
     if (S->note_t>0 && !S->mor_panel){

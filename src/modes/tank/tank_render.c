@@ -202,7 +202,7 @@ static void tank_render(int pi){
       q=sappend(q, "   SCORE "); q=sapp_int(q, S->tank_score);
       q=sappend(q, "   LIVES "); q=sapp_int(q, S->tank_lives);
       q=sappend(q, "   ABOARD "); q=sapp_int(q, S->tank_pass); q=sappend(q, "/4");
-      *q=0; draw_text(vx+8, vy+6, buf, 1, COL(240,244,250)); }
+      *q=0; draw_text(vx+8+bw_chip_dx(pi), vy+6, buf, 1, COL(240,244,250)); }   // v1.30 (audit C3): clear of the START chip
     { char buf[128]; char *q=buf;
       // v1.27: while the GRENADE LAUNCHER is aboard its tag rides the
       // weapon line for the whole run, and the grenade count reads
@@ -213,7 +213,7 @@ static void tank_render(int pi){
       if (S->tank_wep) { q=sappend(q, "  ("); q=sappend(q, lbl_wall()); q=sappend(q, ": CANNON)"); }
       else q=sappend(q, ")");
       if (tank_glauncher_st[pi]) q=sappend(q, "  [GRENADE LAUNCHER]");
-      *q=0; draw_text(vx+8, vy+24, buf, 1, S->tank_wep? COL(255,190,90) : COL(170,190,200)); }
+      *q=0; draw_text(vx+8+bw_chip_dx(pi), vy+24, buf, 1, S->tank_wep? COL(255,190,90) : COL(170,190,200)); }   // v1.30 (audit C3): the chip is 24 tall — this line starts under it too
     { int bw3 = 120, bx = vx+vw2-bw3-10, by = vy+6;
       draw_text(bx-32, by, "HULL", 1, COL(240,244,250));
       rect_fill(bx-1, by-1, bw3+2, 9, COL(8,8,12));

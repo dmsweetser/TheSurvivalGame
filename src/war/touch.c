@@ -84,7 +84,7 @@ static void bw_render(int pi){
     BwSim *S = &BWS[pi]; Buddy *b = &G.bud[pi];
     if (S->bw_menu){
         int vx=G.view_x0, vy=G.view_y0, vw2=G.view_w>0? G.view_w : VW, vh2=G.view_h>0? G.view_h : VH;
-        if (S->bw_menu==2){ draw_controls_panel(vx, vy, vw2, vh2, b->bw_mode<2? 1 : (b->bw_mode==5? 6 : b->bw_mode)); return; }
+        if (S->bw_menu==2){ draw_controls_panel(vx, vy, vw2, vh2, b->bw_mode<2? 1 : (b->bw_mode==5? 6 : (b->bw_mode==6? 10 : b->bw_mode))); return; }   // v1.30 (audit F9): Castle has its own context (10), not Tank's
         int pw=300, ph=140, px=vx+(vw2-pw)/2, py=vy+(vh2-ph)/2;
         blend_rect(vx, vy, vw2, vh2, COL(8,8,14), 120);
         rect_fill(px, py, pw, ph, COL(16,18,28)); rect_line(px, py, pw, ph, COL(198,164,84));
@@ -95,7 +95,14 @@ static void bw_render(int pi){
               if (i==S->bw_msel){ rect_fill(px+10, ry-4, pw-20, 19, COL(255,205,40)); draw_text_center(px+pw/2, ry, rows[i], 2, COL(30,26,44)); }
               else draw_text_center(px+pw/2, ry, rows[i], 2, COL(235,238,245));
           } }
-        draw_text_center(px+pw/2, py+ph-16, pad_mode()? "STICK/DPAD + A" : (mobile_ui()? "TAP A ROW" : "ARROWS + SPACE"), 1, COL(140,150,170));
+        // v1.30 (audit F16/F14): the viewing player's device, and the
+        // real FIRE bind on keyboard — P2's pad view could be shown the
+        // keyboard text when P1 was on keys.
+        { char fb[64]; char *q=fb;
+          if (hint_dev()==DEV_PAD) q=sappend(q, "STICK/DPAD + A");
+          else if (hint_dev()==DEV_TOUCH) q=sappend(q, "TAP A ROW");
+          else { q=sappend(q, "ARROWS + "); q=sappend(q, key_name(G.bind[ACT_FIRE])); }
+          *q=0; draw_text_center(px+pw/2, py+ph-16, fb, 1, COL(140,150,170)); }
     }
 }
 static void bw_render_battle(int pi){

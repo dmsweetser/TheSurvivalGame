@@ -29,6 +29,11 @@ static int bw_start_chip_live(void){
 }
 #define BW_CHIP_W 72
 #define BW_CHIP_H 24
+// v1.30 (audit C3): the chip is drawn OVER the top-left of the view, and
+// several modes put their HUD text exactly there (Mordor's title read
+// "N RUN" behind it). Mode HUDs shift their top-left text right by this
+// much when the chip is live for the player whose view is being drawn.
+static int bw_chip_dx(int pi){ return (pi==G.my_id && bw_start_chip_live())? BW_CHIP_W+6 : 0; }
 static void bw_fill_p1(BwIn *bin, float dt){
     Buddy *b = &G.bud[G.my_id]; BwSim *S = &BWS[G.my_id];
     bin->keys = IN.keys | IN.touch_keys;
@@ -210,10 +215,28 @@ static void bw_update(int pi, float dt, const BwIn *in){
         }
         return;
     }
-    if (!S->log_open && in->wall && !S->bat.active && b->bw_mode<2){ S->log_open = 1; S->log_sel=0; sfx(6); return; }
+    if (!S->log_open && in->wall && !S->bat.active && b->bw_mode<2){ S->log_open = 1; S->log_sel=0; S->log_prevk = in->keys; sfx(6); return; }
     if (S->log_open){
         if (in->up){ S->log_sel = (S->log_sel+3)%4; sfx(6); }
         if (in->down){ S->log_sel = (S->log_sel+1)%4; sfx(6); }
+        // v1.30 (audit H8): DRAG touch produces neither menu edges nor
+        // stick flicks, so the log could be opened (the WALL button)
+        // but never navigated or used. While it is open, a vertical
+        // drag steps the selection (fresh edges of the steer levels —
+        // the block returns before movement, so the buddy stays put)
+        // and a tap uses the selected item; the tap fold in bw_fill_p1
+        // deliberately skips the log, so the tap is read here. The gate
+        // names the DEVICE, not just the scheme: DRAG is the default
+        // scheme on desktop too, and a keyboard player's held arrows
+        // ride in->keys as levels — ungated, their edges double-stepped
+        // the selection beside in->up/down (storytest caught that).
+        if (pi==G.my_id && G.touch_ctl==0 && hint_dev()==DEV_TOUCH){
+            int kedges = in->keys & ~S->log_prevk;
+            if (kedges & K_UP){ S->log_sel = (S->log_sel+3)%4; sfx(6); }
+            if (kedges & K_DOWN){ S->log_sel = (S->log_sel+1)%4; sfx(6); }
+            if (IN.tapped) bw_use_item(pi, S->log_sel);
+        }
+        S->log_prevk = in->keys;
         if (in->sel) bw_use_item(pi, S->log_sel);
         if (in->exit_ || in->wall) S->log_open = 0;
         return;

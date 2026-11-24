@@ -241,14 +241,21 @@ static void draw_bowling(void){
                q=sappend(q, "LEAGUE NIGHT "); q=sapp_int(q, L->night+1); q=sappend(q, " OF 6 - TARGET "); q=sapp_int(q, tg); }
         *q=0; draw_text_center(cx, foul+30, b, 1, COL(200,220,255));
     }
-    // the prompt line
-    { const char *ak = (G.store_pi==G.my_id)? key_name(G.bind[ACT_FIRE]) : "A";
-      char pb[96]; char *q=pb;
+    // the prompt line — v1.30 (audit F5/D1): composed for the VIEWING
+    // player's device (the pass sets g_dev_ctx): it used to print the
+    // keyboard FIRE bind for P1 and a hard "A" for P2 whatever either
+    // was holding. On touch the throw is a tap and the aim is a drag
+    // (the lanes have no button deck), and the shell X is the way out.
+    { int tch = (hint_dev()==DEV_TOUCH);
+      const char *ak = tch? "TAP" : lbla(H_FIRE);
+      char pb[128]; char *q=pb;
       if (!bw->active || bw->game_over){ q=sappend(q, ak); q=sappend(q, " - NEW GAME"); }
-      else if (bw->phase==0){ q=sappend(q, "LEFT/RIGHT - POSITION - "); q=sappend(q, ak); q=sappend(q, " - AIM"); }
+      else if (bw->phase==0){ if (tch) q=sappend(q, "DRAG - POSITION - TAP - AIM");
+                              else { q=sappend(q, "LEFT/RIGHT - POSITION - "); q=sappend(q, ak); q=sappend(q, " - AIM"); } }
       else if (bw->phase==1){ q=sappend(q, ak); q=sappend(q, " - LOCK THE ANGLE"); }
       else if (bw->phase==2){ q=sappend(q, ak); q=sappend(q, " - THROW!"); }
       else q=sappend(q, "ROLLING...");
+      if (tch) q=sappend(q, "   X - LEAVE");
       *q=0; draw_text_center(cx, VH-12, pb, 1, COL(160,230,255)); }
 }
 

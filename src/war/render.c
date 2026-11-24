@@ -65,7 +65,11 @@ static void war_render_map(int pi, int vx, int vy, int vw2, int vh2){
         q=sappend(q, hint_dev()==DEV_PAD? "A ON ANY REGION" : (hint_dev()==DEV_TOUCH? "TAP ANY REGION" : "CLICK ANY REGION"));
         q=sappend(q, " TO FIGHT IT AGAIN."); *q=0;
         draw_text_center(vx+vw2/2, vy+vh2-19, b2, 1, COL(200,230,200)); }
-    else draw_text_center(vx+vw2/2, vy+vh2-19, hint_dev()==DEV_PAD? "STICK + A - INVADE - LAST STOP IS SKIRMISH" : (hint_dev()==DEV_TOUCH? "TAP A REGION TO INVADE IT" : "CLICK A REGION - ARROWS + SPACE - S: SKIRMISH"), 1, COL(150,160,185));
+    else { char fb[96]; char *q=fb;   // v1.30 (audit F14): name the real FIRE bind, not a hard-coded SPACE
+           if (hint_dev()==DEV_PAD) q=sappend(q, "STICK + A - INVADE - LAST STOP IS SKIRMISH");
+           else if (hint_dev()==DEV_TOUCH) q=sappend(q, "TAP A REGION TO INVADE IT");
+           else { q=sappend(q, "CLICK A REGION - ARROWS + "); q=sappend(q, key_name(G.bind[ACT_FIRE])); q=sappend(q, " - S: SKIRMISH"); }
+           *q=0; draw_text_center(vx+vw2/2, vy+vh2-19, fb, 1, COL(150,160,185)); }
     if (S->war_msgt>0) draw_text_center(vx+vw2/2, vy+58, S->war_msg, 1, COL(255,170,150));
     if (S->war_sk_panel){   // v1.29: the saved-skirmish panel over the map (rects shared with the tap handler in map.c)
         blend_rect(vx, vy, vw2, vh2, COL(8,8,14), 150);
@@ -81,7 +85,13 @@ static void war_render_map(int pi, int vx, int vy, int vw2, int vh2){
             const char *lbl = n==0? "RESUME SKIRMISH" : (S->war_sk_confirm>0? "NEW SKIRMISH? AGAIN TO DISCARD IT" : "NEW SKIRMISH");
             draw_text_center(px+pw/2, ry+10, lbl, 2, COL(240,244,250));
         }
-        draw_text_center(px+pw/2, py+ph-16, hint_dev()==DEV_PAD? "STICK + A - ESC KEEPS IT" : (hint_dev()==DEV_TOUCH? "TAP A ROW" : "ARROWS + SPACE - ESC KEEPS IT"), 1, COL(150,160,185));
+        // v1.30 (audit F4/F14): on a pad the keep-it action is the BACK
+        // button, not "ESC"; the keyboard half names the real FIRE bind.
+        { char fb[80]; char *q=fb;
+          if (hint_dev()==DEV_PAD) q=sappend(q, "STICK + A - BACK KEEPS IT");
+          else if (hint_dev()==DEV_TOUCH) q=sappend(q, "TAP A ROW");
+          else { q=sappend(q, "ARROWS + "); q=sappend(q, key_name(G.bind[ACT_FIRE])); q=sappend(q, " - ESC KEEPS IT"); }
+          *q=0; draw_text_center(px+pw/2, py+ph-16, fb, 1, COL(150,160,185)); }
     }
 }
 static void war_draw_bar_btn(BwSim *S, int bx, int by, int act, int cost, const char *name, int hl){

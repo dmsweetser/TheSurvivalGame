@@ -226,7 +226,7 @@ static void plat_render(int pi){
       q=sappend(q, "   BITS "); q=sapp_int(q, S->plat_bits);
       if (S->plat_power==1) q=sappend(q, "   PATCHED");
       if (S->plat_power==2) q=sappend(q, "   HOTFIX!");
-      *q=0; draw_text(vx+8, vy+6, buf, 1, COL(240,244,250)); }
+      *q=0; draw_text(vx+8+bw_chip_dx(pi), vy+6, buf, 1, COL(240,244,250)); }   // v1.30 (audit C3): clear of the START chip
     for (int hh2=0;hh2<S->plat_hearts;hh2++){
         int hx = vx+vw2-16-hh2*16, hy = vy+10;
         disc_fill(hx-3, hy-2, 4, COL(240,80,90)); disc_fill(hx+3, hy-2, 4, COL(240,80,90));

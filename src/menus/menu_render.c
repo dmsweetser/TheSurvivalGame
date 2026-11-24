@@ -134,7 +134,11 @@ static void render_slots(void){
     { int y=278;
       if (G.slots_sel==3){ rect_fill(0, y-4, VW, 19, COL(255,205,40)); draw_text_center(VW/2, y, "BACK", 2, COL(30,26,44)); }
       else draw_text_center(VW/2, y, "BACK", 2, COL(235,238,245)); }
-    draw_text_center(VW/2, 306, hint_dev()==DEV_PAD? "STICK/DPAD CHOOSE - A OPENS" : (hint_dev()==DEV_TOUCH? "TAP A SLOT TO OPEN IT" : "ARROWS CHOOSE - SPACE OPENS"), 1, COL(140,150,170));
+    { char fb[80]; char *q=fb;   // v1.30 (audit F14): name the real FIRE bind, not a hard-coded SPACE
+      if (hint_dev()==DEV_PAD) q=sappend(q, "STICK/DPAD CHOOSE - A OPENS");
+      else if (hint_dev()==DEV_TOUCH) q=sappend(q, "TAP A SLOT TO OPEN IT");
+      else { q=sappend(q, "ARROWS CHOOSE - "); q=sappend(q, key_name(G.bind[ACT_FIRE])); q=sappend(q, " OPENS"); }
+      *q=0; draw_text_center(VW/2, 306, fb, 1, COL(140,150,170)); }
     if (G.store_msg_t>0) draw_text_center(VW/2, 330, G.store_msg, 1, COL(255,130,130));
 }
 static void menu_input(void){

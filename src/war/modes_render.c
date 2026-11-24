@@ -167,7 +167,8 @@ static void bw_render_modes(int pi){
         int x = vx + (vw2-w)/2, y = vy + (vh2-h)/2; if (y < vy+4) y = vy+4;
         rect_fill(x, y, w, h, COL(16,20,18)); rect_line(x, y, w, h, COL(198,164,84));
         draw_text(x+12, y+8, "QUEST LOG", 1, COL(255,214,64));
-        draw_text(x+w-104, y+8, "F / X - CLOSE", 1, COL(150,170,190));
+        { char hb[40]; char *q=hb; q=sappend(q, lbla(H_WALL)); q=sappend(q, " - CLOSE"); *q=0;
+          draw_text(x+w-text_w(hb,1), y+8, hb, 1, COL(150,170,190)); }   // v1.30 (audit F12): was a hard-coded "F / X" for every device
         int ry = y + 26;
         if (b->bw_mode!=1){
             draw_text(x+12, ry, "NO STORY HERE. JUST MEADOW, TEA, AND VIOLENCE.", 1, COL(200,214,200)); ry += 14;

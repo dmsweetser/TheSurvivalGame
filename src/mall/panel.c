@@ -48,7 +48,7 @@ static void draw_mall_panel(int st){
           draw_text_center(x+w/2, y+136, cb2, 1, COL(120,110,90)); }
         draw_text_center(x+w/2, y+176, "THE CODE IS YOUR RECEIPT - KEEP IT SAFE.", 1, COL(90,80,60));
         draw_text_center(x+w/2, y+192, "UNLOCKS LIVE IN YOUR SAVE DATA; THE CODE RESTORES THEM.", 1, COL(90,80,60));
-        draw_text_center(x+w/2, y+224, hint_dev()==DEV_PAD? "A - REDEEM     BACK - CANCEL" : "ENTER - REDEEM     ESC - CANCEL", 1, COL(40,36,50));
+        draw_text_center(x+w/2, y+224, hint_dev()==DEV_PAD? "A - REDEEM     BACK - CANCEL" : (hint_dev()==DEV_TOUCH? "ENTER - REDEEM     TAP OUTSIDE - CANCEL" : "ENTER - REDEEM     ESC - CANCEL"), 1, COL(40,36,50));
         return;
     }
     int rows = station_rows(st, me);
@@ -70,6 +70,12 @@ static void draw_mall_panel(int st){
         }
         const char *nm = station_row_name(st, i, me, nb);
         const char *rt = station_row_right(st, i, me, rb);
+        // v1.30 (audit C1): an over-wide name at size 2 ran UNDER its
+        // right-hand text ("COMICALLY ENORMOUS GLASSES" over its price
+        // on the Whales list). Drop just that row's name to size 1
+        // instead of overlapping.
+        int nsz = G.ui_compact? 1 : 2;
+        if (nsz==2 && x + (st==5? 28 : 16) + text_w(nm, 2) > x + w - 14 - text_w(rt, 2) - 6) nsz = 1;
         if (st==5){
             // TROPHY CASE: a plaque chip at the row's left — filled
             // in its colour when earned, a hollow ring while it waits
@@ -80,7 +86,7 @@ static void draw_mall_panel(int st){
                 if (case_earned(me, cid)) disc_fill(ccx, ccy, cr, case_chip_col(me, cid));
                 else circle_out(ccx, ccy, cr, COL(170,160,130));
             }
-            if (G.ui_compact) draw_text(x+23, ry+5, nm, 1, hdr? COL(150,95,30) : COL(40,36,50));
+            if (nsz==1) draw_text(x+23, ry+5, nm, 1, hdr? COL(150,95,30) : COL(40,36,50));
             else draw_text(x+28, ry+2, nm, 2, hdr? COL(150,95,30) : COL(40,36,50));
         }
         else if (st==6){
@@ -88,7 +94,7 @@ static void draw_mall_panel(int st){
             // case's — the rows are a card and a ledger, not a shop
             int wid = wk_row_id(i);
             int hdr = (wid==WK_HDR_WEEK || wid==WK_HDR_LEDGER);
-            if (G.ui_compact) draw_text(x+16, ry+5, nm, 1, hdr? COL(150,95,30) : COL(40,36,50));
+            if (nsz==1) draw_text(x+16, ry+5, nm, 1, hdr? COL(150,95,30) : COL(40,36,50));
             else draw_text(x+16, ry+2, nm, 2, hdr? COL(150,95,30) : COL(40,36,50));
         }
         else if (st==7){
@@ -97,10 +103,10 @@ static void draw_mall_panel(int st){
             int bid = bn_row_id(i);
             int hdr = (bid==BN_HDR_WANTED || bid==BN_HDR_LEDGER);
             u32 nc = (bid==BN_BOUNTY)? COL(150,50,40) : hdr? COL(150,95,30) : COL(40,36,50);
-            if (G.ui_compact) draw_text(x+16, ry+5, nm, 1, nc);
+            if (nsz==1) draw_text(x+16, ry+5, nm, 1, nc);
             else draw_text(x+16, ry+2, nm, 2, nc);
         }
-        else if (G.ui_compact) draw_text(x+16, ry+5, nm, 1, COL(40,36,50));
+        else if (nsz==1) draw_text(x+16, ry+5, nm, 1, COL(40,36,50));
         else draw_text(x+16, ry+2, nm, 2, COL(40,36,50));
         if (st==3 && (bud_stage[G.store_pi]==2 || bud_stage[G.store_pi]==4)){
             // a live swatch beside each coat — the rainbow one cycles
@@ -123,19 +129,22 @@ static void draw_mall_panel(int st){
         rect_fill(x+w-6, ty2, 3, th, COL(190,60,40));
     }
     int by = y+h-40;
-    int bh = G.ui_compact? 24 : 20;
+    int bh = 24;   // v1.30 (audit C2): was 20 on desktop, whose one-line
+                   // blurb then ran past the box border — the box is two
+                   // lines tall on every layout now (it grows downward,
+                   // clear of the footer), and the blurb wraps like the
+                   // compact path always did.
     rect_fill(x+8, by-4, w-16, bh, COL(240,232,205));
     rect_line(x+8, by-4, w-16, bh, COL(198,164,84));
     rect_fill(x+8, by-4, 3, bh, COL(190,60,40));
-    if (G.ui_compact){
-        char bb[128]; scpy(bb, station_blurb(st, sel, me), 128);
-        int cut=-1; for (int i=0; bb[i] && i<34; i++) if (bb[i]==' ') cut=i;
-        if (cut>0 && bb[cut+1]){ bb[cut]=0;
-            draw_text(x+14, by+1, bb, 1, COL(80,66,44));
-            draw_text(x+14, by+12, bb+cut+1, 1, COL(80,66,44));
-        } else draw_text(x+14, by+2, bb, 1, COL(80,66,44));
-    }
-    else draw_text(x+14, by+2, station_blurb(st, sel, me), 1, COL(80,66,44));
+    { char bb[128]; scpy(bb, station_blurb(st, sel, me), 128);
+      int maxc = (w-30)/8;   // size-1 glyphs that fit inside the box
+      int blen=0; while (bb[blen]) blen++;
+      int cut=-1; for (int i=0; bb[i] && i<maxc; i++) if (bb[i]==' ') cut=i;
+      if (cut>0 && bb[cut+1] && blen>maxc){ bb[cut]=0;
+          draw_text(x+14, by+1, bb, 1, COL(80,66,44));
+          draw_text(x+14, by+12, bb+cut+1, 1, COL(80,66,44));
+      } else draw_text(x+14, by+2, bb, 1, COL(80,66,44)); }
     if (pay_active) draw_text_center(x+w/2, y+h-13, "COUNTING CARCASSES...", 1, COL(190,60,40));
     else if (G.store_msg_t>0) draw_text_center(x+w/2, y+h-13, G.store_msg, 1, COL(60,140,60));
     else if (G.ui_compact){ if (hint_dev()==DEV_TOUCH) draw_text_center(x+w/2, y+h-13, "TAP A ROW - TAP AGAIN TO SELECT", 1, COL(88,76,54));

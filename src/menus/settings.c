@@ -35,6 +35,12 @@ static void settings_reset(void){
 }
 static void settings_input(void){
     if (G.set_capture){
+        // v1.30 (audit T1): capture read physical keys only — a pad-only
+        // player who entered it (A on a binding row) had NO way out
+        // short of a keyboard, and a touch player could wander in by
+        // double-tapping a row. Pad B / Back and a tap now CANCEL the
+        // capture without binding anything.
+        if (((IN.pad_edges>>ACT_INTERACT)&1) || ((IN.pad_edges>>ACT_ESC)&1) || IN.tapped){ G.set_capture=0; return; }
         // the next physical key pressed becomes the binding (ESC cancels)
         if (g_raw_edges){
             if (raw_edge(PK_ESC)) G.set_capture=0;
@@ -80,7 +86,11 @@ static void render_settings(void){
     rect_fill(0,0,VW,VH,COL(24,22,38));
     ui_panel(104, 4, 432, 330);   // v1.24 panel chrome, grown to hold the comfort rows
     draw_text_center(VW/2, 10, "SETTINGS", 3, COL(255,214,64));
-    draw_text_center(VW/2, 38, hint_dev()==DEV_PAD? "STICK/DPAD CHOOSE - LEFT/RIGHT ADJUSTS - A SELECTS" : (hint_dev()==DEV_TOUCH? "TAP A ROW - TAP AGAIN TO CHANGE IT" : "ARROWS CHOOSE - LEFT/RIGHT ADJUSTS - SPACE REBINDS"), 1, COL(160,230,255));
+    { char hb[96]; char *q=hb;   // v1.30 (audit F14): the keyboard half names the real FIRE bind, not a hard-coded SPACE
+      if (hint_dev()==DEV_PAD) q=sappend(q, "STICK/DPAD CHOOSE - LEFT/RIGHT ADJUSTS - A SELECTS");
+      else if (hint_dev()==DEV_TOUCH) q=sappend(q, "TAP A ROW - TAP AGAIN TO CHANGE IT");
+      else { q=sappend(q, "ARROWS CHOOSE - LEFT/RIGHT ADJUSTS - "); q=sappend(q, key_name(G.bind[ACT_FIRE])); q=sappend(q, " REBINDS"); }
+      *q=0; draw_text_center(VW/2, 38, hb, 1, COL(160,230,255)); }
     { static const char *CN[4] = { "MUSIC VOLUME", "SOUND FX VOLUME", "MUTE ALL", "SCREEN SHAKE" };
       for (int i=0;i<SET_BIND0;i++){
         int ry=set_row_y(i);
@@ -117,7 +127,7 @@ static void render_settings(void){
         }
     }
     if (G.set_capture)
-        draw_text_center(VW/2, 344, "PRESS ANY KEY FOR THE HIGHLIGHTED ACTION - ESC CANCELS", 1, COL(255,240,150));
+        draw_text_center(VW/2, 344, hint_dev()==DEV_PAD? "PRESS ANY KEY FOR THE HIGHLIGHTED ACTION - B CANCELS" : (hint_dev()==DEV_TOUCH? "PRESS ANY KEY FOR THE HIGHLIGHTED ACTION - TAP CANCELS" : "PRESS ANY KEY FOR THE HIGHLIGHTED ACTION - ESC CANCELS"), 1, COL(255,240,150));
     else if (pad_mode())
         draw_text_center(VW/2, 344, "GAMEPAD: STICK/DPAD MOVE - A FIRE - B INTERACT - X WALL - START PAUSE", 1, COL(140,150,170));
     else { char b[80]; char *q=b; q=sappend(q, key_name(G.bind[ACT_INTERACT]));

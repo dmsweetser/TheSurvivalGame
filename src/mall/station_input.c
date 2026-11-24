@@ -22,7 +22,11 @@ static void srcterm_input(int pi, int up, int down, int activate);   // mall/src
 static void station_input(int pi, int st, int up, int down, int activate){
     if (st==9){ srcterm_input(pi, up, down, activate); return; }   // THE SOURCE terminal runs its own views
     if (st==0){ store_input(pi, up, down, activate); return; }
-    if (st==4){ if (activate) G.bowl[pi].act=1; return; }   // Bug Bowl runs on its own input
+    // Bug Bowl runs on its own input. v1.30 (audit D1): a tap throws too —
+    // the lanes run in GS_STORE, where no touch zones are claimed, so
+    // before this the early return swallowed every tap and a touch player
+    // could not aim, throw, or leave except via the shell X button.
+    if (st==4){ if (activate || (pi==G.my_id && IN.tapped)) G.bowl[pi].act=1; return; }
     // WHALES ONLY code entry: the local player is typing/pasting a code
     if (st==1 && pi==G.my_id && whale_code_mode[pi]){
         for (int i=0;i<IN.typed_n;i++){
@@ -43,12 +47,24 @@ static void station_input(int pi, int st, int up, int down, int activate){
               if (whale_bs_hold[pi]>21 && (whale_bs_hold[pi]%3)==0 && whale_code_len[pi]>0)
                   whale_code_buf[pi][--whale_code_len[pi]]=0;
           } else whale_bs_hold[pi]=0; }
-        if (IN.enter_pressed){
+        // v1.30 (audit F1): the footer has always told pad players
+        // "A - REDEEM" — honour it: the select action redeems too, not
+        // just Enter. The typed_n guard keeps a letter-rebound FIRE key
+        // from redeeming mid-typing (its edge arrives with the letter).
+        if ((IN.enter_pressed || IN.select_pressed) && IN.typed_n==0){
             int sku = whale_redeem(whale_code_buf[pi]);
             whale_code_mode[pi]=0;
             if (sku>=0){ whale_grant(sku); store_note("UNLOCKED! IT IS ON THE COUNTER."); sfx(11); }
             else { store_note("THAT CODE DOES NOT CHECK OUT"); sfx(16); }
         } else if (IN.esc_pressed){ whale_code_mode[pi]=0; sfx(5); }
+        // v1.30 (audit H4): a tap outside the panel cancels code entry,
+        // like every other panel's tap-outside — touch had no way out
+        // but the shell X button.
+        else if (IN.tapped){
+            int w2 = G.ui_compact? 308 : STORE_W;
+            int x2 = G.ui_compact? G.view_x0 + (G.view_w - w2)/2 : STORE_X;
+            if (IN.tap_x<x2-6 || IN.tap_x>x2+w2+6 || IN.tap_y<STORE_Y-6 || IN.tap_y>STORE_Y+STORE_H+6){ whale_code_mode[pi]=0; sfx(5); }
+        }
         return;
     }
     int *selp = (G.p2_slot>=0 && pi==G.p2_slot)? &G.store_sel2 : &G.store_sel;

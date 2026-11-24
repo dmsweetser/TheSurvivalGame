@@ -646,6 +646,9 @@ static void srct_prompt_input(int pi, int s, int up, int down, int activate){
 static void srct_build_input(int pi, int s, int up, int down, int activate){
     (void)activate;
     if (IN.esc_pressed || raw_edge(PK_ESC)){ srct_swallow[s]=1; srct_view[s]=SRV_BROWSE; return; }
+    // v1.30 (audit F3): a tap goes back too — the footer promises it for
+    // touch, which otherwise had no way out of this view but the shell X.
+    if (pi==G.my_id && IN.tapped){ srct_swallow[s]=1; srct_view[s]=SRV_BROWSE; return; }
     if (up && srct_build_scroll[s]>0) srct_build_scroll[s]--;
     if (down) srct_build_scroll[s]++;
     // v1.27: drag scrolls the (wrapped) log, 16px display rows
@@ -775,7 +778,16 @@ static void srct_draw_browser(int s, int x, int y, int w, int h){
     }
     srct_draw_note(s, x, y+h-20, w);
     if (!srct_note[s][0])
-        draw_text_center_fit(x+w/2, y+h-20, w-16, hint_dev()==DEV_PAD? "D-PAD + A - OPEN    B - BUILD" : hint_dev()==DEV_TOUCH? "TAP - OPEN    DRAG - SCROLL" : "ARROWS + SPACE - OPEN    B - BUILD    R - RESET", 1, COL(140,170,150));
+        // v1.30 (audit F2/F14): the pad footer used to promise "B - BUILD" —
+        // B is a physical-keyboard shortcut (raw_edge) and on a pad it
+        // closes the panel; the pad's build path is the [ BUILD ] row.
+        // The keyboard half now names the player's actual FIRE bind
+        // instead of a hard-coded SPACE.
+        { char fb[96]; char *q=fb;
+          if (hint_dev()==DEV_PAD) q=sappend(q, "D-PAD + A - OPEN");
+          else if (hint_dev()==DEV_TOUCH) q=sappend(q, "TAP - OPEN    DRAG - SCROLL");
+          else { q=sappend(q, "ARROWS + "); q=sappend(q, key_name(G.bind[ACT_FIRE])); q=sappend(q, " - OPEN    B - BUILD    R - RESET"); }
+          *q=0; draw_text_center_fit(x+w/2, y+h-20, w-16, fb, 1, COL(140,170,150)); }
 }
 static void srct_draw_editor(int s, int x, int y, int w, int h){
     const char *p = srct_file[s]>=0? src_path(srct_file[s]) : "";
@@ -897,7 +909,7 @@ static void srct_draw_build(int s, int x, int y, int w, int h){
         draw_text_center_fit(x+w/2, y+150, w-16, "RUN THE DESKTOP APP, OPEN THIS TERMINAL,", 1, COL(215,240,220));
         draw_text_center_fit(x+w/2, y+166, w-16, "AND CHOOSE BUILD - IT COMPILES AND SERVES", 1, COL(215,240,220));
         draw_text_center_fit(x+w/2, y+182, w-16, "YOUR PAGE FROM ITS OWN WINDOW.", 1, COL(215,240,220));
-        draw_text_center_fit(x+w/2, y+h-20, w-16, "ESC - BACK", 1, COL(140,170,150));
+        draw_text_center_fit(x+w/2, y+h-20, w-16, hint_dev()==DEV_PAD? "BACK - BACK" : hint_dev()==DEV_TOUCH? "TAP - BACK" : "ESC - BACK", 1, COL(140,170,150));
         return;
     }
     int st = plat_srcbuild_state();
@@ -939,7 +951,7 @@ static void srct_draw_build(int s, int x, int y, int w, int h){
           }
           drow += segs;
       } }
-    draw_text_center_fit(x+w/2, y+h-20, w-16, "UP/DOWN - SCROLL LOG    ESC - BACK", 1, COL(140,170,150));
+    draw_text_center_fit(x+w/2, y+h-20, w-16, hint_dev()==DEV_PAD? "D-PAD - SCROLL LOG    BACK - BACK" : hint_dev()==DEV_TOUCH? "DRAG - SCROLL LOG    TAP - BACK" : "UP/DOWN - SCROLL LOG    ESC - BACK", 1, COL(140,170,150));
 }
 static void srct_draw_tune(int s, int x, int y, int w, int h){
     const char *p = srct_file[s]>=0? src_path(srct_file[s]) : "";
@@ -975,7 +987,9 @@ static void srct_draw_tune(int s, int x, int y, int w, int h){
     if (!srct_can_edit(G.store_pi))
         draw_text_center_fit(x+w/2, y+h-36, w-16, "EDITING NEEDS A KEYBOARD - VIEW ONLY", 1, COL(255,214,130));
     srct_draw_note(s, x, y+h-20, w);
-    if (!srct_note[s][0])
+    // v1.30 (audit F3): the type-a-value instruction only makes sense for
+    // a viewer who can edit — a view-only pad player was told to type.
+    if (!srct_note[s][0] && srct_can_edit(G.store_pi))
         draw_text_center_fit(x+w/2, y+h-20, w-16, "TYPE A NEW VALUE, THEN APPLY - IT GOES LIVE AT ONCE", 1, COL(140,170,150));
 }
 static void draw_srcterm_panel(void){

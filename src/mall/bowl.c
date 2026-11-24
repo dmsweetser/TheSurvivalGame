@@ -210,6 +210,18 @@ static void bowl_update(int pi, float dt){
     switch (bw->phase){
     case 0: { int ax=bowl_axis(pi);
               bw->thrower_x = fclamp(bw->thrower_x + ax*150.0f*dt, -52.0f, 52.0f);
+              // v1.30 (audit D1): touch aim — a held finger drags the
+              // thrower along the lane. The lanes run in GS_STORE, where
+              // no touch zones are claimed, so read the raw points and
+              // invert the draw's own mapping (centre + thrower_x*KX).
+              if (pi==G.my_id && G.p2_slot<0){
+                  for (int i=0;i<6;i++) if (IN.tp[i].active){
+                      int bcx = G.view_x0 + (G.view_w>0? G.view_w : VW)/2;
+                      float bkx = G.ui_compact? 1.15f : 1.5f;
+                      bw->thrower_x = fclamp((IN.tp[i].x - bcx)/bkx, -52.0f, 52.0f);
+                      break;
+                  }
+              }
               if (act){ bw->phase=1; bw->angle=-0.42f; bw->angle_dir=1; sfx(6); } } break;
     case 1: bw->angle += bw->angle_dir*1.15f*dt;   // kid-paced meters: the aim
             if (bw->angle>0.42f){ bw->angle=0.42f; bw->angle_dir=-1; }   // sweep and the

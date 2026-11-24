@@ -89,7 +89,7 @@ static void plat_update(int pi, float dt, const BwIn *in){
         S->plat_selt += dt;
         if (l_edge && S->plat_pick > 1){ S->plat_pick--; sfx(1); }
         if (r_edge && S->plat_pick < b->plat_done + 1){ S->plat_pick++; sfx(1); }
-        if (in->sel && S->plat_selt > 0.35f){
+        if ((in->sel || in->interact) && S->plat_selt > 0.35f){   // v1.30 (audit H7): a DRAG tap arrives as interact — it confirms too (its only other path was a hidden drag-up)
             S->plat_sel = 0;
             plat_load_level(pi, S->plat_pick);
             { char *q=S->note; q=sappend(q, "LEVEL "); q=sapp_int(q, S->plat_lvl); q=sappend(q, " - "); q=sappend(q, REGION_NAME[S->plat_region]); q=sappend(q, ". ");

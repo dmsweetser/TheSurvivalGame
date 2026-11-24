@@ -342,7 +342,7 @@ typedef struct {
     BWHack roam[BW_ROAMN];
     int defeated[64], defeated_n;
     float grace_t, sleep_t, note_t;
-    int slept, log_open, log_sel, buff, site_cur;
+    int slept, log_open, log_sel, log_prevk, buff, site_cur;   // log_prevk: v1.30 — DRAG nav edges inside the story log
     int bw_menu, bw_msel;   // the Start-menu inside Banzai World: 0 off, 1 menu, 2 controls panel
     int from_arcade, arc_cab;   // this trip began at an Arcade cabinet (Nov 10): exits return there
     char note[72];

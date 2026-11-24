@@ -4,8 +4,8 @@
 
 // ---------------------------------------------------------------------------
 static void draw_controls_panel(int vx, int vy, int vw2, int vh2, int ctx){
-    static const char *CTX_NAME[10] = { "THE MEADOW + THE MALL", "STORY + FREE PLAY", "ENTRANCES", "SUPER BUDDY RUN", "BUDDY CRAFT", "BUG BOWL", "TANK RESCUE", "SUPER BUDDY CART", "WAR!", "MORDOR FUN RUN" };
-    if (ctx<0 || ctx>9) ctx = 0;
+    static const char *CTX_NAME[11] = { "THE MEADOW + THE MALL", "STORY + FREE PLAY", "ENTRANCES", "SUPER BUDDY RUN", "BUDDY CRAFT", "BUG BOWL", "TANK RESCUE", "SUPER BUDDY CART", "WAR!", "MORDOR FUN RUN", "CASTLE" };
+    if (ctx<0 || ctx>10) ctx = 0;
     const char *act[10]; const char *btn[10]; int n=0;
     static char mv[40], spr[8], pau[8], btnstore[10][24];
     if (hint_dev()==DEV_PAD) scpy(mv, "STICK / DPAD", 40);
@@ -13,7 +13,9 @@ static void draw_controls_panel(int vx, int vy, int vw2, int vh2, int ctx){
     else move_key_str(mv);
     scpy(spr, hint_dev()==DEV_PAD? "LT" : key_name(G.bind[ACT_SPRINT]), 8);
     scpy(pau, lbla(H_PAUSE), 8);
-    const char *back = hint_dev()==DEV_PAD? "START" : (hint_dev()==DEV_TOUCH? "THE MALL DOOR" : "ESC");
+    // v1.30 (audit F10): Banzai leaving is the exit action — on a pad
+    // that is the BACK button, not START (START opens the Start menu).
+    const char *back = hint_dev()==DEV_PAD? "BACK" : (hint_dev()==DEV_TOUCH? "THE MALL DOOR" : "ESC");
     // ROW copies the button label NOW: key_name() returns a shared
     // static buffer, so storing its pointer across calls would leave
     // every row showing the LAST key looked up (INTERACT read as F).
@@ -57,6 +59,14 @@ static void draw_controls_panel(int vx, int vy, int vw2, int vh2, int ctx){
       case 6:
         CTL_ROW("DRIVE", mv);
         CTL_ROW("FIRE THE CANNON", lbl_fire());
+        CTL_ROW("SWITCH CANNON", lbl_wall());
+        CTL_ROW("LEAVE", back);
+        break;
+      case 10:
+        // CASTLE (v1.30, audit F9): the panel used to fall through to
+        // Tank Rescue's context — a "FIRE THE CANNON" row for buttons
+        // Castle never reads. Castle reads movement and the exit alone.
+        CTL_ROW("MOVE", mv);
         CTL_ROW("LEAVE", back);
         break;
       case 7:
@@ -99,7 +109,14 @@ static void draw_controls_panel(int vx, int vy, int vw2, int vh2, int ctx){
         draw_text(x+16, ry, act[i], 1, COL(228,232,238));
         draw_text(x+w-16-text_w(btn[i],1), ry, btn[i], 1, COL(255,220,90));
     }
-    draw_text_center(x+w/2, y+h-15, pad_mode()? "B / START - BACK" : (mobile_ui()? "TAP ANYWHERE - BACK" : "ESC / SPACE - BACK"), 1, COL(140,150,170));
+    // v1.30 (audit F16/F14): branch on the VIEWING player's device (a
+    // split-screen P2 is always pad and could be shown keyboard text),
+    // and name the player's real FIRE bind instead of a hard SPACE.
+    { char fb[64]; char *q=fb;
+      if (hint_dev()==DEV_PAD) q=sappend(q, "B / START - BACK");
+      else if (hint_dev()==DEV_TOUCH) q=sappend(q, "TAP ANYWHERE - BACK");
+      else { q=sappend(q, "ESC / "); q=sappend(q, key_name(G.bind[ACT_FIRE])); q=sappend(q, " - BACK"); }
+      *q=0; draw_text_center(x+w/2, y+h-15, fb, 1, COL(140,150,170)); }
 }
 
 static void render_pause(void){
@@ -144,7 +161,11 @@ static void render_pause(void){
     { char b[56]; char *q=b; q=sappend(q, "SAVES TO SLOT "); q=sapp_int(q, G.slot);
       q=sappend(q, " - YOUR HAT IS SAFE HERE.");
       draw_text_center(VW/2, 264, b, 1, COL(150,160,185)); }
-    draw_text_center(VW/2, 282, pad_mode()? "STICK/DPAD + A - START ALSO RESUMES" : (mobile_ui()? "TAP A ROW - TAP SAVE + QUIT TWICE" : "ARROWS + SPACE - ESC RESUMES"), 1, COL(140,150,170));
+    { char fb[80]; char *q=fb;
+      if (pad_mode()) q=sappend(q, "STICK/DPAD + A - START ALSO RESUMES");
+      else if (mobile_ui()) q=sappend(q, "TAP A ROW - TAP SAVE + QUIT TWICE");
+      else { q=sappend(q, "ARROWS + "); q=sappend(q, key_name(G.bind[ACT_FIRE])); q=sappend(q, " - ESC RESUMES"); }
+      *q=0; draw_text_center(VW/2, 282, fb, 1, COL(140,150,170)); }
 }
 static float over_stack[MAXSTACK];
 static int over_stack_n=0;
