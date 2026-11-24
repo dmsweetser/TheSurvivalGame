@@ -2,11 +2,13 @@
 // Unity-build piece: #included by survival.c in a fixed order (see the map there).
 // Split from mall.c lines 2250-2388 in the Nov 2026 fine-grained refactor; code unchanged.
 
-#define SET_ROWS 19   // 4 comfort + 14 actions + RESET DEFAULTS
+#define SET_ROWS 20   // 4 comfort + 14 actions + RESET DEFAULTS + BACK (v1.31, audit P9/H11: a tappable way out)
 #define SET_BIND0 4   // first key-binding row
 static int set_row_y(int i){
-    if (i<SET_BIND0) return 54 + i*15;
-    return 134 + (i-SET_BIND0)*13;
+    // v1.31: rows sit 2px tighter so the BACK row fits above the
+    // footer line without growing the panel
+    if (i<SET_BIND0) return 50 + i*14;
+    return 124 + (i-SET_BIND0)*12;
 }
 static void comfort_changed(int row){
     // feedback at the NEW level: a click for the SFX row itself, and
@@ -68,8 +70,9 @@ static void settings_input(void){
             if (IN.tap_y>=ry-3 && IN.tap_y<=ry+10){
                 if (i==G.set_sel){
                     if (i<SET_BIND0) comfort_bump(i);
-                    else if (i<SET_ROWS-1) G.set_capture=1;
-                    else settings_reset();
+                    else if (i==SET_ROWS-1){ G.state=GS_MENU; }   // v1.31 (audit P9/H11): the BACK row — tap it (twice, like every row) to leave
+                    else if (i==SET_ROWS-2) settings_reset();
+                    else G.set_capture=1;
                 } else G.set_sel=i;
                 return;
             }
@@ -78,8 +81,9 @@ static void settings_input(void){
     if (IN.esc_pressed || IN.interact_pressed){ G.state=GS_MENU; return; }
     if (IN.select_pressed){
         if (G.set_sel<SET_BIND0) comfort_bump(G.set_sel);
-        else if (G.set_sel<SET_ROWS-1) G.set_capture=1;
-        else settings_reset();
+        else if (G.set_sel==SET_ROWS-1){ G.state=GS_MENU; }   // v1.31: the BACK row, on select too
+        else if (G.set_sel==SET_ROWS-2) settings_reset();
+        else G.set_capture=1;
     }
 }
 static void render_settings(void){
@@ -111,25 +115,32 @@ static void render_settings(void){
             draw_text(490-text_w(val,1), ry, val, 1, tc);
         }
       } }
-    draw_text_center(VW/2, 120, "KEY BINDINGS", 1, COL(255,214,64));
+    draw_text_center(VW/2, 112, "KEY BINDINGS", 1, COL(255,214,64));
     for (int i=SET_BIND0;i<SET_ROWS;i++){
         int ry=set_row_y(i);
         int sel = (i==G.set_sel);
         if (sel) rect_fill(120, ry-2, 400, 13, COL(255,205,40));
         u32 tc = sel? COL(30,26,44) : COL(235,238,245);
-        if (i<SET_ROWS-1){
+        if (i<SET_ROWS-2){
             draw_text(150, ry, act_name(i-SET_BIND0), 1, tc);
             const char *kn = (sel && G.set_capture)? "PRESS A KEY..." : key_name(G.bind[i-SET_BIND0]);
             draw_text(490-text_w(kn,1), ry, kn, 1, tc);
-        } else {
+        } else if (i==SET_ROWS-2) {
             draw_text(150, ry, "RESET DEFAULTS", 1, tc);
             draw_text(490-text_w("WASD + SPACE E F P SHIFT",1), ry, "WASD + SPACE E F P SHIFT", 1, tc);
+        } else {
+            draw_text(150, ry, "BACK", 1, tc);   // v1.31 (audit P9/H11): the exit row
+            draw_text(490-text_w("TO THE MENU",1), ry, "TO THE MENU", 1, tc);
         }
     }
     if (G.set_capture)
         draw_text_center(VW/2, 344, hint_dev()==DEV_PAD? "PRESS ANY KEY FOR THE HIGHLIGHTED ACTION - B CANCELS" : (hint_dev()==DEV_TOUCH? "PRESS ANY KEY FOR THE HIGHLIGHTED ACTION - TAP CANCELS" : "PRESS ANY KEY FOR THE HIGHLIGHTED ACTION - ESC CANCELS"), 1, COL(255,240,150));
-    else if (pad_mode())
-        draw_text_center(VW/2, 344, "GAMEPAD: STICK/DPAD MOVE - A FIRE - B INTERACT - X WALL - START PAUSE", 1, COL(140,150,170));
+    else if (pad_mode()){
+        // v1.31 (audit P4/F20a): the summary names the WHOLE pad —
+        // Y (bean), LB/RB (weapons), LT (sprint) and Back were missing
+        draw_text_center(VW/2, 330, "GAMEPAD: STICK/DPAD MOVE - A FIRE - B INTERACT - X WALL - Y BEAN", 1, COL(140,150,170));
+        draw_text_center(VW/2, 342, "LB / RB WEAPONS - LT SPRINT - BACK EXITS - START PAUSE", 1, COL(140,150,170));
+    }
     else { char b[80]; char *q=b; q=sappend(q, key_name(G.bind[ACT_INTERACT]));
       q=sappend(q, " - BACK TO MENU (ARROW KEYS ALWAYS WORK FOR MOVING)");
       draw_text_center(VW/2, 344, b, 1, COL(140,150,170)); }

@@ -236,7 +236,16 @@ static void war_pad_update(int pi, const float *ax, u32 pe, u32 held, float dt){
 static void war_pause_input(int pi, float dt){
     if (pi==G.my_id){
         if (IN.tapped){ IN.tapped=0; war_pause_tap(pi, IN.tap_x, IN.tap_y); }
-        if (IN.weapon_key>=1 && IN.weapon_key<=3){ int k=IN.weapon_key; IN.weapon_key=0; war_pause_pick(pi, k-1); }
+        if (IN.weapon_key>=1 && IN.weapon_key<=3){ int k=IN.weapon_key; IN.weapon_key=0; BWS[pi].war_pause_sel = k-1; war_pause_pick(pi, k-1); }
+        // v1.31 (audit P7/H6): arrow navigation alongside the digits —
+        // Up/Down walk the selection (the renderer highlights it) and
+        // Enter or the FIRE bind confirms. The confirm reads the
+        // keyboard's own edges only: the pad's A already picks
+        // through war_pad_pause's cursor below, and select_pressed
+        // would double-fire it.
+        if (IN.menu_up){ BWS[pi].war_pause_sel = (BWS[pi].war_pause_sel+2)%3; sfx(6); }
+        if (IN.menu_down){ BWS[pi].war_pause_sel = (BWS[pi].war_pause_sel+1)%3; sfx(6); }
+        if (IN.enter_pressed || raw_edge(G.bind[ACT_FIRE])) war_pause_pick(pi, BWS[pi].war_pause_sel);
     }
     { const float *ax; u32 pe, held; war_pad_src(pi, &ax, &pe, &held); war_pad_pause(pi, ax, pe, dt); }
 }
@@ -296,7 +305,7 @@ static void war_guest_update(int pi, float dt, const BwIn *in){
         }
         return;
     }
-    if (in->exit_){ HS->war_pause=1; HS->war_pause_by=pi; sfx(6); return; }
+    if (in->exit_){ HS->war_pause=1; HS->war_pause_by=pi; HS->war_pause_sel=0; sfx(6); return; }   // v1.31: the keyboard selection starts on RESUME here too
     war_view_exchange(HS, S);
     war_command_input(pi, dt, in);
     war_view_exchange(HS, S);

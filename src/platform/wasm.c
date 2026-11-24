@@ -149,49 +149,8 @@ __attribute__((export_name("set_mobile"))) void exp_set_mobile(int on){
     IN.mobile_boot = on? 1:0;   // touch-first device: hide key-binding UI
 }
 __attribute__((export_name("touch_point"))) void exp_touch_point(int id, int x, int y, int phase){
-    IN.touch_seen=1; IN.touch_last=IN.dev_t+0.001f;
-    if (phase==0){   // finger down: claim a slot, note d-pad zone/buttons
-        for (int i=0;i<6;i++) if (!IN.tp[i].active){
-            IN.tp[i].active=1; IN.tp[i].id=id;
-            IN.tp[i].x=IN.tp[i].x0=x; IN.tp[i].y=IN.tp[i].y0=y;
-            IN.tp[i].age=0; IN.tp[i].moved=0; IN.tp[i].zone=0;
-            if (G.state==GS_PLAY){
-                // WAR! (bw_mode 8) draws no main-game touch buttons,
-                // so its screens must not claim their zones: the
-                // SKIRMISH button sits under the FIRE/USE zones and
-                // its taps were eaten whole (v1.27, Daniel). Zone 0
-                // here means the touch stays a plain tap/drag, which
-                // is all WAR! ever reads.
-                int z = (G.my_id>=0 && G.bud[G.my_id].in_bw && G.bud[G.my_id].bw_mode==8)? 0 : tp_zone_at(x, y);
-                if (z==9){ IN.tp[i].zone=9; IN.tp_wall_edge=1; }        // WALL: both schemes
-                else if (z==7){ IN.tp[i].zone=7; IN.tp_wpn_edge=1; }   // WPN: both schemes
-                else if (G.touch_ctl==1){
-                    if (z==5 || z==6){                  // a button
-                        IN.tp[i].zone = z;
-                        if (z==6) IN.tp_act_edge=1;
-                    } else {                            // anywhere else: the joystick
-                        IN.tp[i].zone = 8; IN.tp[i].ax = x; IN.tp[i].ay = y;
-                    }
-                }
-            }
-            return;
-        }
-        return;
-    }
-    for (int i=0;i<6;i++) if (IN.tp[i].active && IN.tp[i].id==id){
-        if (phase==1){
-            IN.tp[i].x=x; IN.tp[i].y=y;
-            if (x-IN.tp[i].x0>14 || IN.tp[i].x0-x>14 || y-IN.tp[i].y0>14 || IN.tp[i].y0-y>14) IN.tp[i].moved=1;
-        } else {   // finger up: a quick, still tap (or an unmoved stick touch) is a tap
-            if ((IN.tp[i].zone==0 || IN.tp[i].zone==8) && !IN.tp[i].moved && IN.tp[i].age<0.4f){
-                IN.tap_x=x; IN.tap_y=y; IN.tapped=1;
-            }
-            IN.tp[i].active=0;
-        }
-        return;
-    }
+    core_touch_point(id, x, y, phase);   // v1.31: the body lives in the core now (input/touch.c) — the native backends feed their mouse through the same function
 }
-
 __attribute__((export_name("autostart"))) void exp_autostart(void){
     // This page was served by a native host's built-in web server: skip
     // the menu and join that host's game directly. The host is whoever
@@ -673,6 +632,7 @@ __attribute__((export_name("dbg_warcur"))) int exp_dbg_warcur(void){ int id = G.
 __attribute__((export_name("dbg_warbarhl"))) int exp_dbg_warbarhl(void){ int id = G.my_id>=0? G.my_id : 0; return BWS[id].war_barhl; }
 __attribute__((export_name("dbg_warbarcap"))) int exp_dbg_warbarcap(void){ int id = G.my_id>=0? G.my_id : 0; if (!BWS[id].war_barcap) return 0; return BWS[id].war_barhl_row? 2 : 1; }   // v1.20: bar capture — 0 none, 1 captured on the options/list row, 2 captured on the category row
 __attribute__((export_name("dbg_warpause"))) int exp_dbg_warpause(void){ int id = G.my_id>=0? G.my_id : 0; return BWS[id].war_pause; }   // v1.17: the battle pause menu is up
+__attribute__((export_name("dbg_warpsel"))) int exp_dbg_warpsel(void){ int id = G.my_id>=0? G.my_id : 0; return BWS[id].war_pause_sel; }   // v1.31: the battle pause's keyboard selection (audit P7 checks)
 __attribute__((export_name("dbg_warregion"))) int exp_dbg_warregion(void){ int id = G.my_id>=0? G.my_id : 0; return BWS[id].war_region; }   // v1.17: the region the current battle is for
 __attribute__((export_name("dbg_warsnap"))) int exp_dbg_warsnap(void){ int id = G.my_id>=0? G.my_id : 0; return war_snap_on[id]; }   // v1.17: a battle snapshot is parked for this player
 __attribute__((export_name("dbg_warsksnap"))) int exp_dbg_warsksnap(void){ int id = G.my_id>=0? G.my_id : 0; return war_snap_sk_on[id]; }   // v1.29: a SKIRMISH snapshot is parked for this player

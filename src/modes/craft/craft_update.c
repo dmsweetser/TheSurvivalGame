@@ -49,6 +49,13 @@ static void craft_update(int pi, float dt, const BwIn *in){
         if (!S->craft_search && pi==G.my_id){
             for (int i=0;i<IN.typed_n;i++) if (IN.typed[i]=='/'){ S->craft_search = 1; break; }
         }
+        // v1.31 (audit P8/H10): a pad player has no "/" key — the
+        // pad's X button starts the search instead. Inside this menu
+        // X (the WALL action) otherwise only closes it; the press
+        // that OPENS the search must not read as that close, so it
+        // is remembered and the close check below spares it.
+        int search_started = 0;
+        if (!S->craft_search && pi==G.my_id && ((IN.pad_edges>>ACT_WALL)&1)){ S->craft_search = 1; search_started = 1; }
         if (S->craft_search){
             if (pi==G.my_id){
                 for (int i=0;i<IN.typed_n;i++){
@@ -110,7 +117,7 @@ static void craft_update(int pi, float dt, const BwIn *in){
             return;
         }
         if ((in->sel || in->interact) && !typed_now && rows[S->craft_sel]>=0) craft_do(pi, rows[S->craft_sel]);
-        if (in->exit_ || in->wall){ S->craft_menu=0; S->craft_search=0; }
+        if ((in->exit_ || in->wall) && !search_started){ S->craft_menu=0; S->craft_search=0; }   // v1.31: the pad press that STARTED the search is not also its close
         S->craft_prevk = in->keys;
         return;
     }

@@ -82,27 +82,35 @@ static void render_help(void){
           draw_text_center(VW/2, VH-24, b, 1, COL(160,230,255)); }
         return;
     }
-    char mv[40], l0[96], l1[96], l2[96], l3[96], l4[96], l5[96];
+    char mv[40], l0[96], l1[96], l2[96], l3[96], l4[96], l5[96], l6[96];
     scpy(l5, mobile_ui()? "CO-OP: A DESKTOP APP HOSTS - PHONES JOIN IN A BROWSER."
                         : "CO-OP: THE APP HOSTS - FRIENDS JOIN FROM A BROWSER.", 96);
+    // v1.31 (audit P2/F17): the device block is six lines now — the
+    // Backfire Bean is explained on EVERY variant (it never was), and
+    // both touch variants explain weapon switching (WPN button and
+    // the weapon chips). The page starts 4px higher to hold the
+    // extra line clear of the footer.
     if (pad_mode()){
         scpy(l0, "STICK OR D-PAD - MOVE. YOU FACE THE WAY YOU MOVE,", 96);
         scpy(l1, "AND YOU FIRE THE WAY YOU FACE. A - FIRE + SELECT.", 96);
         scpy(l2, "LB / RB - WEAPONS - X WALL - LT SPRINT - START PAUSE", 96);
         scpy(l3, "B - ENTER AND LEAVE THE STORE. A PICKS, B BACKS OUT.", 96);
         scpy(l4, "TWO PADS PLUGGED IN? FLIP ON 2P CO-OP IN THE MENU.", 96);
+        scpy(l6, "Y - BACKFIRE BEAN: SQUEEZE HIM, PBBBT - HOME IN A FLASH.", 96);
     } else if (mobile_ui() && G.touch_ctl){
         scpy(l0, "PUSH YOUR LEFT THUMB TO STEER WITH THE", 96);
         scpy(l1, "STICK. YOU FIRE THE WAY YOU FACE.", 96);
-        scpy(l2, "HOLD FIRE TO SHOOT. THE WALL BUTTON BUILDS", 96);
-        scpy(l3, "A WALL FROM 3 CARCASSES. BY THE STORE,", 96);
-        scpy(l4, "TAP USE TO GO IN - OR TAP THE STORE ITSELF.", 96);
+        scpy(l2, "HOLD FIRE TO SHOOT. WPN - OR A TAP ON A WEAPON", 96);
+        scpy(l3, "CHIP - SWITCHES WEAPONS. WALL BUILDS A WALL.", 96);
+        scpy(l4, "BY THE STORE, TAP USE TO GO IN - OR TAP IT.", 96);
+        scpy(l6, "TAP THE BEAN READOUT - PBBBT, STRAIGHT HOME.", 96);
     } else if (mobile_ui()){
         scpy(l0, "DRAG TO MOVE. YOU FACE THE WAY YOU DRAG,", 96);
         scpy(l1, "AND YOU FIRE THE WAY YOU FACE AS YOU GO.", 96);
         scpy(l2, "TAP WALL TO BUILD A WALL FROM 3 CARCASSES.", 96);
-        scpy(l3, "WALK TO THE BUG MALL AND TAP TO GO IN.", 96);
+        scpy(l3, "WPN SWITCHES WEAPONS - OR TAP A WEAPON CHIP.", 96);
         scpy(l4, "IN THE SHOPS: TAP A ROW, TAP IT AGAIN TO BUY.", 96);
+        scpy(l6, "TAP THE BEAN READOUT - PBBBT, STRAIGHT HOME.", 96);
     } else {
     move_key_str(mv);
     { char *q=l0; q=sappend(q, mv); q=sappend(q, " / ARROWS - MOVE. YOU FACE THE WAY YOU MOVE,"); }
@@ -112,9 +120,10 @@ static void render_help(void){
       q=sappend(q, key_name(G.bind[ACT_SPRINT])); q=sappend(q, " SPRINT - "); q=sappend(q, key_name(G.bind[ACT_PAUSE])); q=sappend(q, " PAUSE (1P)"); }
     { char *q=l3; q=sappend(q, key_name(G.bind[ACT_INTERACT])); q=sappend(q, " - ENTER AND LEAVE THE STORE. REBIND KEYS IN SETTINGS."); }
     scpy(l4, "ON MOBILE: DRAG TO MOVE + SHOOT. TAP SELECTS + BUYS.", 96);
+    scpy(l6, "6 - BACKFIRE BEAN: SQUEEZE HIM, PBBBT - HOME IN A FLASH.", 96);
     }
     const char *lines[] = {
-        l0, l1, l2, l3, l4,
+        l0, l1, l2, l3, l4, l6,
         "",
         "SQUASH BUGS: THEIR CARCASSES LAND ON YOUR HEAD.",
         "YOUR HAT IS YOUR WALLET - AND IT SLOWS YOU DOWN.",
@@ -140,7 +149,7 @@ static void render_help(void){
         "A CALMER GAME - AND ZEN RUNS SET NO RECORDS.",
     };
     for (int i=0;i<(int)(sizeof(lines)/sizeof(lines[0]));i++)
-        draw_text_center(VW/2, 48+i*10, lines[i], 1, COL(225,230,240));
+        draw_text_center(VW/2, 44+i*10, lines[i], 1, COL(225,230,240));
     if (pad_mode()) draw_text_center(VW/2, VH-24, "B - PAGE 2: THE MALL", 1, COL(160,230,255));
     else if (mobile_ui()) draw_text_center(VW/2, VH-24, "TAP - PAGE 2: THE MALL", 1, COL(160,230,255));
     else { char b[48]; char *q=b; q=sappend(q, key_name(G.bind[ACT_INTERACT])); q=sappend(q, " - PAGE 2: THE MALL");

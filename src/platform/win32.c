@@ -231,10 +231,26 @@ static void key_bit(int vk, int down){
     int pk = vk_pk(vk);
     if (pk>=0){ if (down) g_raw |= (1ULL<<pk); else g_raw &= ~(1ULL<<pk); }
 }
+// --- mouse (v1.31, audit P5/H1): the left button rides the core's
+// touch channel under the web shell's reserved pointer id (4242),
+// exactly as the shell's own mouse path does — a click is a tap and
+// a drag is a drag. Client pixels scale to the 640x360 stage.
+static int g_mouse_down=0, g_mouse_x=0, g_mouse_y=0;
+static void win_mouse(LPARAM lp, int phase){
+    RECT rc; GetClientRect(g_hwnd, &rc);
+    int w = rc.right-rc.left, h = rc.bottom-rc.top; if (w<1) w=1; if (h<1) h=1;
+    int x = (short)(lp & 0xFFFF), y = (short)((lp>>16) & 0xFFFF);
+    int gx = x*640/w, gy = y*360/h;
+    if (gx<0) gx=0; if (gx>639) gx=639; if (gy<0) gy=0; if (gy>359) gy=359;
+    g_mouse_x=gx; g_mouse_y=gy;
+    if (phase>=0) core_touch_point(4242, gx, gy, phase);
+}
 static LRESULT CALLBACK wndproc(HWND hw, UINT msg, WPARAM wp, LPARAM lp){
-    (void)lp;
     switch (msg){
     case WM_DESTROY: PostQuitMessage(0); return 0;
+    case WM_LBUTTONDOWN: g_mouse_down=1; win_mouse(lp, 0); return 0;
+    case WM_MOUSEMOVE: win_mouse(lp, g_mouse_down? 1 : -1); return 0;
+    case WM_LBUTTONUP: g_mouse_down=0; win_mouse(lp, 2); return 0;
     case WM_KEYDOWN: { int pk = vk_pk((int)wp);
         if (pk>=0 && !((g_raw>>pk)&1)) IN.edges_in |= (1ULL<<pk);   // one edge per physical press
         key_bit((int)wp, 1); return 0; }
@@ -335,6 +351,7 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR cmd, int show){
         }
         if (!running) break;
         IN.raw = g_raw;
+        IN.mx = g_mouse_x; IN.my = g_mouse_y; IN.mdown = g_mouse_down;   // v1.31: the mouse fields, live at last
         win32_pad_poll();
         frame();
         plat_audio_pump();

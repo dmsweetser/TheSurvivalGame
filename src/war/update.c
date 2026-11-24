@@ -41,7 +41,7 @@ static void war_update(int pi, float dt, const BwIn *in){
     for (int i=0;i<24;i++) if (S->war_ft[i]>0) S->war_ft[i] -= dt;
     for (int t=0;t<S->war_tn;t++) if (S->war_tdeadt[t] > 0) S->war_tdeadt[t] -= dt;   // scorch marks fade
     if (in->exit_){   // Esc in a battle (v1.17): the pause menu — RESUME / RESTART / SAVE & QUIT — not an abandonment
-        S->war_pause=1; S->war_pause_by=pi; sfx(6);   // feat 13: the pauser is recorded — the pause is theirs to drive
+        S->war_pause=1; S->war_pause_by=pi; S->war_pause_sel=0; sfx(6);   // feat 13: the pauser is recorded — the pause is theirs to drive. v1.31: the keyboard selection starts on RESUME
         return;
     }
     war_command_input(pi, dt, in);   // feat 13: the drag / key-pan / tap / weapon-key / pad section, extracted verbatim — see war_command_input above (the old P2 centre-tap line is gone there, deliberately)

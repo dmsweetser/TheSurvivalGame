@@ -19,7 +19,13 @@
 #define TP_WALL_CY 198
 // zones: 5 = FIRE, 6 = USE, 7 = WPN, 8 = joystick, 9 = WALL
 static int tp_zone_at(int x, int y){
-    int dx=x-TP_FIRE_CX, dy=y-TP_FIRE_CY; if (dx*dx+dy*dy<38*38) return 5;
+    // v1.31 (audit P1): the FIRE disc is a claimable button in DRAG
+    // only inside Tank Rescue, whose DRAG deck is drawn now (war/
+    // touch.c). Everywhere else DRAG keeps its rule — no FIRE zone;
+    // the finger steers, and steering fires (top-down modes) or does
+    // nothing (Tank, whose drag-steer never fired it).
+    int tank = (G.state==GS_PLAY && G.my_id>=0 && G.bud[G.my_id].in_bw && G.bud[G.my_id].bw_mode==5);
+    int dx=x-TP_FIRE_CX, dy=y-TP_FIRE_CY; if (dx*dx+dy*dy<38*38) return (tank || G.touch_ctl==1)? 5 : 0;
     dx=x-TP_ACT_CX; dy=y-TP_ACT_CY; if (dx*dx+dy*dy<26*26) return 6;
     dx=x-TP_WPN_CX; dy=y-TP_WPN_CY; if (dx*dx+dy*dy<22*22) return 7;
     dx=x-TP_WALL_CX; dy=y-TP_WALL_CY; if (dx*dx+dy*dy<26*26) return 9;
@@ -30,6 +36,80 @@ static int tp_zone_at(int x, int y){
         return dy>0? 2:1;
     }
     return 0;
+}
+// the one touch entry point, in the core since v1.31 (audit P5):
+// the web shell's touch_point export forwards here, and the native
+// backends feed their mouse through it too — a click is a tap and a
+// drag is a drag on every build, exactly as the web shell's mouse
+// path has always behaved. (Before v1.31 this body lived in the
+// wasm platform piece, where no native build could reach it.)
+static void core_touch_point(int id, int x, int y, int phase){
+    IN.touch_seen=1; IN.touch_last=IN.dev_t+0.001f;
+    if (phase==0){   // finger down: claim a slot, note d-pad zone/buttons
+        for (int i=0;i<6;i++) if (!IN.tp[i].active){
+            IN.tp[i].active=1; IN.tp[i].id=id;
+            IN.tp[i].x=IN.tp[i].x0=x; IN.tp[i].y=IN.tp[i].y0=y;
+            IN.tp[i].age=0; IN.tp[i].moved=0; IN.tp[i].zone=0;
+            if (G.state==GS_PLAY){
+                // WAR! (bw_mode 8) draws no main-game touch buttons,
+                // so its screens must not claim their zones: the
+                // SKIRMISH button sits under the FIRE/USE zones and
+                // its taps were eaten whole (v1.27, Daniel). Zone 0
+                // here means the touch stays a plain tap/drag, which
+                // is all WAR! ever reads.
+                int z = (G.my_id>=0 && G.bud[G.my_id].in_bw && G.bud[G.my_id].bw_mode==8)? 0 : tp_zone_at(x, y);
+                if (z==9){ IN.tp[i].zone=9; IN.tp_wall_edge=1; }        // WALL: both schemes
+                else if (z==7){ IN.tp[i].zone=7; IN.tp_wpn_edge=1; }   // WPN: both schemes
+                else if (G.touch_ctl==1){
+                    if (z==5 || z==6){                  // a button
+                        IN.tp[i].zone = z;
+                        if (z==6) IN.tp_act_edge=1;
+                    } else {                            // anywhere else: the joystick
+                        IN.tp[i].zone = 8; IN.tp[i].ax = x; IN.tp[i].ay = y;
+                    }
+                }
+                else if (z==5){ IN.tp[i].zone = 5; }   // v1.31: DRAG inside Tank Rescue — tp_zone_at returns 5 in DRAG only there, where the deck's FIRE button is real
+            }
+            return;
+        }
+        return;
+    }
+    for (int i=0;i<6;i++) if (IN.tp[i].active && IN.tp[i].id==id){
+        if (phase==1){
+            IN.tp[i].x=x; IN.tp[i].y=y;
+            if (x-IN.tp[i].x0>14 || IN.tp[i].x0-x>14 || y-IN.tp[i].y0>14 || IN.tp[i].y0-y>14) IN.tp[i].moved=1;
+        } else {   // finger up: a quick, still tap (or an unmoved stick touch) is a tap
+            if ((IN.tp[i].zone==0 || IN.tp[i].zone==8) && !IN.tp[i].moved && IN.tp[i].age<0.4f){
+                IN.tap_x=x; IN.tap_y=y; IN.tapped=1;
+            }
+            IN.tp[i].active=0;
+        }
+        return;
+    }
+}
+// the main game's touch pause chip (v1.31, audit P6/H2): Banzai World
+// has had its START chip since v1.26; the meadow/mall never did, so a
+// touch player's only pause was the web shell's own ESC button. Same
+// chip, drawn by render_hud under the zone pill (the status card owns
+// the top-left here; the spot is clear of the weapon chips' strip,
+// the TIME line and the home arrow's orbit), live exactly where the
+// pause menu itself can open: effectively solo — offline, or hosting
+// with no guests yet (a client never pauses; a host with guests
+// connected can't either, the GS_PAUSE case bounces straight back).
+#define MG_CHIP_X 244
+#define MG_CHIP_Y 92
+#define MG_CHIP_W 72
+#define MG_CHIP_H 24
+static int mg_pause_chip_live(void){
+    if (!mobile_ui() || pad_mode()) return 0;
+    if (G.state!=GS_PLAY || G.my_id<0) return 0;
+    { int vw2 = G.view_w>0? G.view_w : VW; if (vw2<VW) return 0; }   // split view: full-screen furniture only (the BW chip's rule)
+    if (G.bud[G.my_id].in_bw) return 0;              // Banzai World has its own chip
+    if (G.net_mode==NET_CLIENT) return 0;
+    if (G.net_mode==NET_HOST){
+        for (int i=0;i<MAXP;i++) if (G.p[i].connected && !G.p[i].is_local) return 0;
+    }
+    return 1;
 }
 static void disc_fill(int cx, int cy, int r, u32 c){
     for (int dy=-r; dy<=r; dy++){ int dx=(int)fsqrt((float)(r*r-dy*dy)); rect_fill(cx-dx, cy+dy, dx*2, 1, c); }
@@ -54,7 +134,10 @@ static void touch_update(float dt){
         if (!IN.tp[i].active) continue;
         IN.tp[i].age += dt;
         if (G.touch_ctl==0){
-            if (!IN.touch_down && IN.tp[i].zone!=9 && IN.tp[i].zone!=7){ IN.touch_x=IN.tp[i].x; IN.touch_y=IN.tp[i].y; IN.touch_down=1; }
+            // v1.31: zone 5 exists in DRAG only on Tank Rescue's FIRE
+            // button — that finger is ON a button, never steering
+            if (!IN.touch_down && IN.tp[i].zone!=9 && IN.tp[i].zone!=7 && IN.tp[i].zone!=5){ IN.touch_x=IN.tp[i].x; IN.touch_y=IN.tp[i].y; IN.touch_down=1; }
+            else if (G.state==GS_PLAY && IN.tp[i].zone==5){ IN.tp_held |= 32; IN.touch_keys |= K_FIRE; }
         } else if (G.state==GS_PLAY && IN.tp[i].zone==5){
             IN.tp_held |= 32; IN.touch_keys |= K_FIRE;
         } else if (G.state==GS_PLAY && IN.tp[i].zone==8){

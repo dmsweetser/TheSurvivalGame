@@ -223,6 +223,31 @@ function T(name, cond, extra) { if (cond) { pass++; } else { fail++; console.log
   T('quitting returns to the arcade', (await call('dbg_inarcade')) === 1 && (await call('dbg_bwmode')) === -1,
     'arc=' + (await call('dbg_inarcade')) + ' mode=' + (await call('dbg_bwmode')));
 
+  // ============ v1.31 (audit P1): TANK RESCUE on the DRAG scheme ============
+  // v1.30 left this mode unplayable on DRAG: no deck was drawn and
+  // the scheme had no fire input at all (its entry note said so).
+  // v1.31 draws the deck — FIRE bottom-right, the WALL-captioned
+  // weapon switch above it — and the fire button is a live touch
+  // zone in this mode only. Fresh cabinet entry, touch + DRAG.
+  await call('set_mobile', 1);
+  await call('dbg_touchctl', 0);   // DRAG
+  await call('dbg_tp', -256, -11898); await sleep(200);
+  await key('KeyE', 250);
+  T('tank panel reopens for the DRAG run', (await poll('dbg_arcgate', v => v === 1, 3000)) === 1, await call('dbg_arcgate'));
+  await key('Space', 300);
+  T('TANK RESCUE relaunched on DRAG', (await poll('dbg_bwmode', v => v === 5, 4000)) === 5, await call('dbg_bwmode'));
+  T('fresh run: cannon selected, pouch full', (await call('dbg_tankwep')) === 0 && (await call('dbg_tankgren')) === 8,
+    'wep=' + (await call('dbg_tankwep')) + ' gren=' + (await call('dbg_tankgren')));
+  // hold the drawn FIRE button (582,278): a shell leaves the cannon
+  await call('touch_point', 61, 582, 278, 0);
+  T('DRAG: holding the drawn FIRE button fires the cannon', (await poll('dbg_tankshells', v => v > 0, 3000)) > 0, await call('dbg_tankshells'));
+  await call('touch_point', 61, 582, 278, 2);
+  // tap the drawn WALL-captioned switch (582,198): weapon swaps
+  await call('touch_point', 62, 582, 198, 0); await sleep(120); await call('touch_point', 62, 582, 198, 2);
+  T('DRAG: tapping the drawn WALL button switches to grenades', (await poll('dbg_tankwep', v => v === 1, 3000)) === 1, await call('dbg_tankwep'));
+  await call('dbg_bwexit'); await sleep(300);
+  T('DRAG run exits back to the arcade', (await call('dbg_bwmode')) === -1, await call('dbg_bwmode'));
+
   console.log('tanktest: ' + pass + ' passed, ' + fail + ' failed');
   await browser.close();
   process.exit(fail ? 1 : 0);

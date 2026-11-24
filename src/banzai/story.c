@@ -513,6 +513,7 @@ typedef struct {
     // categorized command bar. war_bcat: -1 top level (categories),
     // 0 TRAIN, 1 BUILD, 2 DEFENSE. war_pause freezes the battle.
     int war_pause, war_bcat;
+    int war_pause_sel;   // v1.31: the battle pause's keyboard selection (arrows + confirm, alongside keys 1-3); runtime-only, reset every time the pause opens
     // WAR! LOCAL CO-OP COMMAND (v1.25 feat 13): two local players
     // command ONE battle — the battle lives in the OWNER's sim (who
     // launched it), the other commander is the GUEST. war_duo sits

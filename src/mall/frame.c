@@ -596,6 +596,16 @@ void frame(void){
                 for (int i=1;i<MAXP;i++) if (G.p[i].connected){
                     G.p[i].cur_keys = G.p[i].net_keys;
                 }
+            // v1.31 (audit P6/H2): a tap on the main game's pause
+            // chip is the same pause press — render_hud draws the
+            // chip wherever it is live (mg_pause_chip_live mirrors
+            // the conditions below), and the gate panels keep first
+            // claim on their taps.
+            if (G.state==GS_PLAY && IN.tapped && mg_pause_chip_live() &&
+                !bwgate[G.my_id] && !arcgate[G.my_id] &&
+                IN.tap_x>=MG_CHIP_X && IN.tap_x<MG_CHIP_X+MG_CHIP_W && IN.tap_y>=MG_CHIP_Y && IN.tap_y<MG_CHIP_Y+MG_CHIP_H){
+                IN.pause_pressed = 1; IN.tapped = 0;
+            }
             // pause whenever you're effectively solo (the sim simply
             // stops advancing): offline, or hosting with no guests yet
             if (G.state==GS_PLAY && !bwgate[G.my_id] && !arcgate[G.my_id] && !G.bud[G.my_id].in_bw && (G.net_mode==NET_OFF ||

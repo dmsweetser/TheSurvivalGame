@@ -681,11 +681,12 @@ static void war_render(int pi){
         const char *PLBL[3] = { "RESUME", "RESTART BATTLE", "SAVE & QUIT" };   // v1.29: a skirmish parks in its own slot now — the third choice saves for both battle kinds
         for (int n=0;n<3;n++){
             int by = war_pause_btn_y(py, n);
-            rect_fill(px+40, by, pw-80, 36, COL(38,44,60));
+            int selb = (n==S->war_pause_sel);   // v1.31: the keyboard selection, in the house selected-row colours (the BW Start menu's idiom)
+            rect_fill(px+40, by, pw-80, 36, selb? COL(255,205,40) : COL(38,44,60));
             rect_line(px+40, by, pw-80, 36, COL(198,164,84));
-            draw_text_center(px+pw/2, by+12, PLBL[n], 2, COL(240,244,250));
+            draw_text_center(px+pw/2, by+12, PLBL[n], 2, selb? COL(30,26,44) : COL(240,244,250));
         }
-        draw_text_center(px+pw/2, py+ph-16, hint_dev()==DEV_PAD? "A - PICK A CHOICE - B RESUMES" : (hint_dev()==DEV_TOUCH? "TAP A CHOICE" : "KEYS 1 / 2 / 3 - ESC RESUMES"), 1, COL(150,160,185));
+        draw_text_center(px+pw/2, py+ph-16, hint_dev()==DEV_PAD? "A - PICK A CHOICE - B RESUMES" : (hint_dev()==DEV_TOUCH? "TAP A CHOICE" : "ARROWS + ENTER - OR KEYS 1 / 2 / 3 - ESC RESUMES"), 1, COL(150,160,185));
     }
 }
 

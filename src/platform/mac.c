@@ -51,6 +51,12 @@ double tsg_now(void){ return plat_now(); }
 void tsg_web_start(void){ web_server_start(); }
 void tsg_synth_render(float *out, int n, double now){ synth_render(out, n, now); }
 void tsg_set_raw(int lo, int hi){ IN.raw = (u64)(u32)lo | ((u64)(u32)hi<<32); }
+// mouse (v1.31, audit P5/H1): mac_main.c's view forwards mouse events
+// here — the touch channel feeds the core under the web shell's
+// reserved pointer id (4242), a click is a tap and a drag is a drag,
+// and the position feeds the core's mouse fields.
+void tsg_touch_point(int id, int x, int y, int phase){ core_touch_point(id, x, y, phase); }
+void tsg_mouse_pos(int x, int y, int down){ IN.mx = x; IN.my = y; IN.mdown = down; }
 void tsg_press(int pk){ if (pk>=0 && pk<64) IN.edges_in |= (1ULL<<pk); }
 void tsg_act(int a, int down){
     if (a<0 || a>=ACT_COUNT) return;

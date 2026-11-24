@@ -122,6 +122,17 @@ static void blit_scale(void){
         }
     }
 }
+// --- mouse (v1.31, audit P5/H1): the left button rides the core's
+// touch channel under the web shell's reserved pointer id (4242),
+// exactly as the shell's own mouse path does — a click is a tap and
+// a drag is a drag. Window pixels scale to the 640x360 stage.
+static int g_mouse_down=0, g_mouse_x=0, g_mouse_y=0;
+static void lin_mouse(int wx, int wy, int phase){
+    int gx = wx*640/WIN_W, gy = wy*360/WIN_H;
+    if (gx<0) gx=0; if (gx>639) gx=639; if (gy<0) gy=0; if (gy>359) gy=359;
+    g_mouse_x=gx; g_mouse_y=gy;
+    core_touch_point(4242, gx, gy, phase);
+}
 static int ks_pk(KeySym ks){
     if (ks>=XK_a && ks<=XK_z) return (int)(ks-XK_a);
     if (ks>=XK_A && ks<=XK_Z) return (int)(ks-XK_A);
@@ -229,7 +240,7 @@ int main(int argc, char **argv){
       XSetWMNormalHints(g_dpy, win, &h); }
     Atom wm_delete = XInternAtom(g_dpy, "WM_DELETE_WINDOW", 0);
     XSetWMProtocols(g_dpy, win, &wm_delete, 1);
-    XSelectInput(g_dpy, win, KeyPressMask|KeyReleaseMask|ExposureMask|StructureNotifyMask);
+    XSelectInput(g_dpy, win, KeyPressMask|KeyReleaseMask|ExposureMask|StructureNotifyMask|ButtonPressMask|ButtonReleaseMask|PointerMotionMask);
     XMapWindow(g_dpy, win);
     GC gc = XCreateGC(g_dpy, win, 0, 0);
     Visual *vis = DefaultVisual(g_dpy, screen);
@@ -250,6 +261,10 @@ int main(int argc, char **argv){
                 }
             }
             if (ev.type==ClientMessage && (Atom)ev.xclient.data.l[0]==wm_delete) running=0;
+            else if (ev.type==ButtonPress && ev.xbutton.button==1){ g_mouse_down=1; lin_mouse(ev.xbutton.x, ev.xbutton.y, 0); }
+            else if (ev.type==MotionNotify && g_mouse_down){ lin_mouse(ev.xmotion.x, ev.xmotion.y, 1); }
+            else if (ev.type==MotionNotify){ g_mouse_x=ev.xmotion.x*640/WIN_W; g_mouse_y=ev.xmotion.y*360/WIN_H; }
+            else if (ev.type==ButtonRelease && ev.xbutton.button==1){ g_mouse_down=0; lin_mouse(ev.xbutton.x, ev.xbutton.y, 2); }
             else if (ev.type==KeyPress || ev.type==KeyRelease){
                 int down = (ev.type==KeyPress);
                 char chbuf[8]; KeySym ks=0;
@@ -265,6 +280,7 @@ int main(int argc, char **argv){
         }
         if (!running) break;
         IN.raw = g_raw;
+        IN.mx = g_mouse_x; IN.my = g_mouse_y; IN.mdown = g_mouse_down;   // v1.31: the mouse fields, live at last
         linux_pad_poll();
         frame();
         blit_scale();

@@ -287,6 +287,15 @@ static void render_hud(void){
         }
         break;
       } }
+    // the pause chip (v1.31, audit P6/H2): Banzai World's START chip,
+    // brought home to the main game — under the zone pill, right of
+    // the status card. Tap side: frame() (mall/frame.c), gated by
+    // mg_pause_chip_live (input/touch.c).
+    if (mg_pause_chip_live()){
+        rect_fill(MG_CHIP_X, MG_CHIP_Y, MG_CHIP_W, MG_CHIP_H, COL(16,18,28)); rect_line(MG_CHIP_X, MG_CHIP_Y, MG_CHIP_W, MG_CHIP_H, COL(198,164,84));
+        rect_fill(MG_CHIP_X+8, MG_CHIP_Y+7, 3, 10, COL(255,214,64)); rect_fill(MG_CHIP_X+14, MG_CHIP_Y+7, 3, 10, COL(255,214,64));
+        draw_text(MG_CHIP_X+26, MG_CHIP_Y+8, "START", 1, COL(255,244,200));
+    }
     // WALL button (both touch schemes): throws down 3 carcasses as a wall.
     // It pulses once you're carrying enough to build one.
     if (mobile_ui() && !pad_mode()){

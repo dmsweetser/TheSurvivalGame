@@ -14,45 +14,65 @@ static void bw_draw_touch(int pi){
     if (b->bw_mode==8) return;                    // WAR! is tap-only: its command bar owns the bottom strip
     int vw2 = G.view_w>0? G.view_w : VW;
     if (vw2<VW) return;                           // split view: fixed buttons are full-screen furniture
-    const char *wl = (b->bw_mode==4)? "CRAFT" : (b->bw_mode==2)? "PATCH" : "WALL";
-    if (G.touch_ctl==0){                          // DRAG: the finger steers; one button is furniture enough
-        if (b->bw_mode==3 || b->bw_mode==5 || S->craft_menu) return;
+    // v1.31 (audit P3/F19): the deck captions ARE the prompt names —
+    // lbl2()'s touch words for the same buttons (FIRE / USE / WALL)
+    // in every mode and both schemes, so a prompt and the button it
+    // names can never disagree again. Button PRESENCE per mode is
+    // unchanged (Run has no USE and no WALL; Tank has no USE).
+    if (G.touch_ctl==0){                          // DRAG: the finger steers; one button is furniture enough — except in Tank Rescue
+        if (b->bw_mode==5){
+            // v1.31 (audit P1/F7 functional half): Tank Rescue's deck
+            // under DRAG — the same FIRE + weapon-switch buttons the
+            // STICK deck draws, live through the same zones (zone 5
+            // is claimable in DRAG inside Tank since v1.31; the WALL
+            // zone was always live here, just invisible until now).
+            tbtn_base(TP_FIRE_CX, TP_FIRE_CY, 34, (IN.tp_held&32)? COL(224,88,62):COL(158,54,46));
+            { u32 lc = COL(255,240,230); int gy = TP_FIRE_CY-6;
+              rect_fill(TP_FIRE_CX-1, gy-10, 3, 6, lc); rect_fill(TP_FIRE_CX-1, gy+5, 3, 6, lc);
+              rect_fill(TP_FIRE_CX-10, gy-1, 6, 3, lc); rect_fill(TP_FIRE_CX+5, gy-1, 6, 3, lc);
+              disc_fill(TP_FIRE_CX, gy, 2, lc); }
+            draw_text(TP_FIRE_CX-text_w("FIRE",1)/2, TP_FIRE_CY+14, "FIRE", 1, COL(255,240,230));
+            tbtn_base(TP_WALL_CX, TP_WALL_CY, 24, COL(62,56,86));
+            draw_text(TP_WALL_CX-text_w("WALL",1)/2, TP_WALL_CY-4, "WALL", 1, COL(255,244,200));
+            return;
+        }
+        if (b->bw_mode==3 || S->craft_menu) return;
         tbtn_base(TP_WALL_CX, TP_WALL_CY, 24, COL(62,56,86));
         { u32 br = COL(232,186,108);
           rect_fill(TP_WALL_CX-10, TP_WALL_CY-11, 9, 4, br); rect_fill(TP_WALL_CX+1, TP_WALL_CY-11, 9, 4, br);
           rect_fill(TP_WALL_CX-10, TP_WALL_CY-6, 6, 4, br);  rect_fill(TP_WALL_CX-3, TP_WALL_CY-6, 6, 4, br);
           rect_fill(TP_WALL_CX+4, TP_WALL_CY-6, 6, 4, br); }
-        draw_text(TP_WALL_CX-text_w(wl,1)/2, TP_WALL_CY+4, wl, 1, COL(255,244,200));
+        draw_text(TP_WALL_CX-text_w("WALL",1)/2, TP_WALL_CY+4, "WALL", 1, COL(255,244,200));
         return;
     }
-    // STICK: FIRE + USE + WALL, captioned per mode, plus the stick itself
-    const char *fl = "PICK", *ul = "TALK";
-    int have_wall = 1;
-    if (b->bw_mode==2){ fl="THROW"; ul="OPEN"; }
-    else if (b->bw_mode==3){ fl="JUMP"; ul=0; have_wall=0; }
-    else if (b->bw_mode==4){ fl="SWING"; ul="USE"; }
-    else if (b->bw_mode==5){ fl="FIRE"; ul=0; have_wall=0; }
+    // STICK: FIRE + USE + WALL (presence per mode as before; Tank's
+    // WALL-position weapon switch is DRAWN now — it was live but
+    // invisible, the other half of audit P1), plus the stick itself
+    int have_use = 1, have_wall = 1;
+    if (b->bw_mode==3){ have_use=0; have_wall=0; }
+    else if (b->bw_mode==5){ have_use=0; }
     if (!S->craft_menu){
         tbtn_base(TP_FIRE_CX, TP_FIRE_CY, 34, (IN.tp_held&32)? COL(224,88,62):COL(158,54,46));
         { u32 lc = COL(255,240,230); int gy = TP_FIRE_CY-6;
           rect_fill(TP_FIRE_CX-1, gy-10, 3, 6, lc); rect_fill(TP_FIRE_CX-1, gy+5, 3, 6, lc);
           rect_fill(TP_FIRE_CX-10, gy-1, 6, 3, lc); rect_fill(TP_FIRE_CX+5, gy-1, 6, 3, lc);
           disc_fill(TP_FIRE_CX, gy, 2, lc); }
-        draw_text(TP_FIRE_CX-text_w(fl,1)/2, TP_FIRE_CY+14, fl, 1, COL(255,240,230));
-        if (ul){
+        draw_text(TP_FIRE_CX-text_w("FIRE",1)/2, TP_FIRE_CY+14, "FIRE", 1, COL(255,240,230));
+        if (have_use){
             tbtn_base(TP_ACT_CX, TP_ACT_CY, 22, COL(56,92,62));
             { u32 lc = COL(230,255,235); int gy = TP_ACT_CY-3;
               tri_fill(TP_ACT_CX, gy-8, TP_ACT_CX-6, gy+1, TP_ACT_CX+6, gy+1, lc);
               rect_fill(TP_ACT_CX-2, gy+1, 5, 5, lc); }
-            draw_text(TP_ACT_CX-text_w(ul,1)/2, TP_ACT_CY+9, ul, 1, COL(230,255,235));
+            draw_text(TP_ACT_CX-text_w("USE",1)/2, TP_ACT_CY+9, "USE", 1, COL(230,255,235));
         }
         if (have_wall){
             tbtn_base(TP_WALL_CX, TP_WALL_CY, 24, COL(62,56,86));
-            { u32 br = COL(232,186,108);
+            if (b->bw_mode==5) draw_text(TP_WALL_CX-text_w("WALL",1)/2, TP_WALL_CY-4, "WALL", 1, COL(255,244,200));
+            else { u32 br = COL(232,186,108);
               rect_fill(TP_WALL_CX-10, TP_WALL_CY-11, 9, 4, br); rect_fill(TP_WALL_CX+1, TP_WALL_CY-11, 9, 4, br);
               rect_fill(TP_WALL_CX-10, TP_WALL_CY-6, 6, 4, br);  rect_fill(TP_WALL_CX-3, TP_WALL_CY-6, 6, 4, br);
-              rect_fill(TP_WALL_CX+4, TP_WALL_CY-6, 6, 4, br); }
-            draw_text(TP_WALL_CX-text_w(wl,1)/2, TP_WALL_CY+4, wl, 1, COL(255,244,200));
+              rect_fill(TP_WALL_CX+4, TP_WALL_CY-6, 6, 4, br);
+              draw_text(TP_WALL_CX-text_w("WALL",1)/2, TP_WALL_CY+4, "WALL", 1, COL(255,244,200)); }
         }
     }
     if (IN.joy_on){

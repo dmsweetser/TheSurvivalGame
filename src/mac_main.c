@@ -28,12 +28,15 @@ extern void   tsg_synth_render(float *out, int n, double now);
 extern void   tsg_set_raw(int lo, int hi);
 extern void   tsg_press(int pk);
 extern void   tsg_char(int c);
+extern void   tsg_touch_point(int id, int x, int y, int phase);   // v1.31: the mouse rides the core's touch channel
+extern void   tsg_mouse_pos(int x, int y, int down);
 
 // physical key ids — must match the game core (PK_*): A-Z = 0-25,
 // digits 0-9 = 26-35, UP/DOWN/LEFT/RIGHT = 36-39, SPACE = 40,
 // ENTER = 41, ESC = 42, SHIFT = 43, BACKSPACE = 44
 
 typedef struct { double x, y, w, h; } TSGRect;   // NSRect / CGRect layout
+typedef struct { double x, y; } TSGPoint;         // NSPoint layout (v1.31: mouseLocationInWindow:)
 
 // ---- CoreGraphics (prototypes declared by hand) ----
 typedef struct CGContext *CGContextRef;
@@ -104,6 +107,23 @@ static void audio_start(void){
 
 // ---- view: drawing + keyboard ----
 static CGContextRef g_bctx = 0;
+// mouse (v1.31): forwarded into the core through the touch channel
+// under the shell's reserved pointer id 4242. View coordinates are
+// points (1280x720) with a bottom-left origin; the stage is 640x360
+// with a top-left origin, so y flips. Phase -1 = move only.
+static void view_mouse(id self, SEL _cmd, id event, int phase, int down){
+    (void)self; (void)_cmd;
+    if (!event) return;
+    TSGPoint p = ((TSGPoint(*)(id, SEL))objc_msgSend)(event, sel_registerName("locationInWindow"));
+    int gx = (int)(p.x/2.0), gy = (int)((720.0 - p.y)/2.0);
+    if (gx<0) gx=0; if (gx>639) gx=639; if (gy<0) gy=0; if (gy>359) gy=359;
+    tsg_mouse_pos(gx, gy, down);
+    if (phase>=0) tsg_touch_point(4242, gx, gy, phase);
+}
+static void view_mouse_down(id self, SEL _cmd, id event){ view_mouse(self, _cmd, event, 0, 1); }
+static void view_mouse_dragged(id self, SEL _cmd, id event){ view_mouse(self, _cmd, event, 1, 1); }
+static void view_mouse_up(id self, SEL _cmd, id event){ view_mouse(self, _cmd, event, 2, 0); }
+static void view_mouse_moved(id self, SEL _cmd, id event){ view_mouse(self, _cmd, event, -1, 0); }
 static void view_draw(id self, SEL _cmd, TSGRect dirty){
     (void)_cmd; (void)dirty;
     if (!g_bctx){
@@ -219,6 +239,10 @@ int main(void){
     class_addMethod(viewCls, SEL_("drawRect:"), (IMP)view_draw, "v@:{CGRect={CGPoint=dd}{CGSize=dd}}");
     class_addMethod(viewCls, SEL_("keyDown:"), (IMP)view_key_down, "v@:@");
     class_addMethod(viewCls, SEL_("keyUp:"), (IMP)view_key_up, "v@:@");
+    class_addMethod(viewCls, SEL_("mouseDown:"), (IMP)view_mouse_down, "v@:@");      // v1.31: mouse input
+    class_addMethod(viewCls, SEL_("mouseDragged:"), (IMP)view_mouse_dragged, "v@:@");
+    class_addMethod(viewCls, SEL_("mouseUp:"), (IMP)view_mouse_up, "v@:@");
+    class_addMethod(viewCls, SEL_("mouseMoved:"), (IMP)view_mouse_moved, "v@:@");
     class_addMethod(viewCls, SEL_("acceptsFirstResponder"), (IMP)view_first_responder, "B@:");
     objc_registerClassPair(viewCls);
     // timer target subclass
@@ -248,6 +272,7 @@ int main(void){
     view = MSG1(id, view, "initWithFrame:", vr);
     g_view = view;
     MSG1(void, win, "setContentView:", view);
+    MSG1(void, win, "setAcceptsMouseMovedEvents:", (signed char)1);   // v1.31: hover positions reach the core
     MSG1(void, win, "makeFirstResponder:", view);
     MSG0(void, win, "center");
     MSG1(void, win, "makeKeyAndOrderFront:", (id)0);
