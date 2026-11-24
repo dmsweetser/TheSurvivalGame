@@ -351,6 +351,37 @@ the same day, and the Steam kit is a separate, untouched decision.
   closing in real time. Synced to the goals-files and
   handover packet copies. Nothing was submitted
   anywhere.
+- PACKET RESTAMPED 2026-11-24 to v1.31 ("EVERY BUTTON,
+  TOO" — one restamp past v1.30, at Daniel's
+  direction): `../TheSurvivalGame.aab` is now 2,441,390
+  bytes (md5 8352f529b54c13ead92cc8d8056cb5a1),
+  byte-identical to the GitHub v1.31 release AAB in the
+  handover folder, versionCode 31
+  / versionName "1.31", targetSdk 36, ZERO
+  uses-permission elements, and its embedded
+  `base/assets/index.html` is byte-identical
+  (md5 e5b5945d19acbb53ecac3ec0bc2c6e66) to the live
+  GitHub Pages build — FORMS.md's data-safety answers
+  stand unchanged. Still debug-key signed — the
+  dedicated upload keystore is still needed at
+  submission. LISTING.md copy revised for v1.30 (the
+  cross-control audit's Android touch fixes — the
+  Mall on DRAG, Bug Bowl touch throws — in the
+  revision log; no description change, the touch
+  claims already in the copy became true) and v1.31
+  (Tank Rescue on the DRAG touch deck, the main-game
+  touch pause chip, Craft search from a gamepad,
+  Settings' tappable exit, the Backfire Bean in
+  HOW TO PLAY) in Android-accurate terms only, the
+  touch passage grown one clause and trimmed
+  elsewhere to fit: full description
+  re-counted at 3,996 of 4,000 chars counting newlines
+  (3,951 excluding them); title 17/30 and short
+  description 64/80 unchanged. No screenshots
+  recaptured — neither version changed a depicted
+  scene. Synced to the goals-files and
+  handover packet copies. Nothing was submitted
+  anywhere.
 
 ## Daniel-only, in order
 

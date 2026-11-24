@@ -91,10 +91,28 @@ button only, never a held direction; the road gained
 powerups — health first and early, double damage,
 speed; and a WAR! skirmish in progress now saves and
 resumes like a campaign; the Mordor and WAR! passages
-below grew to match, trimmed elsewhere to fit). Character counts
+below grew to match, trimmed elsewhere to fit), and
+again for v1.30
+("EVERY BUTTON" — a full end-to-end audit of every
+control on every device; the Android-relevant fixes
+are touch ones: the Bug Mall answers the DRAG
+scheme's tap at last, Bug Bowl throws on touch, and
+prompts game-wide name the input actually in your
+hands; no passage below changed — the touch claims
+already in the copy simply became true), and again
+for v1.31
+("EVERY BUTTON, TOO" — the audit's nine proposals
+kept: Tank Rescue's cannon and weapon switch answer
+on the DRAG touch deck, a pause chip sits on the
+main game's touch screen, Buddy Craft search starts
+from a gamepad, Settings gained a tappable exit and
+HOW TO PLAY explains the Backfire Bean at last; the
+touch passage below grew one clause to say the Mall
+and every cabinet work on touch alone, trimmed
+elsewhere to fit). Character counts
 verified against Play limits (title ≤ 30, short
 description ≤ 80, full description ≤ 4,000).
-Copy describes the current build (v1.29, 2026-11-23) and only what the Android
+Copy describes the current build (v1.31, 2026-11-24) and only what the Android
 build actually contains — no Whales Only purchase links (buying
 is web-only; the Android build has none), no host co-op claims
 (hosting is a native-build feature).
@@ -148,12 +166,11 @@ ALWAYS SOMETHING NEW ON THE BOARD
 A First Shift card starts every new save, cabinet wins
 chase Medal Times, a Weekly Challenge rotates, and hat toppers
 crown your stack. The overworld follows your clock — dusk, night
-and dawn, with regional weather — and the music swells when
-bugs close in. Comfort settings cover volume,
-mute and screen shake.
+and dawn, with weather — and the music swells when
+bugs close in. Comfort settings cover volume and screen shake.
 
 TOUCH-FIRST ON ANDROID
-Full touch controls — Banzai World's Start menu included — plus keyboard and gamepad support. The Source Room's terminal is touch-friendly too — text wraps to fit, and you can scroll, tap and edit the source on the on-screen keyboard; changes persist. The whole game is offline, collects no data, shows no ads, and asks for zero permissions.
+Full touch controls — the Mall, every cabinet and Banzai World's Start menu work on touch alone — plus keyboard and gamepad support. The Source Room's terminal is touch-friendly too — text wraps to fit, and you can scroll, tap and edit on the on-screen keyboard; changes persist. The whole game is offline, collects no data, shows no ads, and asks for zero permissions.
 
 How heavy can your hat get?
 
