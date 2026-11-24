@@ -1,6 +1,6 @@
 {
-  "versionCode": 29,
-  "versionName": "1.29",
-  "apkUrl": "https://github.com/dmsweetser/TheSurvivalGame/releases/download/v1.29/TheSurvivalGame.apk",
-  "notes": "ON THE BUTTON: the Mordor swing answers the FIRE button again (it fired on its own when you ran north - fixed at the cause). The road now provides: health, weapon amplification and speed powerups stand along the way, collected by running over them. And WAR! skirmishes can be saved - park one, close the game, and resume it from the entry panel, beside your campaign battle, never instead of it."
+  "versionCode": 30,
+  "versionName": "1.30",
+  "apkUrl": "https://github.com/dmsweetser/TheSurvivalGame/releases/download/v1.30/TheSurvivalGame.apk",
+  "notes": "EVERY BUTTON: a full end-to-end audit of every control in the game - keyboard, gamepad, both touch schemes, mouse - across the meadow, the Mall, the Arcade and every cabinet. DRAG players are no longer trapped in the Mall, the Bug Bowl lanes answer taps, cabinet menus walk the way you press, Settings key-capture can be cancelled from any device, and prompts across the game name the button actually in your hands. No new features; nothing got harder or easier."
 }
