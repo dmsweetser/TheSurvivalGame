@@ -56,6 +56,7 @@ static void bw_enter_mode(int pi, int mode){
     else if (mode==7){ crt_enter(pi); }
     else if (mode==8){ war_enter(pi); }
     else if (mode==9){ mor_enter(pi); }
+    else if (mode==10){ S->scr_req = bw_scr_req[pi]; bw_scr_req[pi]=0; scr_enter(pi); }   // CRISPY DIRT (v1.35): the panel's difficulty / hot-seat request, consumed here and only here
     else { b->x = b->bw_x; b->y = b->bw_y; }
     b->in_bw = 1;   // the DEV stays parked at the gate in the mall
     if (mode==2 && S->ent_chap==2){ char *q=S->note; q=sappend(q, "DEEPER DOORS. LUMEN COMES WITH YOU. "); q=sappend(q, lbl_int()); q=sappend(q, " OPENS DOORS + DRAWERS."); *q=0; }
@@ -70,6 +71,8 @@ static void bw_enter_mode(int pi, int mode){
     else if (mode==8){ char *q=S->note; q=sappend(q, "WAR! "); q=sappend(q, hint_dev()==DEV_PAD? "PICK" : lbla(H_POINT)); q=sappend(q, " A REGION TO INVADE IT. CONQUER ALL EIGHT!"); *q=0; }
     else if (mode==9 && b->mor_on){ char *q=S->note; q=sappend(q, "MORDOR FUN RUN. A RUN IS ON THE ROAD - "); q=sapp_int(q, b->mor_dist/MOR_MOOSE_PX); q=sappend(q, " OF 1000 MOOSE BANKED."); *q=0; }
     else if (mode==9){ char *q=S->note; q=sappend(q, "MORDOR FUN RUN. THE SHIRE TO MORDOR: 1000 MOOSE. "); q=sappend(q, lbl_fire()); q=sappend(q, " SWINGS. MIND THE LOCALS."); *q=0; }
+    else if (mode==10 && S->scr_req==3){ char *q=S->note; q=sappend(q, "CRISPY DIRT. HOT-SEAT: PASS THE CONTROLS EACH TURN. BEST OF 3, NO XP - JUST GLORY."); *q=0; }
+    else if (mode==10){ char *q=S->note; q=sappend(q, "CRISPY DIRT. AIM THE CATAPULT, MIND THE WIND, LOB CARCASSES. BEST OF 3 ROUNDS."); *q=0; }
     else if (mode==1 && bw_chapter_done(b)) scpy(S->note, "PATCH DAY, EVERY DAY. THE VILLAGE REMEMBERS YOU.", 72);
     else if (mode==1 && bw_story_complete(b)) scpy(S->note, "BACK TO THE STORY. PATCHINA HAS A NEW LIST.", 72);
     else if (mode==1 && b->story_bits==(1<<0)) scpy(S->note, "STORY MODE. PATCH VILLAGE LIES NORTH-WEST.", 72);

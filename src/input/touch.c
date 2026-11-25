@@ -58,7 +58,7 @@ static void core_touch_point(int id, int x, int y, int phase){
                 // its taps were eaten whole (v1.27, Daniel). Zone 0
                 // here means the touch stays a plain tap/drag, which
                 // is all WAR! ever reads.
-                int z = (G.my_id>=0 && G.bud[G.my_id].in_bw && G.bud[G.my_id].bw_mode==8)? 0 : tp_zone_at(x, y);
+                int z = (G.my_id>=0 && G.bud[G.my_id].in_bw && (G.bud[G.my_id].bw_mode==8 || G.bud[G.my_id].bw_mode==10))? 0 : tp_zone_at(x, y);   // v1.35: CRISPY DIRT (mode 10) reads raw points + taps for its own gauges/FIRE, exactly like WAR! — the deck zones must not eat its presses
                 if (z==9){ IN.tp[i].zone=9; IN.tp_wall_edge=1; }        // WALL button
                 else if (z==7){ IN.tp[i].zone=7; IN.tp_wpn_edge=1; }   // WPN button
                 else if (z==5 || z==6){                  // a button (FIRE / USE)

@@ -238,6 +238,7 @@ typedef struct {
     int war_prog;                     // WAR! record: regions conquered (0..8); the world map unlocks region war_prog next, as wr
     int mor_done, mor_best;           // MORDOR FUN RUN records (v1.28): completions, best total time in seconds (0 = none); saved as mo/mb
     int mor_on, mor_dist, mor_mile, mor_hp, mor_secs, mor_lat;   // MORDOR FUN RUN: the in-progress run itself (v1.28) — on the road or not, distance along the route in world units, milestone banked (0..20), HP at save, elapsed seconds, lateral offset at save; saved packed as mu. The run lives here, not in BwSim, so leaving the cabinet / quitting / closing the browser all keep it.
+    int scr_champ;                    // CRISPY DIRT record (v1.35): 1 once a HARD solo match is won; saved as sc. The cabinet's bits/inventory are session-only and never saved — this plaque is all that persists, with the XP.
     int top_earned, top_worn;         // HAT TOPPERS (v1.25 feat 5): earned bitmask (bit id-1), worn topper id 0..8; saved as tp/tw
     float roll;                       // the pet rock's rolling angle
     float steady_t;                   // pet rock's ROCK STEADY: unhurtable while > 0

@@ -26,10 +26,14 @@
 // (was +328), and the south wall / floor dressing in draw_arcade
 // moved up the same 70px. Other cabinets and the north extent
 // are untouched. WAR!'s interact point is now (0, ARC_CY+242).
-static const int ARC_SX[8] = { -256, 0, 256, -256, 0, 256, 0, -256 };
-static const int ARC_ROWY[8] = { -166, -166, -166, 44, 44, 44, 184, 184 };
-static const char *ARC_NAME[8] = { "ENTRANCES", "SUPER BUDDY RUN", "BUDDY CRAFT", "TANK RESCUE", "CASTLE", "SUPER BUDDY CART", "WAR!", "MORDOR FUN RUN" };
-static const int ARC_MODE[8] = { 2, 3, 4, 5, 6, 7, 8, 9 };         // the bw_mode each cabinet launches
+static const int ARC_SX[9] = { -256, 0, 256, -256, 0, 256, 0, -256, 256 };
+static const int ARC_ROWY[9] = { -166, -166, -166, 44, 44, 44, 184, 184, 184 };
+static const char *ARC_NAME[9] = { "ENTRANCES", "SUPER BUDDY RUN", "BUDDY CRAFT", "TANK RESCUE", "CASTLE", "SUPER BUDDY CART", "WAR!", "MORDOR FUN RUN", "CRISPY DIRT" };
+static const int ARC_MODE[9] = { 2, 3, 4, 5, 6, 7, 8, 9, 10 };         // the bw_mode each cabinet launches
+// CRISPY DIRT (v1.35, Daniel): the ninth cabinet stands at the EAST
+// end of WAR!'s row (ARC_ROWY 184), the mirror of MORDOR's west-end
+// spot — no existing cabinet moves. Its interact point is
+// (256, ARC_CY+242), from the same +58 rule as its row-mates.
 // MORDOR FUN RUN (v1.28, Daniel): the eighth cabinet stands at the
 // WEST end of WAR!'s row (ARC_ROWY 184) — the row had the room, and
 // no existing cabinet moves from its v1.27 spot. Its interact point
@@ -39,9 +43,10 @@ static int arcgate[MAXP], arcgate_sel[MAXP], arc_cab[MAXP];   // the cabinet pan
 static int bw_arc_src[MAXP], bw_arc_cab[MAXP];         // pending arcade origin for bw_enter_mode
 static int bw_cas_shuffle_req[MAXP];                   // CASTLE SHUFFLE (v1.25 feat 7): the cabinet panel's pending mode-6 request
 static int bw_ent_ch2_req[MAXP];                       // DEEPER DOORS (v1.25 feat 11): the cabinet panel's pending mode-2 chapter request
+static int bw_scr_req[MAXP];                           // CRISPY DIRT (v1.35): the cabinet panel's pending mode-10 request — 0 EASY, 1 NORMAL, 2 HARD, 3 hot-seat 2P
 static int cabinet_at(Player *p){
     if (!p->in_arcade) return -1;
-    for (int s=0;s<8;s++){
+    for (int s=0;s<9;s++){
         float dx=p->x - ARC_SX[s], dy=p->y - (ARC_CY + ARC_ROWY[s] + 58);
         if (dx*dx + dy*dy < 74*74) return s;
     }
@@ -116,6 +121,9 @@ static void war_render(int pi);
 static void mor_enter(int pi);
 static void mor_update(int pi, float dt, const BwIn *in);
 static void mor_render(int pi);
+static void scr_enter(int pi);
+static void scr_update(int pi, float dt, const BwIn *in);
+static void scr_render(int pi);
 static void mor_hurt(int pi, int dmg);            // v1.28: the dbg_morhurt seam lands its staged damage through the real hurt path
 static void mor_set_test_total(int moose);        // v1.28: the dbg_mortotal seam (test-only route shortening; shipped play never sets it)
 static void mor_warp(int pi, int dist);           // v1.28: the dbg_morwarp seam (stand at a distance on the centreline; Tank's dbg_tankwarp precedent)
@@ -290,7 +298,7 @@ static void arcade_collide(Player *p){
     if (p->x < -356) p->x = -356; if (p->x > 356) p->x = 356;
     if (p->y < ARC_CY-164) p->y = ARC_CY-164;
     if (p->y > ARC_CY+258) p->y = ARC_CY+258;   // the room grew south for the WAR! row (Nov 15); v1.27: the row rose 70px and the clamp followed (+328 -> +258)
-    for (int s=0;s<8;s++){
+    for (int s=0;s<9;s++){
         float hx=66, hy0=ARC_CY + ARC_ROWY[s] + 8, hy1=ARC_CY + ARC_ROWY[s] + 40, rad=11;
         if (p->x > ARC_SX[s]-hx-rad && p->x < ARC_SX[s]+hx+rad && p->y > hy0-rad && p->y < hy1+rad){
             float dyr = (hy1+rad) - p->y, dyl = p->y - (hy0-rad);

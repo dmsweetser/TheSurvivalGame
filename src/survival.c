@@ -211,6 +211,8 @@
 // --- modes/mordor/ ---
 #include "modes/mordor/mordor.c"
 #include "modes/mordor/mordor_render.c"
+#include "modes/scorch/scorch.c"
+#include "modes/scorch/scorch_render.c"
 // --- war/ ---
 #include "war/units.c"
 #include "war/coop.c"

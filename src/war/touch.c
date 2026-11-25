@@ -12,6 +12,7 @@ static void bw_draw_touch(int pi){
     Buddy *b=&G.bud[pi]; BwSim *S=&BWS[pi];
     if (S->bat.active) return;                    // battles run on taps + menus
     if (b->bw_mode==8) return;                    // WAR! is tap-only: its command bar owns the bottom strip
+    if (b->bw_mode==10) return;                   // CRISPY DIRT (v1.35) draws its own gauges, chips and FIRE button
     int vw2 = G.view_w>0? G.view_w : VW;
     if (vw2<VW) return;                           // split view: fixed buttons are full-screen furniture
     // v1.31 (audit P3/F19): the deck captions ARE the prompt names —
@@ -81,7 +82,7 @@ static void bw_render(int pi){
     BwSim *S = &BWS[pi]; Buddy *b = &G.bud[pi];
     if (S->bw_menu){
         int vx=G.view_x0, vy=G.view_y0, vw2=G.view_w>0? G.view_w : VW, vh2=G.view_h>0? G.view_h : VH;
-        if (S->bw_menu==2){ draw_controls_panel(vx, vy, vw2, vh2, b->bw_mode<2? 1 : (b->bw_mode==5? 6 : (b->bw_mode==6? 10 : b->bw_mode))); return; }   // v1.30 (audit F9): Castle has its own context (10), not Tank's
+        if (S->bw_menu==2){ draw_controls_panel(vx, vy, vw2, vh2, b->bw_mode<2? 1 : (b->bw_mode==5? 6 : (b->bw_mode==6? 10 : (b->bw_mode==10? 11 : b->bw_mode)))); return; }   // v1.30 (audit F9): Castle has its own context (10), not Tank's; v1.35: CRISPY DIRT has its own (11)
         int pw=300, ph=140, px=vx+(vw2-pw)/2, py=vy+(vh2-ph)/2;
         blend_rect(vx, vy, vw2, vh2, COL(8,8,14), 120);
         rect_fill(px, py, pw, ph, COL(16,18,28)); rect_line(px, py, pw, ph, COL(198,164,84));

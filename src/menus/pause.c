@@ -4,8 +4,8 @@
 
 // ---------------------------------------------------------------------------
 static void draw_controls_panel(int vx, int vy, int vw2, int vh2, int ctx){
-    static const char *CTX_NAME[11] = { "THE MEADOW + THE MALL", "STORY + FREE PLAY", "ENTRANCES", "SUPER BUDDY RUN", "BUDDY CRAFT", "BUG BOWL", "TANK RESCUE", "SUPER BUDDY CART", "WAR!", "MORDOR FUN RUN", "CASTLE" };
-    if (ctx<0 || ctx>10) ctx = 0;
+    static const char *CTX_NAME[12] = { "THE MEADOW + THE MALL", "STORY + FREE PLAY", "ENTRANCES", "SUPER BUDDY RUN", "BUDDY CRAFT", "BUG BOWL", "TANK RESCUE", "SUPER BUDDY CART", "WAR!", "MORDOR FUN RUN", "CASTLE", "CRISPY DIRT" };
+    if (ctx<0 || ctx>11) ctx = 0;
     const char *act[10]; const char *btn[10]; int n=0;
     static char mv[40], spr[8], pau[8], btnstore[10][24];
     if (hint_dev()==DEV_PAD) scpy(mv, "STICK / DPAD", 40);
@@ -79,6 +79,25 @@ static void draw_controls_panel(int vx, int vy, int vw2, int vh2, int ctx){
         CTL_ROW("RUN THE ROAD", mv);
         CTL_ROW("ATTACK", lbl_fire());
         CTL_ROW("LEAVE (THE RUN WAITS FOR YOU)", back);
+        break;
+      case 11:
+        // CRISPY DIRT (v1.35): turn-based artillery — the rows name
+        // what the mode actually reads on each device.
+        if (hint_dev()==DEV_TOUCH){
+            CTL_ROW("SET ANGLE + POWER", "DRAG THE GAUGES / HOLD - +");
+            CTL_ROW("PICK A WEAPON", "TAP ITS CHIP");
+            CTL_ROW("FIRE", "THE BIG FIRE BUTTON");
+        } else if (hint_dev()==DEV_PAD){
+            CTL_ROW("SET ANGLE + POWER", "DPAD / STICK");
+            CTL_ROW("PICK A WEAPON", "LB / RB");
+            CTL_ROW("FIRE", lbl_fire());
+        } else {
+            CTL_ROW("SET ANGLE", "LEFT / RIGHT (HOLD TO SWEEP)");
+            CTL_ROW("SET POWER", "UP / DOWN (HOLD TO SWEEP)");
+            CTL_ROW("PICK A WEAPON", "TAB / W, OR 1 - 7");
+            CTL_ROW("FIRE", lbl_fire());
+        }
+        CTL_ROW("LEAVE (FORFEITS THE MATCH)", back);
         break;
       case 8:
         CTL_ROW("SELECT / ORDER", lbla(H_POINT));

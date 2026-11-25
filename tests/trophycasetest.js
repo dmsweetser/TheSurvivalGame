@@ -140,6 +140,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     ['CART CUPS', 'HOME -- - FAR --'],
     ['TANK RESCUE', 'NOT YET'],
     ['MORDOR FUN RUN', 'NOT YET'],
+    ['CRISPY DIRT', 'NOT YET'],
     ['ENTRANCES', 'NOT YET'],
     ['THE SUBFLOOR', 'NOT YET'],
     ['MEDALS + WALK OF FAME', ''],
@@ -215,6 +216,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     ['CART CUPS', 'HOME 1ST - FAR 1ST'],
     ['TANK RESCUE', 'LEVEL 6'],
     ['MORDOR FUN RUN', 'BEST 12:34'],
+    ['CRISPY DIRT', 'NOT YET'],
     ['ENTRANCES', 'OUT x2'],
     ['THE SUBFLOOR', 'B-14'],
     ['MEDALS + WALK OF FAME', ''],
@@ -231,11 +233,13 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   ], 'A');
   // v1.28: the MORDOR FUN RUN row joined the cabinet shelf after
   // TANK RESCUE, so every blurb index below it moved down one.
-  ok((await str('dbg_caseblurb', 12)).includes('CHAMP'), 'A: heaviest-hat blurb names the record holder', await str('dbg_caseblurb', 12));
-  ok((await str('dbg_caseblurb', 18)).includes('PUPPY'), 'A: buddy blurb names the species', await str('dbg_caseblurb', 18));
-  const trainBlurb = await str('dbg_caseblurb', 19);
+  // v1.35: the CRISPY DIRT row joined after MORDOR FUN RUN — the
+  // same +1 shift again for every blurb below it.
+  ok((await str('dbg_caseblurb', 13)).includes('CHAMP'), 'A: heaviest-hat blurb names the record holder', await str('dbg_caseblurb', 13));
+  ok((await str('dbg_caseblurb', 19)).includes('PUPPY'), 'A: buddy blurb names the species', await str('dbg_caseblurb', 19));
+  const trainBlurb = await str('dbg_caseblurb', 20);
   ok(trainBlurb.includes('MOVES TAUGHT 4 OF 4'), 'A: training blurb carries the moves taught', trainBlurb);
-  ok((await str('dbg_caseblurb', 10)).includes('1 GOLD, 2 SILVER, 0 BRONZE'), 'A: cart medal blurb spells the counts', await str('dbg_caseblurb', 10));
+  ok((await str('dbg_caseblurb', 11)).includes('1 GOLD, 2 SILVER, 0 BRONZE'), 'A: cart medal blurb spells the counts', await str('dbg_caseblurb', 11));
   await page.screenshot({ path: 'tsg-v125-f4-after-case.png' });
   for (let i = 0; i < 10; i++) await key('ArrowDown', 130);
   await sleep(300);
@@ -253,7 +257,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   ok((await call('dbg_buddyxp')) === 240, 'C: buddy XP intact', await call('dbg_buddyxp'));
   ok(await openCase(), 'C: the case renders on the pre-feature save');
   const rowsC = await readCase();
-  ok(rowsC.length === 19, 'C: 19 rows (the First Shift row is absent; v1.28 added the Mordor row)', rowsC.length);
+  ok(rowsC.length === 20, 'C: 20 rows (the First Shift row is absent; v1.28 added the Mordor row, v1.35 the Crispy Dirt row)', rowsC.length);
   ok(!rowsC.some(r => r[0] === 'FIRST SHIFT'), 'C: no First Shift row on a pre-feature save');
   const byNameC = Object.fromEntries(rowsC.map(r => [r[0], r[1]]));
   ok(byNameC['CASTLE'] === 'BEST 1250', 'C: castle plaque survives (it predates the program)', byNameC['CASTLE']);

@@ -42,8 +42,8 @@ static void draw_arcade(void){
     // flatly unreadable (Daniel: "you can't read it"). Mordor gets
     // pale ash — black lettering reads crisply on it, and ash is the
     // colour of the place.
-    static const u32 CABCOL[8] = { COL(240,140,40), COL(84,190,84), COL(70,130,230), COL(200,70,60), COL(120,220,130), COL(250,200,50), COL(216,64,54), COL(178,170,160) };
-    for (int s=0;s<8;s++){
+    static const u32 CABCOL[9] = { COL(240,140,40), COL(84,190,84), COL(70,130,230), COL(200,70,60), COL(120,220,130), COL(250,200,50), COL(216,64,54), COL(178,170,160), COL(198,138,62) };   // v1.35: CRISPY DIRT wears dirt-ochre — dark lettering reads crisply on it (the v1.32 Mordor lesson)
+    for (int s=0;s<9;s++){
         int cx = SX(ARC_SX[s]);
         { int py2 = SY(ARC_CY + ARC_ROWY[s] + 54);
           ellipse_fill(cx, py2, (int)(68*cz), (int)(17*cz), COL(60,50,96));
@@ -111,6 +111,25 @@ static void draw_arcade(void){
             line_thick(sx0+(int)(8*cz), sy0+sh-(int)(2*cz), sx0+(int)(48*cz), sy0+sh-(int)(8*cz), (int)(2*cz), COL(172,152,100));   // the road running in
             line_thick(sx0+(int)(30*cz), sy0+sh-(int)(2*cz), sx0+(int)(54*cz), sy0+sh-(int)(8*cz), (int)(2*cz), COL(172,152,100));
             disc_fill(sx0+(int)(16*cz), sy0+(int)(16*cz), (int)(3*cz), COL(240,235,220));   // a Shire moon, far behind
+        } else if (s==8) {
+            // CRISPY DIRT (v1.35): two dirt mounds, a catapult on the
+            // left one, and the carcass it just lobbed arcing over
+            // the valley toward a bug dug in on the right.
+            ellipse_fill(sx0+(int)(22*cz), sy0+sh-(int)(4*cz), (int)(30*cz), (int)(13*cz), COL(146,102,58));   // the west mound
+            ellipse_fill(sx0+(int)(84*cz), sy0+sh-(int)(4*cz), (int)(28*cz), (int)(15*cz), COL(146,102,58));   // the east mound
+            rect_fill(sx0+(int)(12*cz), sy0+sh-(int)(16*cz), (int)(16*cz), (int)(5*cz), COL(110,74,40));       // the catapult bed
+            line_thick(sx0+(int)(16*cz), sy0+sh-(int)(16*cz), sx0+(int)(27*cz), sy0+sh-(int)(24*cz), (int)(3*cz), COL(150,104,58));   // its arm, mid-lob
+            disc_fill(sx0+(int)(15*cz), sy0+sh-(int)(10*cz), (int)(3*cz), COL(60,44,30));                      // a wheel
+            disc_fill(sx0+(int)(25*cz), sy0+sh-(int)(10*cz), (int)(3*cz), COL(60,44,30));
+            { int ax2 = sx0+(int)(30*cz), ay2 = sy0+sh-(int)(30*cz);   // the carcass, riding its arc (it bobs with the house clock)
+              int bob = (int)(fsin(G.anim_t*1.7f)*2.0f*cz);
+              line_thick(ax2, ay2+bob+(int)(8*cz), ax2+(int)(14*cz), ay2+bob+(int)(2*cz), 1, COL(210,190,150));
+              line_thick(ax2+(int)(14*cz), ay2+bob+(int)(2*cz), ax2+(int)(26*cz), ay2+bob+(int)(7*cz), 1, COL(210,190,150));
+              disc_fill(ax2+(int)(13*cz), ay2+bob, (int)(4*cz), COL(120,160,70)); }
+            disc_fill(sx0+(int)(84*cz), sy0+sh-(int)(19*cz), (int)(5*cz), COL(104,178,80));                    // the bug battery, dug in
+            pset(sx0+(int)(82*cz), sy0+sh-(int)(20*cz), COL(16,16,20)); pset(sx0+(int)(86*cz), sy0+sh-(int)(20*cz), COL(16,16,20));
+            line_thick(sx0+(int)(80*cz), sy0+sh-(int)(15*cz), sx0+(int)(76*cz), sy0+sh-(int)(11*cz), (int)(2*cz), COL(70,130,50));
+            line_thick(sx0+(int)(88*cz), sy0+sh-(int)(15*cz), sx0+(int)(92*cz), sy0+sh-(int)(11*cz), (int)(2*cz), COL(70,130,50));
         } else {
             // WAR!: a gold bit-node, a buddy and a bug squaring off
             rect_fill(sx0, sy0+sh-(int)(7*cz), sw, (int)(7*cz), COL(120,108,86));

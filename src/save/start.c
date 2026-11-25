@@ -227,6 +227,7 @@ static void continue_run(int slot){
                   // road. This player's record re-zeros with the
                   // smemset of the Buddy in the bsp block below.
                   int bmo=0, bmb=0, tmu_on=0, tmu[6]={0};
+                  int bsc=0;   // CRISPY DIRT (v1.35)
                   // WAR! snapshot (v1.17): the six values ride as raw
                   // text (',' inside records, ';' between them, never
                   // a space) and are rebuilt into war_snap[idx] below.
@@ -366,6 +367,7 @@ static void continue_run(int slot){
                       else if (kk[0]=='w' && kk[1]=='r') bwr=vv;
                       else if (kk[0]=='m' && kk[1]=='o' && kk[2]==0) bmo=vv;   // MORDOR FUN RUN (v1.28): completions
                       else if (kk[0]=='m' && kk[1]=='b' && kk[2]==0) bmb=vv;   // MORDOR FUN RUN (v1.28): best time, seconds
+                      else if (kk[0]=='s' && kk[1]=='c' && kk[2]==0) bsc=vv;   // CRISPY DIRT (v1.35): HARD champion flag
                       else if (kk[0]=='t' && kk[1]=='p') btp=vv;
                       else if (kk[0]=='t' && kk[1]=='w') btw=vv;
                       else if (kk[0]=='c' && kk[1]=='x') bcx=vv;
@@ -438,6 +440,7 @@ static void continue_run(int slot){
                       // road only ever holds what the mode can use.
                       bd->mor_done = bmo<0? 0 : bmo;
                       bd->mor_best = bmb<0? 0 : bmb;
+                      bd->scr_champ = bsc? 1 : 0;   // CRISPY DIRT (v1.35): absent on pre-cabinet saves -> 0
                       if (tmu_on){
                           bd->mor_on = tmu[0]? 1 : 0;
                           bd->mor_dist = tmu[1]<0? 0 : tmu[1]>MOR_LEN? MOR_LEN : tmu[1];

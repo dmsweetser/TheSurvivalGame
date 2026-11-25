@@ -321,6 +321,7 @@ typedef struct { int cell; float x, y, wt, dir; int lvl; float alert; } BWHack; 
 typedef struct { float x, y, vx, vy; int kind, state; float t; } PlatEn;   // SUPER BUDDY RUN critters: 0 crawl, 1 shell-bug, 2 shell, 3 piranha, 4 fly, 5 shroom, 6 flower
 typedef struct { float x, y, aim, ft, lo, hi; int kind, hp, dir; } TankEn;   // TANK RESCUE foes: 0 turret, 1 patrol tank, 2 prison hut, 3 repair pickup, 4 fortress core, 5 blockade gun. Patrol dir: +-1 runs on x, +-2 on y (sign = way), lo/hi bound that axis
 typedef struct { float x, y, hp, maxhp, atk_t, hit_t; int kind, chunk, slot; } MorEn;   // MORDOR FUN RUN foes (v1.28): 0 goblin, 1 wolf, 2 spider, 3 orc. chunk/slot name the deterministic spawn they came from, so a kill can be written into the session's dead-bitmap.
+typedef struct { float x, y; int hp, side, kind, alive; } ScrUnit;   // CRISPY DIRT units (v1.35): kind 0 catapult, 1 crawler, 2 spitter. x is fixed for life; y is the unit's base on the heightfield (it falls, never walks).
 // MORDOR FUN RUN (v1.28): the MOOSE SCALE constants (MOR_MOOSE_PX
 // and friends) live in data/design.c with the Buddy's mor_* fields —
 // the save loader (save/start.c) is included before this file and
@@ -657,6 +658,39 @@ typedef struct {
     float mor_drop_s[24], mor_drop_lat[24];
     int mor_drop_kind[24], mor_drop_on[24];
     int mor_drop_spawned;
+    // CRISPY DIRT (bw_mode 10, v1.35): one match's SESSION scratch —
+    // the heightfield, the units, the turn machine, the bits and the
+    // arsenal. All of it is session-only by design (the spec's rule,
+    // Mordor's drops' rule): leaving the cabinet forfeits the match
+    // and nothing here is ever written to a save token. The only
+    // things that persist are the Buddy XP paid at a solo match win
+    // and the scr_champ plaque on the Buddy (sc token).
+    // Phases: 0 AIM, 1 FLY, 2 SETTLE, 3 SHOP, 4 ROUND banner,
+    // 5 MATCH END panel. scr_req is the cabinet panel's pending
+    // request (0 EASY, 1 NORMAL, 2 HARD, 3 hot-seat 2P), consumed by
+    // bw_enter_mode exactly like the Castle/Entrances requests.
+    int scr_req, scr_diff, scr_2p, scr_round, scr_turn, scr_phase;
+    int scr_wins[2], scr_ui[2], scr_weap[2], scr_bits[2];
+    int scr_inv[2][7];                 // bought counts per side, weapons 1..6 (0 = the infinite Carcass)
+    float scr_aim[2], scr_pow[2];      // per-side gauges: angle toward the enemy 0..180, power 0..100
+    int scr_wind;                      // -30..30, re-rolled every turn, always shown before a shot
+    int scr_seed, scr_matches, scr_shots;
+    float scr_h[640];                  // the heightfield: surface y per column (field is 640x360)
+    ScrUnit scr_u[4]; int scr_nu;
+    float scr_px[3], scr_py[3], scr_pvx[3], scr_pvy[3];
+    int scr_pact[3], scr_psplit[3], scr_pweap, scr_pside;
+    int scr_bean_r, scr_bean_d;        // the Backfire Bean's rolled yield for the shot in flight
+    float scr_lastx, scr_lasty;        // the last explosion's centre (the test rig reads it; play never does)
+    float scr_ai_t; int scr_lastmiss;
+    float scr_phase_t; int scr_settle_stage;
+    float scr_fall_from[4], scr_fall_v[4];
+    int scr_pool_x0[4], scr_pool_x1[4], scr_pool_left[4], scr_pool_side[4];   // honey pools: column span, ticks left, owner's side
+    int scr_shop_sel, scr_shop_side;
+    int scr_lastwin;                   // the round's winner (0/1, -1 = mutual wipeout), for the banner
+    float scr_exit_arm; int scr_xp_paid, scr_xp_amt;
+    int scr_tp_was[6], scr_tp_act[6];  // touch/mouse point bookkeeping: was-active, and what the press claimed (0 none, 1 FIRE, 2 angle-, 3 angle+, 4 power-, 5 power+, 6 angle drag, 7 power drag)
+    float scr_fxx[40], scr_fxy[40], scr_fxv[40], scr_fyv[40], scr_fxt[40], scr_fxl[40];
+    u32 scr_fxc[40]; int scr_fxn;
 } BwSim;
 static BwSim BWS[MAXP];
 static int bw_defeated_has(BwSim *S, int key){ for (int i=0;i<S->defeated_n;i++) if (S->defeated[i]==key) return 1; return 0; }

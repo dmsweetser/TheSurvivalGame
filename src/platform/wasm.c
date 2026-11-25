@@ -810,6 +810,35 @@ __attribute__((export_name("dbg_morhp"))) int exp_dbg_morhp(void){ int id = G.my
 __attribute__((export_name("dbg_mortime"))) int exp_dbg_mortime(void){ int id = G.my_id>=0? G.my_id : 0; return G.bud[id].mor_secs; }
 __attribute__((export_name("dbg_mordone"))) int exp_dbg_mordone(void){ int id = G.my_id>=0? G.my_id : 0; return G.bud[id].mor_done; }
 __attribute__((export_name("dbg_morbest"))) int exp_dbg_morbest(void){ int id = G.my_id>=0? G.my_id : 0; return G.bud[id].mor_best; }
+// CRISPY DIRT (v1.35): the scorchtest rig reads the match through
+// these, in the established dbg style — phases (0 aim, 1 fly,
+// 2 settle, 3 shop, 4 banner, 5 end), the gauges, the purse, the
+// field itself. The staging seams (setangle/setpower/givebits/
+// hurt) exist so a suite can line up a kill or a shop visit
+// without playing a whole match per assertion; shipped play never
+// calls them.
+__attribute__((export_name("dbg_scrphase"))) int exp_dbg_scrphase(void){ return scr_dbg_on()? scr_dbg_sim()->scr_phase : -1; }
+__attribute__((export_name("dbg_scrturn"))) int exp_dbg_scrturn(void){ return scr_dbg_on()? scr_dbg_sim()->scr_turn : -1; }
+__attribute__((export_name("dbg_scrangle"))) int exp_dbg_scrangle(void){ BwSim *S=scr_dbg_sim(); return scr_dbg_on()? (int)(S->scr_aim[S->scr_turn]+0.5f) : -1; }
+__attribute__((export_name("dbg_scrpower"))) int exp_dbg_scrpower(void){ BwSim *S=scr_dbg_sim(); return scr_dbg_on()? (int)(S->scr_pow[S->scr_turn]+0.5f) : -1; }
+__attribute__((export_name("dbg_scrwind"))) int exp_dbg_scrwind(void){ return scr_dbg_on()? scr_dbg_sim()->scr_wind : -999; }
+__attribute__((export_name("dbg_scrbits"))) int exp_dbg_scrbits(int side){ return scr_dbg_on()? scr_dbg_sim()->scr_bits[side? 1:0] : -1; }
+__attribute__((export_name("dbg_scrinv"))) int exp_dbg_scrinv(int side, int w){ return scr_dbg_on()? scr_dbg_sim()->scr_inv[side? 1:0][w] : -1; }
+__attribute__((export_name("dbg_scrhp"))) int exp_dbg_scrhp(int idx){ BwSim *S=scr_dbg_sim(); return (scr_dbg_on() && idx>=0 && idx<S->scr_nu)? S->scr_u[idx].hp : -999; }
+__attribute__((export_name("dbg_scralive"))) int exp_dbg_scralive(int idx){ BwSim *S=scr_dbg_sim(); return (scr_dbg_on() && idx>=0 && idx<S->scr_nu)? S->scr_u[idx].alive : -1; }
+__attribute__((export_name("dbg_scrunits"))) int exp_dbg_scrunits(void){ return scr_dbg_on()? scr_dbg_sim()->scr_nu : -1; }
+__attribute__((export_name("dbg_scrh"))) int exp_dbg_scrh(int x){ BwSim *S=scr_dbg_sim(); if (!scr_dbg_on() || x<0 || x>639) return -1; return (int)(S->scr_h[x]+0.5f); }
+__attribute__((export_name("dbg_scrwins"))) int exp_dbg_scrwins(int side){ return scr_dbg_on()? scr_dbg_sim()->scr_wins[side? 1:0] : -1; }
+__attribute__((export_name("dbg_scrround"))) int exp_dbg_scrround(void){ return scr_dbg_on()? scr_dbg_sim()->scr_round : -1; }
+__attribute__((export_name("dbg_scrchamp"))) int exp_dbg_scrchamp(void){ int id = G.my_id>=0? G.my_id : 0; return G.bud[id].scr_champ; }
+__attribute__((export_name("dbg_scrweap"))) int exp_dbg_scrweap(void){ BwSim *S=scr_dbg_sim(); return scr_dbg_on()? S->scr_weap[S->scr_turn] : -1; }
+__attribute__((export_name("dbg_scrshots"))) int exp_dbg_scrshots(void){ return scr_dbg_on()? scr_dbg_sim()->scr_shots : -1; }
+__attribute__((export_name("dbg_scrlastx"))) int exp_dbg_scrlastx(void){ return scr_dbg_on()? (int)(scr_dbg_sim()->scr_lastx+0.5f) : -1; }
+__attribute__((export_name("dbg_scrlasty"))) int exp_dbg_scrlasty(void){ return scr_dbg_on()? (int)(scr_dbg_sim()->scr_lasty+0.5f) : -1; }
+__attribute__((export_name("dbg_scrsetangle"))) void exp_dbg_scrsetangle(int a){ if (scr_dbg_on()){ BwSim *S=scr_dbg_sim(); S->scr_aim[S->scr_turn]=(float)a; } }
+__attribute__((export_name("dbg_scrsetpower"))) void exp_dbg_scrsetpower(int p){ if (scr_dbg_on()){ BwSim *S=scr_dbg_sim(); S->scr_pow[S->scr_turn]=(float)p; } }
+__attribute__((export_name("dbg_scrgivebits"))) void exp_dbg_scrgivebits(int side, int n){ if (scr_dbg_on()) scr_dbg_sim()->scr_bits[side? 1:0]+=n; }
+__attribute__((export_name("dbg_scrhurt"))) void exp_dbg_scrhurt(int idx, int hp){ BwSim *S=scr_dbg_sim(); if (scr_dbg_on() && idx>=0 && idx<S->scr_nu) S->scr_u[idx].hp=hp; }
 __attribute__((export_name("dbg_moren"))) int exp_dbg_moren(void){ int id = G.my_id>=0? G.my_id : 0; return BWS[id].mor_en_n; }
 __attribute__((export_name("dbg_morkills"))) int exp_dbg_morkills(void){ int id = G.my_id>=0? G.my_id : 0; return BWS[id].mor_kills; }
 __attribute__((export_name("dbg_morx"))) int exp_dbg_morx(void){ int id = G.my_id>=0? G.my_id : 0; return (int)G.bud[id].x; }

@@ -223,6 +223,7 @@ static void bw_update(int pi, float dt, const BwIn *in){
     if (b->bw_mode==7){ crt_update(pi, dt, in); return; }
     if (b->bw_mode==8){ war_update(pi, dt, in); return; }
     if (b->bw_mode==9){ mor_update(pi, dt, in); return; }
+    if (b->bw_mode==10){ scr_update(pi, dt, in); return; }
     float mx=0, my=0; int k=in->keys;
     if (k&K_UP) my-=1; if (k&K_DOWN) my+=1; if (k&K_LEFT) mx-=1; if (k&K_RIGHT) mx+=1;
     if (mx!=0 || my!=0){

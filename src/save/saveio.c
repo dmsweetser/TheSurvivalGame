@@ -227,6 +227,10 @@ static void do_save(void){
                         p = put_int(p, bd->mor_secs); *p++=','; *p=0;
                         p = put_int(p, bd->mor_lat);
                     }
+                    // CRISPY DIRT (v1.35): the HARD-match champion
+                    // flag, written only when set, so a pre-cabinet
+                    // save stays byte-identical to before.
+                    if (bd->scr_champ){ *p++=' '; *p=0; p = put_key(p, "sc"); p = put_int(p, bd->scr_champ); }
                     // HAT TOPPERS (v1.25 feat 5): the earned mask and
                     // the worn id, written only when set, so a
                     // topper-less save stays byte-identical to before.
