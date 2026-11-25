@@ -96,10 +96,22 @@ static void core_touch_point(int id, int x, int y, int phase){
 // pause menu itself can open: effectively solo — offline, or hosting
 // with no guests yet (a client never pauses; a host with guests
 // connected can't either, the GS_PAUSE case bounces straight back).
-#define MG_CHIP_X 244
-#define MG_CHIP_Y 92
 #define MG_CHIP_W 72
 #define MG_CHIP_H 24
+// v1.32 (Daniel: the v1.31 spot "is awful"): the chip first lived at
+// (244,92) — open playfield under the zone pill, right on top of the
+// player's own hat stack and the home arrow. It now sits in the top-
+// right corner under the leaderboard, Banzai-chip style (a corner,
+// not the middle of the fight): the chip is only live solo or for a
+// host alone, when the leaderboard is always its one-row form
+// (x VW-158..VW-8, y 8..59), so y 67 tucks under it with an 8px gap
+// and the chip's right edge is flush with the panel's and the margin.
+// Clear of everything else that draws: the status card (x<=232), the
+// zone pill (x<=468, y<=51), the TIME line (y 92, x from 14 — even a
+// seven-digit squash count ends before x 250), the weapon-chip strip
+// (left edge), and the touch buttons (topmost is WALL, y>=174).
+#define MG_CHIP_X (VW-8-MG_CHIP_W)
+#define MG_CHIP_Y 67
 static int mg_pause_chip_live(void){
     if (!mobile_ui() || pad_mode()) return 0;
     if (G.state!=GS_PLAY || G.my_id<0) return 0;

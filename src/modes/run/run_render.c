@@ -98,6 +98,18 @@ static void plat_render(int pi){
       glow_ellipse(sunx, suny, 34, 34, dark? COL(200,204,225) : COL(255,236,160), 60);
       disc_fill(sunx, suny, 15, dark? COL(226,230,242) : COL(255,240,170));
       disc_fill(sunx-4, suny-4, 6, dark? COL(240,242,250) : COL(255,250,215)); }
+    // v1.32: stars over the dark countries, and over every country at
+    // night — a slow-parallax hash field behind the clouds, twinkling
+    if ((rg==5 || rg==7) || tod_darkf() > 0.5f){
+      for (int i=0;i<54;i++){ u32 h = hash2(i*3+1, i*7+2, 0x57A2u);
+        int span = vw2 + 16;
+        int sx = vx + ((int)(h % (u32)span) - (int)(camx*0.08f) % span + span) % span - 8;
+        int sy = vy + (int)((h>>8) % (u32)(vh2*2/3 > 0? vh2*2/3 : 1));
+        float tw = 0.5f + 0.5f*fsin(G.anim_t*1.9f + (float)((h>>16)%10));
+        int lum = 90 + (int)(tw*120.0f);
+        pset(sx, sy, COL(lum, lum, lum+15>255? 255 : lum+15));
+        if ((h>>20)%11==0 && tw>0.8f) pset(sx, sy, COL(255,255,255));
+      } }
     // lazy clouds on the slowest parallax (glow-up)
     { int coff = (int)(camx*0.12f + G.anim_t*3.0f);
       u32 cloudc = tod_sky((rg==5 || rg==7)? COL(126,122,158) : COL(235,246,255));

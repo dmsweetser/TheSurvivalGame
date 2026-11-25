@@ -127,6 +127,7 @@ static void render_pause(void){
         draw_controls_panel(0, 0, VW, VH, (me->in_mall && me->station==4)? 5 : 0);
         return;
     }
+    glow_ellipse(VW/2, 118, 120, 26, COL(255,190,70), 30);   // v1.32: a warm halo behind the title
     draw_text_center(VW/2+3, 104+3, "PAUSED", 4, COL(10,8,20));
     draw_text_center(VW/2, 104, "PAUSED", 4, COL(255,214,64));
     // WEEKLY CHALLENGE (v1.25 feature 6): the week's standing as a
@@ -157,15 +158,19 @@ static void render_pause(void){
           int y=176+i*26;
           if (i==G.pause_sel){ rect_fill(0, y-4, VW, 19, COL(255,205,40)); draw_text_center(VW/2, y, rows[i], 2, COL(30,26,44)); }
           else draw_text_center(VW/2, y, rows[i], 2, COL(235,238,245));
-      } }
+      }
+      // v1.32: with the skip row in, the footers move down one row
+      // step with it — at their old fixed y the SAVES line sat inside
+      // the SKIP row's glyphs (struck through, unreadable).
+      int fdy = (nrows==4)? 26 : 0;
     { char b[56]; char *q=b; q=sappend(q, "SAVES TO SLOT "); q=sapp_int(q, G.slot);
       q=sappend(q, " - YOUR HAT IS SAFE HERE.");
-      draw_text_center(VW/2, 264, b, 1, COL(150,160,185)); }
+      draw_text_center(VW/2, 264+fdy, b, 1, COL(150,160,185)); }
     { char fb[80]; char *q=fb;
       if (pad_mode()) q=sappend(q, "STICK/DPAD + A - START ALSO RESUMES");
       else if (mobile_ui()) q=sappend(q, "TAP A ROW - TAP SAVE + QUIT TWICE");
       else { q=sappend(q, "ARROWS + "); q=sappend(q, key_name(G.bind[ACT_FIRE])); q=sappend(q, " - ESC RESUMES"); }
-      *q=0; draw_text_center(VW/2, 282, fb, 1, COL(140,150,170)); }
+      *q=0; draw_text_center(VW/2, 282+fdy, fb, 1, COL(140,150,170)); } }
 }
 static float over_stack[MAXSTACK];
 static int over_stack_n=0;
@@ -198,6 +203,7 @@ static void render_over(void){
         draw_player_sprite(&hero);
         G.zoom=pz;
     }
+    glow_ellipse(VW/2, 88, 130, 24, COL(255,90,80), 26);   // v1.32: a low red halo behind the title
     draw_text_center(VW/2, 78, "GAME OVER", 3, COL(255,110,110));
     draw_text_center(VW/2, 106, "THE BUGS GOT THE WHOLE TEAM", 1, COL(230,235,245));
     { char b[64]; int t=(int)G.time; char *q=b;
@@ -205,7 +211,13 @@ static void render_over(void){
       if (t%60<10) q=sappend(q,"0"); q=sapp_int(q, t%60);
       q=sappend(q, " - SQUASHED "); q=sapp_int(q, G.total_kills);
       q=sappend(q, " - CASHED "); q=sapp_int(q, (int)G.total_earned); q=sappend(q, " KG");
-      draw_text_fit(238, 128, 272, b, 1, COL(255,240,180)); }
+      // v1.32: this line gets the panel's full inner width — in the
+      // 238-wide box it ellipsized even at 0:01 / 0 kills / 0 earned
+      // ("SURVIVED 0:01 - SQUASHED 0 - CAS.."), its own minimum text
+      // being ~320px. It sits at y=128, above the death portrait
+      // (drawn first, so the text wins any tall-hat overlap anyway);
+      // the per-player lines below keep the 238 box beside him.
+      draw_text_fit(130, 128, 380, b, 1, COL(255,240,180)); }
     int y=152;
     for (int i=0;i<MAXP;i++) if (G.p[i].connected){
         char b[64]; char *q=b;

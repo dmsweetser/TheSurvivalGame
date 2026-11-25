@@ -91,6 +91,118 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   await key('Escape', 300);
   T('panel closed cleanly', (await call('dbg_state')) === 1);
 
+  // --- v1.32: CONFETTI SQUASH must never fire unowned ---------------
+  // Daniel's playtest: confetti burst on bug kills he never bought.
+  // Root cause found by crafted-save repro: the loader trusted a
+  // stored whaleon mask verbatim, so an on-bit with no matching own-
+  // bit (a legacy/hand-edited save) fired forever and re-saved
+  // itself, and the counter shows unowned rows as buy prompts — no
+  // switch exists to turn such a bit off. The loader now clamps
+  // on &= own at every border (globals, pl-line, pt token, net join).
+  const pollv = async (fn, want, timeout = 6000, ...args) => {
+    const t0 = Date.now();
+    while (Date.now() - t0 < timeout) { if ((await call(fn, ...args)) === want) return true; await sleep(150); }
+    return false;
+  };
+  const killOne132 = async () => {
+    await call('dbg_tp', 0, 58); await sleep(250);
+    const px = await call('dbg_px'), py = await call('dbg_py');
+    await call('dbg_spawnbug', px + 45, py + 10);
+    await sleep(300);
+    let bi = 0, best = 1e9;
+    for (let i = 0; i < 64; i++) {
+      const bx = await call('dbg_bugx', i), by = await call('dbg_bugy', i);
+      if (!isFinite(bx) || !isFinite(by)) continue;
+      const d = Math.abs(bx - (px + 45)) + Math.abs(by - (py + 10));
+      if (d < best) { best = d; bi = i; }
+    }
+    const k0 = await call('dbg_kills');
+    for (let i = 0; i < 14 && (await call('dbg_kills')) === k0; i++) {
+      const bx = await call('dbg_bugx', bi), by = await call('dbg_bugy', bi);
+      const x = await call('dbg_px'), y = await call('dbg_py');
+      const dx = bx - x, dy = by - y;
+      const dir = Math.abs(dx) > Math.abs(dy) ? (dx > 0 ? 'ArrowRight' : 'ArrowLeft') : (dy > 0 ? 'ArrowDown' : 'ArrowUp');
+      await page.keyboard.down(dir); await sleep(200);
+      await key('Space', 110); await key('Space', 110);
+      await page.keyboard.up(dir);
+    }
+    return (await call('dbg_kills')) > k0;
+  };
+  const exitMall132 = async () => {
+    await call('dbg_tp', 0, -5810); await sleep(300);   // the exit mat (MALL_CY+168..+212)
+    await key('KeyE', 350);
+    return pollv('dbg_mall', 0, 4000);
+  };
+  const continue132 = async () => {
+    for (let i = 0; i < 40; i++) { const a = await call('dbg_menucount'); await sleep(250); const b = await call('dbg_menucount'); if (a === b && a >= 6) break; }
+    await key('Space', 400);
+    if (await pollv('dbg_state', 7, 4000)) { await key('Enter', 500); await pollv('dbg_state', 1, 8000); }
+    return (await call('dbg_state')) === 1;
+  };
+
+  await page.evaluate(() => localStorage.clear());
+  await page.reload();
+  await page.waitForFunction(() => window.__TSG && window.__TSG.dbg_state() === 0, null, { timeout: 20000 });
+  await key('Space', 400);
+  if ((await call('dbg_state')) !== 1) await key('Enter', 400);
+  T('v132: fresh run started', (await call('dbg_state')) === 1);
+  T('v132: fresh-profile kill lands', await killOne132());
+  T('v132: second fresh-profile kill lands', await killOne132());
+  T('v132: NO confetti burst on a fresh profile', (await call('dbg_party')) === 0, await call('dbg_party'));
+  T('v132: player on-mask is 0 on a fresh profile', (await call('dbg_pwon')) === 0, await call('dbg_pwon'));
+
+  // the crafted save: whaleon carries bit 10, whale (owned) does not
+  await page.evaluate(() => { const t0 = Date.now(); return new Promise(res => { const iv = setInterval(() => { const s = localStorage.getItem('tsg_save') || ''; if (s.includes('whaleon=') || Date.now() - t0 > 9000) { clearInterval(iv); res(); } }, 300); }); });
+  let glob132 = await page.evaluate(() => localStorage.getItem('tsg_save') || '');
+  T('v132: autosave wrote the globals blob', /whaleon=\d+/.test(glob132));
+  glob132 = glob132.replace(/whaleon=\d+/, 'whaleon=1024');
+  await page.evaluate(s => localStorage.setItem('tsg_save', s), glob132);
+  await page.reload();
+  await page.waitForFunction(() => window.__TSG && window.__TSG.dbg_state, null, { timeout: 20000 });
+  await sleep(600);
+  T('v132: crafted unowned on-bit is clamped at load', (await call('dbg_whaleon')) === 0, await call('dbg_whaleon'));
+  T('v132: continue after the crafted save', await continue132());
+  T('v132: exited the mall', await exitMall132());
+  T('v132: kill after the crafted save lands', await killOne132());
+  T('v132: still NO burst with the crafted save', (await call('dbg_party')) === 0, await call('dbg_party'));
+
+  // grant CONFETTI SQUASH (sku 10) for real: the burst must fire
+  T('v132: confetti code redeems as sku 10', (await redeemVia(codes[10])) === 10);
+  T('v132: grant lands on the player mask', ((await call('dbg_pwon')) & 1024) === 1024, await call('dbg_pwon'));
+  const partyBefore = await call('dbg_party');
+  T('v132: owned kill lands', await killOne132());
+  T('v132: burst fires once owned + on', (await call('dbg_party')) > partyBefore, await call('dbg_party'));
+
+  // switch it off at the counter: the burst must stop
+  await call('dbg_tp', 0, 80); await sleep(150);
+  await key('KeyE', 300);
+  T('v132: back in the mall', (await call('dbg_mall')) === 1);
+  T('v132: walked to the Whales Only counter', await walkTo(-105, -6148, 14));
+  await key('KeyE', 350);
+  T('v132: whales panel open', (await call('dbg_state')) === 2 && (await call('dbg_station')) === 1);
+  for (let i = 0; i < 10; i++) await key('ArrowDown', 110);   // row 10 = CONFETTI SQUASH
+  await key('Space', 400);
+  T('v132: counter toggles confetti OFF', ((await call('dbg_whaleon')) & 1024) === 0, await call('dbg_whaleon'));
+  await key('Space', 400);
+  T('v132: counter toggles confetti back ON', ((await call('dbg_whaleon')) & 1024) === 1024, await call('dbg_whaleon'));
+  await key('Space', 400);
+  T('v132: counter toggles confetti OFF again', ((await call('dbg_whaleon')) & 1024) === 0, await call('dbg_whaleon'));
+  await key('Escape', 300);
+  T('v132: exited the mall for the off-check', await exitMall132());
+  const partyOff = await call('dbg_party');
+  T('v132: kill with confetti off lands', await killOne132());
+  T('v132: NO burst while switched off at the counter', (await call('dbg_party')) === partyOff, await call('dbg_party'));
+
+  // save/load preserves the masks bit-for-bit (own=1024, on=0 here)
+  await sleep(6000);   // autosave
+  const ownB = await call('dbg_whale'), onB = await call('dbg_whaleon');
+  await page.reload();
+  await page.waitForFunction(() => window.__TSG && window.__TSG.dbg_state, null, { timeout: 20000 });
+  await sleep(600);
+  T('v132: save/load preserves the masks bit-for-bit',
+    (await call('dbg_whale')) === ownB && (await call('dbg_whaleon')) === onB && ownB === 1024 && onB === 0,
+    ownB + '/' + onB);
+
   console.log(fails.length ? 'WHALETEST FAILURES: ' + fails.join(', ') : 'WHALETEST ALL PASS');
   await browser.close(); process.exit(fails.length ? 1 : 0);
 })().catch(e => { console.error('ERR', e.message); process.exit(1); });

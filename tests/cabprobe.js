@@ -1,0 +1,27 @@
+const { chromium } = require('playwright-core');
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+(async () => {
+  const browser = await chromium.launch({ executablePath: process.env.HOME + '/.cache/ms-playwright/chromium-1248/chrome-linux64/chrome', args: ['--no-sandbox'] });
+  const page = await browser.newPage({ viewport: { width: 1280, height: 720 } });
+  await page.goto('http://localhost:8903/the-survival-game.html');
+  await page.evaluate(() => localStorage.clear());
+  await page.reload({ waitUntil: 'load' });
+  await page.waitForFunction(() => window.__TSG && window.__TSG.dbg_state, null, { timeout: 20000 });
+  const call = (n, ...a) => page.evaluate(([n, a]) => window.__TSG[n](...a), [n, a]);
+  const key = async (code, ms) => { await page.keyboard.down(code); await sleep(ms || 150); await page.keyboard.up(code); await sleep(150); };
+  await key('Space', 400);
+  if ((await call('dbg_state')) !== 1) await key('Enter', 400);
+  await sleep(500);
+  await call('dbg_adopt', 0); await sleep(300);
+  await call('dbg_tp', 0, 80); await sleep(200);
+  await key('KeyE', 300);
+  await call('dbg_tp', 350, -5976); await sleep(250);
+  await key('KeyE', 300);
+  await sleep(500);
+  await call('dbg_tp', -256, -11810); await sleep(600);
+  await page.screenshot({ path: __dirname + '/shots132/probe-tank-cabinet.png' });
+  await call('dbg_tp', 0, -11670); await sleep(600);
+  await page.screenshot({ path: __dirname + '/shots132/probe-war-cabinet.png' });
+  await browser.close();
+  console.log('probe done');
+})().catch(e => { console.error('ERR', e); process.exit(1); });

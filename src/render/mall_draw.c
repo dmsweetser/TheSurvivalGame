@@ -107,6 +107,19 @@ static void draw_mall(void){
       rect_fill(SX(-408), SY(MALL_CY+202), (int)(816*cz), 2, COL(198,164,84));
       rect_fill(SX(-408), SY(MALL_CY-232), (int)(24*cz), (int)(460*cz), wallc);
       rect_fill(SX(384), SY(MALL_CY-232), (int)(24*cz), (int)(460*cz), wallc); }
+    // v1.32 dressing: a string of party lights along the north wall,
+    // under the chair rail — mall money well spent. Each bulb twinkles
+    // on its own phase; the run is clipped by the view like everything.
+    { static const u32 STRING_COL[4] = { COL(255,190,90), COL(255,120,140), COL(140,220,255), COL(160,255,170) };
+      for (int bx2 = -384; bx2 <= 384; bx2 += 48){
+          int sx2 = SX(bx2), sy2 = SY(MALL_CY-198);
+          if (sx2 < -8 || sx2 > VW+8) continue;
+          int bi = (bx2 + 384) / 48;
+          float tw = 0.6f + 0.4f*fsin(G.anim_t*2.4f + (float)bi*1.7f);
+          glow_ellipse(sx2, sy2, 7, 7, STRING_COL[bi&3], (int)(26.0f*tw));
+          disc_fill(sx2, sy2, 2, STRING_COL[bi&3]);
+          pset(sx2-1, sy2-1, COL(255,255,255));
+      } }
     // exit mat
     { int mx0=SX(-38), my0=SY(MALL_CY+172), mw=(int)(76*cz), mh=(int)(34*cz);
       rect_fill(mx0, my0, mw, mh, COL(52,96,60)); rect_line(mx0, my0, mw, mh, COL(198,164,84));
@@ -351,6 +364,16 @@ static void draw_mall(void){
     for (int i=0;i<MAXFLOAT;i++) if (G.floats[i].alive){
         Floater *q=&G.floats[i];
         if (q->y>MALL_CY-300 && q->y<MALL_CY+300) draw_text_center(SX(q->x), SY(q->y), q->text, 1, q->col);
+    }
+    // v1.32 dressing: dust motes drifting in the mall's warm air —
+    // the Entrances lamp-mote pattern, mall-wide and slow
+    for (int m2=0; m2<14; m2++){
+        u32 hh = hash2(m2*23+5, 11, 0xD057u);
+        float ph = G.anim_t*(0.09f + (float)(hh%5)*0.02f) + (float)(hh>>8);
+        int mx2 = SX(-380 + (int)(hh % 760)) + (int)(fsin(ph)*10.0f);
+        int my2 = SY(MALL_CY-170 + (int)((hh>>6) % 320)) + (int)(fcos(ph*0.8f)*7.0f);
+        if (mx2>=clip_x0 && mx2<clip_x1 && my2>=clip_y0 && my2<clip_y1)
+            pset_blend(mx2, my2, COL(255,232,180), 60 + (int)(hh>>11)%50);
     }
     // WALK OF FAME marquee: flashes through the confetti colours while
     // the viewed player is mid-crawl under a heavy hat

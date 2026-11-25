@@ -422,6 +422,17 @@ static void crt_render_view(int sim_pi, int viewer_pi){
                             rect_fill(x0t, y0t, x1t - x0t + 1, 2, (i3 & 1)? COL(16, 14, 24) : COL(245, 245, 245));
                         }
                     }
+                    if (gx[1] - gx[0] > 70){   // v1.32: carnival bulbs along the banner's top edge, chasing party colours
+                        static const u32 BULB[4] = { COL(255,205,60), COL(255,110,140), COL(120,220,255), COL(150,255,150) };
+                        int nb = (gx[1] - gx[0]) / 22; if (nb > 16) nb = 16; if (nb < 3) nb = 3;
+                        int br = bh/4; if (br < 1) br = 1; if (br > 3) br = 3;
+                        for (int ib = 0; ib <= nb; ib++){
+                            int bxp = gx[0] + (gx[1] - gx[0]) * ib / nb;
+                            int byp = gt[0] + (gt[1] - gt[0]) * ib / nb - br - 1;
+                            disc_fill(bxp, byp, br, BULB[((int)(S->crt_t * 6) + ib) & 3]);
+                            pset(bxp - (br > 1? 1 : 0), byp - (br > 1? 1 : 0), COL(255,255,255));
+                        }
+                    }
                     if (gx[1] - gx[0] > 210) draw_text_center((gx[0] + gx[1]) / 2, (gt[0] + gt[1]) / 2 + bh/2 - 3, REGION_NAME[rg], 1, COL(255, 244, 220));
                 } }
               // chequer marker boards flanking the line (v1.27 polish)
@@ -666,7 +677,12 @@ static void crt_render_view(int sim_pi, int viewer_pi){
       if (sec < 10) q = sappend(q, "0");
       q = sapp_int(q, sec); q = sappend(q, "."); q = sapp_int(q, tds % 10); *q = 0;
       draw_text(vx + 10, vy + 8, buf, 1, COL(255, 240, 200)); }
-    if (vw2 >= 600) draw_text_center(vx + vw2/2, vy + 8, REGION_NAME[S->crt_track], 1, COL(250, 200, 50));
+    // v1.32: the track name used to sit at the band's centre, where a
+    // long name ("CLEAN CODE MEADOWS") ran straight into the RACE /
+    // LAP / POS / TIME string on the left — the two texts struck
+    // through each other. It now right-aligns in the gap between
+    // that string and the BEST P field.
+    if (vw2 >= 600) draw_text(vx + vw2 - 86 - text_w(REGION_NAME[S->crt_track], 1), vy + 8, REGION_NAME[S->crt_track], 1, COL(250, 200, 50));
     if (vw2 >= 600 && b->crt_best_pos){ char buf[48]; char *q = buf;
         q = sappend(q, "BEST P"); q = sapp_int(q, b->crt_best_pos); *q = 0;
         draw_text(vx + vw2 - 70, vy + 8, buf, 1, COL(200, 214, 200)); }

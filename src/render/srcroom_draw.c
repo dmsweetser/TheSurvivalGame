@@ -35,6 +35,16 @@ static void draw_srcroom(void){
       rect_fill(mx0, my0, mw, mh, COL(24,52,36)); rect_line(mx0, my0, mw, mh, COL(90,220,150));
       draw_text_center(SX(0), SY(SRC_CY+183), "EXIT", 2, COL(220,255,230)); }
     draw_text_center(SX(0), SY(SRC_CY+78), "THE SOURCE ROOM", 2, COL(120,200,150));
+    // v1.32 dressing: data motes — green specks drifting in the
+    // terminal light, slow as dust in a server room
+    for (int m2=0; m2<12; m2++){
+        u32 hh = hash2(m2*29+3, 7, 0xDA7Au);
+        float ph = G.anim_t*(0.10f + (float)(hh%4)*0.025f) + (float)(hh>>8);
+        int mx2 = SX(-360 + (int)(hh % 720)) + (int)(fsin(ph)*9.0f);
+        int my2 = SY(SRC_CY-180 + (int)((hh>>6) % 360)) + (int)(fcos(ph*0.7f)*6.0f);
+        if (mx2>=0 && mx2<VW && my2>=0 && my2<VH)
+            pset_blend(mx2, my2, COL(140,255,180), 44 + (int)(hh>>11)%44);
+    }
     // the terminal counter, north wall: a dark desk, a green screen
     // scrolling code, and the station name on its front
     { int cx = SX(0);

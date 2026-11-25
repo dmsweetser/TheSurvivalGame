@@ -15,6 +15,12 @@ static void draw_arcade(void){
         int tx = SX(gx*64), tyy = SY(gy*64);
         rect_fill(tx, tyy, ts, ts, c);
         rect_fill(tx, tyy+ts-2, ts, 1, col_shade(c, 0.85f));
+        // v1.32 dressing: arcade-carpet flecks — dim neon confetti in
+        // the pile, hashed per tile, the way every good arcade was
+        { float fl2 = hash_f(gx, gy, 133);
+          if (fl2 > 0.55f){ int fx2 = tx + (int)(fl2*50) + 4, fy2 = tyy + (int)(fl2*34) + 8;
+              u32 fc2 = fl2 > 0.85f? COL(120,72,150) : fl2 > 0.70f? COL(60,120,138) : COL(138,118,60);
+              pset(fx2, fy2, fc2); pset(fx2+2, fy2+1, fc2); if (fl2 > 0.8f) pset(fx2+1, fy2-1, fc2); } }
     }
     draw_text_center(SX(0), SY(ARC_CY+163), "THE ARCADE", 2, COL(140,255,255));   // v1.27: floor text stays in the band between the island row and the raised WAR! row (was +210, north of the old +254 row)
     { u32 wallc = COL(30,24,48);
@@ -29,7 +35,14 @@ static void draw_arcade(void){
       rect_fill(mx0, my0, mw, mh, COL(52,96,60)); rect_line(mx0, my0, mw, mh, COL(120,240,255));
       draw_text_center(SX(-340), SY(ARC_CY+20), "EXIT", 1, COL(240,255,240)); }
     draw_text_center(SX(0), SY(ARC_CY-186), "ARCADE", 2, COL(255,140,230));
-    static const u32 CABCOL[7] = { COL(240,140,40), COL(84,190,84), COL(70,130,230), COL(200,70,60), COL(120,220,130), COL(250,200,50), COL(216,64,54) };
+    // v1.32 (Item 4): EIGHT cabinets, eight colours — this array had
+    // seven entries for eight cabinets, so MORDOR FUN RUN (s==7) read
+    // past the end and its marquee band, border and chase lights all
+    // came out black: the near-black name text on a black band was
+    // flatly unreadable (Daniel: "you can't read it"). Mordor gets
+    // pale ash — black lettering reads crisply on it, and ash is the
+    // colour of the place.
+    static const u32 CABCOL[8] = { COL(240,140,40), COL(84,190,84), COL(70,130,230), COL(200,70,60), COL(120,220,130), COL(250,200,50), COL(216,64,54), COL(178,170,160) };
     for (int s=0;s<8;s++){
         int cx = SX(ARC_SX[s]);
         { int py2 = SY(ARC_CY + ARC_ROWY[s] + 54);
@@ -86,6 +99,18 @@ static void draw_arcade(void){
             rect_fill(sx0+sw-(int)(4*cz), sy0+(int)(4*cz), (int)(4*cz), (int)(4*cz), COL(16,14,24));
             rect_fill(sx0+sw-(int)(8*cz), sy0+(int)(8*cz), (int)(4*cz), (int)(4*cz), COL(16,14,24));
             rect_fill(sx0+sw-(int)(4*cz), sy0+(int)(8*cz), (int)(4*cz), (int)(4*cz), COL(240,240,240));
+        } else if (s==7) {
+            // MORDOR FUN RUN (v1.32): the road east, a black mountain,
+            // and the crack of doom glowing in its face. (Until now
+            // this cabinet fell through to the WAR! scene below.)
+            rect_fill(sx0, sy0+sh-(int)(6*cz), sw, (int)(6*cz), COL(120,100,70));   // the road's end: dirt
+            tri_fill(sx0+(int)(58*cz), sy0+(int)(6*cz), sx0+(int)(76*cz), sy0+sh-(int)(6*cz), sx0+(int)(40*cz), sy0+sh-(int)(6*cz), COL(28,24,30));   // the mountain
+            glow_ellipse(sx0+(int)(58*cz), sy0+(int)(16*cz), (int)(10*cz), (int)(7*cz), COL(255,110,40), 60);
+            line_thick(sx0+(int)(58*cz), sy0+(int)(12*cz), sx0+(int)(56*cz), sy0+(int)(22*cz), (int)(2*cz), COL(255,110,40));   // the lava crack
+            line_thick(sx0+(int)(56*cz), sy0+(int)(22*cz), sx0+(int)(60*cz), sy0+(int)(30*cz), (int)(2*cz), COL(230,84,30));
+            line_thick(sx0+(int)(8*cz), sy0+sh-(int)(2*cz), sx0+(int)(48*cz), sy0+sh-(int)(8*cz), (int)(2*cz), COL(172,152,100));   // the road running in
+            line_thick(sx0+(int)(30*cz), sy0+sh-(int)(2*cz), sx0+(int)(54*cz), sy0+sh-(int)(8*cz), (int)(2*cz), COL(172,152,100));
+            disc_fill(sx0+(int)(16*cz), sy0+(int)(16*cz), (int)(3*cz), COL(240,235,220));   // a Shire moon, far behind
         } else {
             // WAR!: a gold bit-node, a buddy and a bug squaring off
             rect_fill(sx0, sy0+sh-(int)(7*cz), sw, (int)(7*cz), COL(120,108,86));

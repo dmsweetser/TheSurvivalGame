@@ -21,7 +21,8 @@ static void net_host_poll(void){
                 G.p[slot].connected=1;
             }
             if (n>=15){ G.p[slot].whale_own = buf[13]; G.p[slot].whale_on = buf[14];
-                if (n>=17){ G.p[slot].whale_own |= buf[15]<<8; G.p[slot].whale_on |= buf[16]<<8; } }
+                if (n>=17){ G.p[slot].whale_own |= buf[15]<<8; G.p[slot].whale_on |= buf[16]<<8; }
+                G.p[slot].whale_on &= G.p[slot].whale_own; }   // v1.32: a guest's on-mask never exceeds their own-mask
             pkt_src_token[slot]=src;
             int o=0; wr_u8(&o,'A'); wr_u8(&o,(u8)slot);
             plat_net_send(pkt, o, src);

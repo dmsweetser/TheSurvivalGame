@@ -71,6 +71,13 @@ static int load_records_and_check_save(void){
     if ((v=line_val(savebuf,"eddie"))) G.eddie = parse_int(v)? 1:0;
     if ((v=line_val(savebuf,"whale"))) G.whale_own = parse_int(v) & 32767;
     if ((v=line_val(savebuf,"whaleon"))) G.whale_on = parse_int(v) & 32767;
+    // v1.32: an ON bit with no matching OWN bit is not a state the
+    // game can reach in play (grants set both, the counter toggles
+    // owned rows only) — but a save that carries one (a legacy build,
+    // a hand-edited blob) would fire the perk forever, invisibly: the
+    // counter renders unowned rows as buy prompts, so there is no
+    // switch to turn it off. Enforce own >= on at the border.
+    G.whale_on &= G.whale_own;
     if ((v=line_val(savebuf,"coop"))) G.coop_pref = parse_int(v)? 1:0;
     if ((v=line_val(savebuf,"diff"))){ G.difficulty = parse_int(v); if (G.difficulty<0 || G.difficulty>3) G.difficulty=0; }
     // COMFORT (v1.25 feature 2): line keys an older save simply does
@@ -372,7 +379,7 @@ static void continue_run(int slot){
                       else if (kk[0]=='s' && kk[1]=='i') bsi=vv;
                       while (*q && *q!=' ' && *q!='\n') q++;
                   }
-                  pl->whale_own=bwo; pl->whale_on=bwn;
+                  pl->whale_own=bwo; pl->whale_on=bwn & bwo;   // v1.32: on never exceeds own (see the globals clamp above)
                   G.fs_pool[idx]=bfp;
                   // BUG BOWL LEAGUE (feat 10): the league book,
                   // Player-level (it applies whether or not a buddy
@@ -460,7 +467,7 @@ static void continue_run(int slot){
                           pt2->bud_color = tpt[8]<0? 0 : tpt[8]%BUD_COLORS_N;
                           pt2->name_idx = tpt[9]<0? 0 : tpt[9]%BUD_NAMES_N;
                           pt2->pcolor = tpt[10]&3;
-                          pt2->whale_on = tpt[11]&32767;
+                          pt2->whale_on = tpt[11] & 32767 & G.whale_own;   // v1.32: a portrait can't wear an unowned perk either
                           for (int ki=0; ki<pt2->stack_n; ki++)
                               pt2->kinds[ki] = (ki<tptk_n)? (unsigned char)(tptk[ki]-'0')&3 : 0;
                       }

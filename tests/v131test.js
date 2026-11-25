@@ -59,7 +59,7 @@ function T(name, cond, extra) { if (cond) { pass++; } else { fail++; console.log
   // ---------- P6: the main-game pause chip, both touch schemes ----------
   for (const [scheme, nm] of [[1, 'STICK'], [0, 'DRAG']]) {
     await call('dbg_touchctl', scheme);
-    await tap(280, 104);   // the chip: (244,92) 72x24, centre (280,104)
+    await tap(596, 79);   // the chip: (560,67) 72x24, centre (596,79) — v1.32 moved it under the leaderboard
     T(nm + ': tapping the START chip opens the pause', (await poll('dbg_state', v => v === 5, 4000)) === 5, await call('dbg_state'));
     await key('Escape', 300);
     T(nm + ': ESC resumes', (await poll('dbg_state', v => v === 1, 4000)) === 1, await call('dbg_state'));

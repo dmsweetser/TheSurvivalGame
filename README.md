@@ -67,25 +67,3 @@ for the native servers, then builds the exe, Linux and Mac binaries;
 on Windows, `build.bat` compiles just the exe with MinGW or MSVC.
 Music is a chiptune sequencer in C — WebAudio in the browser, real
 MIDI (winmm) in the exe, a software synth on Linux/Mac.
-
-## This repository
-
-- `src/` — the game (`survival.c` is the whole game; `shell.html` is
-  the web shell). `BUILDING.md` has the toolchain notes.
-- `tests/` — the Playwright regression suites.
-- `android/` — the Android wrapper (APK + Play AAB packaging).
-- `releases/v1.4-ready/` — the current finished builds and their
-  devlog (Tank Rescue rework, the WALK OF FAME, and the co-op menu
-  fix); `releases/live-v1.3-share/` is the older v1.3 share pack, kept for history.
-- `packets/` — Google Play and Steam store packets, plus the Whales
-  Only Stripe product/payment-link IDs (public identifiers only).
-- `HANDOVER.md` — the operator's guide: architecture, release
-  checklists, channel status, house rules.
-
-Play it in the browser (downloads for Windows/Linux/Mac/Android are on the same page): https://dmsweetser.github.io/TheSurvivalGame/
-
-The Whales Only vanity items are verified with signed codes; the
-verification (public) key ships in the game, and the signing key lives
-in the update server's secret store — it is not in this repository.
-
-**SQUASH BUGS. WEAR THE EVIDENCE.**

@@ -5,6 +5,7 @@
 // ---------------------------------------------------------------------------
 // Combat
 // ---------------------------------------------------------------------------
+int g_party_bursts;   // v1.32: CONFETTI SQUASH bursts spawned this session (dbg_party witness; never saved)
 static void fire_proj(int owner, int kind, float x, float y, float ang, float dmg, int agent){
     for (int i=0;i<MAXPROJ;i++) if (!G.projs[i].alive){
         Proj *q=&G.projs[i];
@@ -65,6 +66,7 @@ static void kill_bug(int bi, int owner){
         static const u32 PARTY[6] = { COL(255,90,120), COL(255,200,60), COL(90,220,120),
                                       COL(90,180,255), COL(200,120,255), COL(255,140,60) };
         for (int i=0;i<14;i++) spawn_particle(b->x, b->y, PARTY[i%6], 95, 1.15f, 2);
+        g_party_bursts++;   // v1.32: the burst's witness (dbg_party) — the unowned-confetti hunt needed eyes on the effect itself, not just the mask
     }
     push_ev(1, b->x, b->y);
     sfx(5);

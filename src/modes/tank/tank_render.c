@@ -30,6 +30,13 @@ static void tank_render(int pi){
         } else {   // the field: two-tone scrub, warmed a step per level
             u32 g = ((tx+ty)&1)? COL(104+warm, 146, 66) : COL(95+warm, 137, 59);
             rect_fill(x, y, BW_TILE+1, BW_TILE+1, col_shade(g, 0.95f + (float)((h>>20)%10)*0.01f));
+            // v1.32 dressing: scrub strokes and the odd pale pebble on
+            // open field, so the run north reads as ground cover rather
+            // than graph paper (draw-only, from the tile's own hash)
+            if (t==0){ int sxp = x + (int)((h>>4) % 34) + 4, syp = y + (int)((h>>9) % 34) + 6;
+                u32 sc = col_shade(g, 0.86f);
+                line_thick(sxp, syp, sxp-2, syp-4, 1, sc); line_thick(sxp+4, syp+2, sxp+5, syp-3, 1, sc);
+                if ((h>>14)%5==0) disc_fill(x + (int)((h>>16) % 30) + 8, y + (int)((h>>22) % 30) + 8, 1, col_shade(g, 1.14f)); }
         }
         if (t==1){   // water
             rect_fill(x, y, BW_TILE+1, BW_TILE+1, ((tx+ty)&1)? COL(52,110,178) : COL(46,100,168));

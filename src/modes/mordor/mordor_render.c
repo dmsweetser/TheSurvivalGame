@@ -121,6 +121,16 @@ static void mor_render(int pi){
         else if (sc > -60 && sc < (float)total + 60 && latc < MOR_HALF + 34)
             base = col_shade(base, 0.88f);                            // its trampled edge
         rect_fill(x, y, BW_TILE+1, BW_TILE+1, col_shade(base, 0.95f + (float)((h>>20)%10)*0.01f));
+        // v1.32 dressing: the road itself wears its traffic — pebbles
+        // and scuffs on the dirt, a stray tuft on the trampled edge
+        if (sc > -60 && sc < (float)total + 60 && latc < MOR_HALF){
+            int px3 = x + (int)((h>>3)%36)+6, py3 = y + (int)((h>>8)%36)+6;
+            pset(px3, py3, col_shade(base, 0.84f)); pset(px3+5, py3+3, col_shade(base, 1.10f));
+            if ((h>>15)%4==0) disc_fill(px3+2, py3+5, 1, col_shade(base, 0.80f));
+        } else if (sc > -60 && sc < (float)total + 60 && latc < MOR_HALF + 34 && (h>>17)%3==0){
+            int px3 = x + (int)((h>>5)%30)+9, py3 = y + (int)((h>>12)%30)+9;
+            line_thick(px3, py3, px3-2, py3-4, 1, col_shade(base, 0.78f));
+        }
         // scenery, off the road only: a hash of the tile, dressed by band
         if (latc > MOR_HALF + 46 && sc > -80 && sc < (float)total + 80){
             int px2 = x + (int)((h>>6)%26)+10, py2 = y + (int)((h>>11)%24)+12;

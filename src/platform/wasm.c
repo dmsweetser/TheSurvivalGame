@@ -170,6 +170,10 @@ __attribute__((export_name("dbg_mushot"))) int exp_dbg_mushot(void){ return mus_
 __attribute__((export_name("dbg_musctx"))) int exp_dbg_musctx(void){ return mus_dbg_ctx(); }
 __attribute__((export_name("dbg_whale"))) int exp_dbg_whale(void){ return G.whale_own; }
 __attribute__((export_name("dbg_whaleon"))) int exp_dbg_whaleon(void){ return G.whale_on; }
+__attribute__((export_name("dbg_pwon"))) int exp_dbg_pwon(void){ int id = G.my_id>=0? G.my_id : 0; return G.p[id].whale_on; }   // v1.32: the LOCAL PLAYER's on-mask — the kill gate reads this one, not G's
+__attribute__((export_name("dbg_pown"))) int exp_dbg_pown(void){ int id = G.my_id>=0? G.my_id : 0; return G.p[id].whale_own; }
+extern int g_party_bursts;
+__attribute__((export_name("dbg_party"))) int exp_dbg_party(void){ return g_party_bursts; }   // v1.32: CONFETTI SQUASH bursts this session
 static char dbg_code_scratch[200];
 __attribute__((export_name("dbg_scratch"))) char *exp_dbg_scratch(void){ return dbg_code_scratch; }
 __attribute__((export_name("dbg_redeem"))) int exp_dbg_redeem(void){

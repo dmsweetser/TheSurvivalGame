@@ -149,14 +149,18 @@ static void cas_render(int pi){
     }
     // HUD, written on the top wall
     { char buf[80]; char *q;
-      draw_text(CRX(40), CRY(10), S->cas_shuffle? "CASTLE - SHUFFLE" : "CASTLE", 1, COL(255, 205, 40));
+      // v1.32: the left column takes the START-chip offset like the
+      // other Banzai HUDs — the chip ate the CASTLE title whole (only
+      // its last letter peeked out) and clipped the HP bar's left end.
+      int cdx = (int)(bw_chip_dx(pi) / cs);
+      draw_text(CRX(40 + cdx), CRY(10), S->cas_shuffle? "CASTLE - SHUFFLE" : "CASTLE", 1, COL(255, 205, 40));
       draw_text_center(CRX(320), CRY(10), CAS_NAMES[room], 1, COL(190, 235, 190));
       q = buf; q = sappend(q, "SCORE "); q = sapp_int(q, S->cas_score); *q = 0;
       draw_text(CRX(600) - (int)(slen(buf) * 8 * cs), CRY(10), buf, 1, COL(235, 238, 245));
-      draw_text(CRX(40), CRY(30), "HP", 1, COL(190, 235, 190));
-      rect_fill(CRX(66), CRY(30), CRS(110), CRS(8), COL(40, 44, 40));
+      draw_text(CRX(40 + cdx), CRY(30), "HP", 1, COL(190, 235, 190));
+      rect_fill(CRX(66 + cdx), CRY(30), CRS(110), CRS(8), COL(40, 44, 40));
       { int hw = b->maxhp > 0? (int)(110.0f * b->hp / b->maxhp) : 0; if (hw < 0) hw = 0;
-        if (hw > 0) rect_fill(CRX(66), CRY(30), CRS(hw), CRS(8), (b->hp * 3 < b->maxhp)? COL(230, 80, 80) : COL(110, 220, 120)); }
+        if (hw > 0) rect_fill(CRX(66 + cdx), CRY(30), CRS(hw), CRS(8), (b->hp * 3 < b->maxhp)? COL(230, 80, 80) : COL(110, 220, 120)); }
       q = buf; q = sappend(q, "TREASURES "); q = sapp_int(q, S->cas_treasures); q = sappend(q, "/13"); *q = 0;
       draw_text_center(CRX(320), CRY(30), buf, 1, COL(255, 220, 120));
       { int ix = CRX(470);

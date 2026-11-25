@@ -13,7 +13,12 @@ static void war_render_map(int pi, int vx, int vy, int vw2, int vh2){
     for (int i=0;i<40;i++){
         u32 h = hash2(i*7+1, i*13+5, 0x5EEDu);
         int sx = vx + (int)(h % (u32)(vw2>0? vw2 : 1)), sy = vy + (int)((h>>9) % (u32)(vh2>0? vh2 : 1));
-        pset(sx, sy, COL(70,66,100));
+        // v1.32: the map's stars twinkle — brightness rides a slow
+        // per-star phase, and the brightest few wear a plus sparkle
+        float tw = 0.5f + 0.5f*fsin(G.anim_t*1.7f + (float)((h>>18)%12)*0.9f);
+        int lum = 52 + (int)(tw*70.0f);
+        pset(sx, sy, COL(lum, lum-4>0? lum-4 : lum, lum+30>255? 255 : lum+30));
+        if ((h>>22)%9==0 && tw>0.75f){ pset(sx-1, sy, COL(200,200,230)); pset(sx+1, sy, COL(200,200,230)); pset(sx, sy-1, COL(200,200,230)); pset(sx, sy+1, COL(200,200,230)); }
     }
     draw_text_center(vx+vw2/2, vy+14, "WAR!", 3, COL(255,120,90));
     draw_text_center(vx+vw2/2, vy+42, "CONQUER THE EIGHT REGIONS", 1, COL(200,210,230));
@@ -22,6 +27,11 @@ static void war_render_map(int pi, int vx, int vy, int vw2, int vh2){
         int nx, ny; war_node_pos(vx, vy, vw2, vh2, r, &nx, &ny);
         line_thick(cx, cy, nx, ny, 1, r < b->war_prog? REGION_GA[r] : COL(52,48,78));
     }
+    // v1.32: the epicentre breathes — a warm halo and a slow pulse
+    // ring under the hub disc, so the map's heart reads as live
+    glow_ellipse(cx, cy, 30, 30, COL(255,110,70), 34);
+    { int pr = 13 + (int)(3.0f*(0.5f + 0.5f*fsin(G.anim_t*2.0f)));
+      circle_out(cx, cy, pr, COL(255,140,100)); }
     disc_fill(cx, cy, 10, COL(255,90,70)); disc_fill(cx, cy, 5, COL(255,200,120));
     draw_text_center(cx, cy+13, "EPICENTER", 1, COL(255,170,150));
     for (int r=0;r<8;r++){
@@ -34,7 +44,7 @@ static void war_render_map(int pi, int vx, int vy, int vw2, int vh2){
         if (war_snap_on[pi] && war_snap_reg[pi]==r){   // v1.18: a battle is parked HERE — tapping this node resumes it, and the player must be able to see that
             int pr2 = 34 + (int)(fsin(G.anim_t*4.0f + 1.5f)*3.0f);
             circle_out(nx, ny, pr2, COL(140,255,170));
-            draw_text_center(nx, ny+44, "IN PROGRESS", 1, COL(160,255,190));
+            draw_text_center(nx, (r==3 || r==4)? ny-54 : ny+44, "IN PROGRESS", 1, COL(160,255,190));   // v1.32: the bottom nodes' under-labels collide (r3: the SKIRMISH button; r4: the footer lines) — mirror above, with the name label
         }
         if (r == S->war_map_sel) circle_out(nx, ny, 31, COL(255,220,90));
         disc_fill(nx, ny, 24, done? REGION_GA[r] : frontier? col_shade(REGION_GA[r], 0.75f) : COL(52,50,66));
@@ -51,7 +61,7 @@ static void war_render_map(int pi, int vx, int vy, int vw2, int vh2){
             draw_text_center(nx, ny-7, nb, 2, COL(16,16,24));
         }
         static const char *SHORT[8] = { "MEADOWS", "SPAGHETTI", "LEGACY", "BADLANDS", "CACHE FIELDS", "RAM FLATS", "CABLE JUNGLE", "THE DEPTHS" };
-        draw_text_center_fit(nx, r==4? ny-40 : ny+30, 150, SHORT[r], 1,
+        draw_text_center_fit(nx, (r==3 || r==4)? ny-40 : ny+30, 150, SHORT[r], 1,   // v1.32: BADLANDS (r3) joins CACHE FIELDS above its node — below, its label ran under the SKIRMISH button and lost its last letter
                              done? col_shade(REGION_GA[r], 1.25f) : frontier? COL(240,244,250) : COL(110,106,130));
     }
     { char buf[48]; char *q=buf; q=sappend(q, "REGIONS CONQUERED: "); q=sapp_int(q, b->war_prog); q=sappend(q, " / 8"); *q=0;

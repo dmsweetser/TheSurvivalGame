@@ -254,16 +254,21 @@ static void bw_render_ent(int pi){
         }
     }
     // the buddy card + the run card
-    rect_fill(vx+8, vy+8, 168, 46, COL(20,26,20)); rect_line(vx+8, vy+8, 168, 46, COL(198,164,84));
+    // v1.32: the buddy card takes the same START-chip offset as every
+    // other Banzai HUD (v1.30's bw_chip_dx) — without it the chip sat
+    // on the card's top-left corner, hiding the first half of the
+    // buddy's name ("AEGNOR T" went unseen) and the HP bar's left end.
+    { int edx = bw_chip_dx(pi);
+    rect_fill(vx+8+edx, vy+8, 168, 46, COL(20,26,20)); rect_line(vx+8+edx, vy+8, 168, 46, COL(198,164,84));
     { char buf[64]; char *q=buf; q=sappend(q, BUD_ELF[b->name_idx%BUD_NAMES_N]); q=sappend(q, " THE "); q=sappend(q, BUD_NAME[b->species%BUDN]); *q=0;
-      draw_text(vx+14, vy+13, buf, 1, COL(255,244,210)); }
+      draw_text(vx+14+edx, vy+13, buf, 1, COL(255,244,210)); }
     { float f = b->maxhp>0? b->hp/b->maxhp : 0; if (f<0) f=0;
-      rect_fill(vx+14, vy+26, 120, 5, COL(40,30,40)); rect_fill(vx+14, vy+26, (int)(120*f), 5, f>0.35f? COL(120,230,90) : COL(255,170,60));
+      rect_fill(vx+14+edx, vy+26, 120, 5, COL(40,30,40)); rect_fill(vx+14+edx, vy+26, (int)(120*f), 5, f>0.35f? COL(120,230,90) : COL(255,170,60));
       char hb[24]; char *q=hb; q=sapp_int(q, (int)b->hp); q=sappend(q, "/"); q=sapp_int(q, (int)b->maxhp); *q=0;
-      draw_text(vx+138, vy+25, hb, 1, COL(230,240,230)); }
+      draw_text(vx+138+edx, vy+25, hb, 1, COL(230,240,230)); }
     { float f = b->energy/BUD_ENERGY_MAX; if (f<0) f=0;
-      rect_fill(vx+14, vy+36, 120, 4, COL(40,30,40)); rect_fill(vx+14, vy+36, (int)(120*f), 4, COL(120,200,255));
-      draw_text(vx+138, vy+35, "ENERGY", 1, COL(170,220,255)); }
+      rect_fill(vx+14+edx, vy+36, 120, 4, COL(40,30,40)); rect_fill(vx+14+edx, vy+36, (int)(120*f), 4, COL(120,200,255));
+      draw_text(vx+138+edx, vy+35, "ENERGY", 1, COL(170,220,255)); } }
     { char buf[72]; char *q=buf; if (S->ent_sub){ q=sappend(q, "FLOOR B-"); q=sapp_int(q, room); } else if (S->ent_chap==2){ q=sappend(q, "DEEPER "); q=sapp_int(q, room); } else { q=sappend(q, "ENTRANCE "); q=sapp_int(q, room); }
       rect_fill(vx+vw2-158, vy+8, 150, 46, COL(20,26,20)); rect_line(vx+vw2-158, vy+8, 150, 46, COL(198,164,84));
       draw_text(vx+vw2-150, vy+13, buf, 1, COL(255,244,210));
