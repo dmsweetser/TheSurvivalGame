@@ -136,6 +136,7 @@ static int war_spawn_unit(BwSim *S, int type, float x, float y){
         S->war_ustate[i]=0; S->war_utarget[i]=0; S->war_ucarry[i]=0; S->war_usel[i]=0;
         S->war_uatk[i]=0; S->war_uharv[i]=0; S->war_utx[i]=x; S->war_uty[i]=y;
         S->war_urepair[i]=0; S->war_urepacc[i]=0; S->war_urepscan[i]=0;
+        S->war_uclan[i]=0; S->war_uaggro[i]=0;   // v1.33: a fresh unit has no clan and no grudge (bug spawns stamp their clan on after)
         S->war_wpn[i]=0; S->war_wpi[i]=0; S->war_stallt[i]=0; S->war_repath[i]=0;
         S->war_stallx[i]=x; S->war_stally[i]=y; S->war_ptgx[i]=x; S->war_ptgy[i]=y;
         return i;
@@ -147,6 +148,7 @@ static int war_spawn_struct(BwSim *S, int type, int side, float x, float y){
         int hp = type==WAR_S_HIVE? 220 + 60*S->war_region : WAR_SHP[type];
         S->war_stype[i]=type; S->war_sside[i]=side; S->war_sx[i]=x; S->war_sy[i]=y;
         S->war_smaxhp[i]=hp; S->war_shp[i]=(float)hp; S->war_scd[i]=0; S->war_qt[i]=0; S->war_qlen[i]=0; S->war_rallyx[i]=0; S->war_rallyy[i]=0; S->war_hbits[i]=0;
+        S->war_sclan[i]=0; S->war_smineracc[i]=0;   // v1.33: clan stamped on by the spawner (hives in war_build_battle); the trickle starts empty
         return i;
     }
     return -1;
@@ -159,11 +161,12 @@ static int war_bug_type_next(BwSim *S){
     return WAR_U_CRAWL;
 }
 static int war_spawn_bug_t(BwSim *S, int hive, int wave, int type){   // returns the unit slot, -1 when the swarm is capped or the field is full
-    if (war_count_units(S, 1) >= 40) return -1;
+    if (war_count_clan(S, war_s_team(S, hive)) >= 40) return -1;   // v1.33: the 40-bug cap is per CLAN now — nine clans field nine swarms (the old side-wide cap would have starved a free-for-all)
     float a = (float)(war_count_units(S, 1) % 8) * 0.8f + (wave? 2.0f : 0.0f);
     int i = war_spawn_unit(S, type, S->war_sx[hive] + fcos(a)*(WAR_SRAD[WAR_S_HIVE]+16),
                                    S->war_sy[hive] + fsin(a)*(WAR_SRAD[WAR_S_HIVE]+16));
     if (i>=0){
+        S->war_uclan[i] = war_s_team(S, hive);   // v1.33: a bug is born into its hive's clan
         S->war_ustate[i] = wave? 1 : 0;
         S->war_utx[i] = S->war_sx[hive]; S->war_uty[i] = S->war_sy[hive];   // a guard's home
     }

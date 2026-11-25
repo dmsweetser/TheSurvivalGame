@@ -103,6 +103,62 @@ static void mor_pow_clear_all(BwSim *S){ for (int i=0;i<8;i++) S->mor_powtaken[i
 static void mor_pow_clear_from(int pi, BwSim *S, float s){   // a faint: stations at/after the banked milestone are back on the road
     for (int k=0;k<MOR_POW_N;k++){ float ps, pl; int kd; mor_pow_pos(pi, k, &ps, &pl, &kd); if (ps >= s) S->mor_powtaken[k>>3] &= (unsigned char)~(1 << (k&7)); }
 }
+// --- one effect application, shared by stations and kill drops -------------
+// v1.33: the station pickup block used to live inline in mor_update;
+// it is factored here VERBATIM (same amounts, same notes, same
+// note_t / splat / sfx, in the same order) so a dropped pickup and
+// a station pickup can never drift apart in what they grant.
+static void mor_apply_pow(int pi, int kind, float px, float py){
+    BwSim *S=&BWS[pi]; Buddy *b=&G.bud[pi];
+    if (kind==0){ int mh = mor_maxhp(b); b->mor_hp += 50; if (b->mor_hp > mh) b->mor_hp = mh;
+        scpy(S->note, "+50 HP. THE ROAD PROVIDES.", 72); }
+    else if (kind==1){ S->mor_amp_t = 30.0f; scpy(S->note, "WEAPON AMPLIFIED! DOUBLE DAMAGE FOR 30 SECONDS.", 72); }
+    else { S->mor_spd_t = 20.0f; scpy(S->note, "SPEED BOOST! SWIFT FEET FOR 20 SECONDS.", 72); }
+    S->note_t = 2.6f;
+    splat(px, py, kind==0? COL(255,120,120) : kind==1? COL(255,170,60) : COL(110,220,255), 14, 120);
+    sfx(11);
+}
+// --- kill drops (v1.33, Daniel): a defeated foe may leave a pickup ---------
+// "In Mordor Fun Run I would like to have it where you can get
+// power-ups randomly from defeating enemies. Right now you don't
+// get anything from doing the fighting." A kill rolls against
+// mor_drop_chance; a hit leaves a pickup of the station effect
+// family sitting on the road where the foe fell, collected by
+// running over it exactly like a station. The roll is the mode's
+// deterministic idiom — a hash of (buddy seed, kill counter) with
+// its own salt (stations use 0x51AB3, foes 0x402D09) — so a run's
+// drops re-derive identically from its seed and kill sequence,
+// never from wall-clock rng. Drops are session-only (see story.c):
+// never saved, cleared on entry / a new run, and a faint clears
+// the ones at/after the banked milestone, mirroring the stations.
+#define MOR_DROP_N 24
+static float mor_drop_chance = 0.18f;   // the design value: ~18% of kills drop a pickup
+static void mor_drop_clear_all(BwSim *S){
+    for (int i=0;i<MOR_DROP_N;i++) S->mor_drop_on[i] = 0;
+    S->mor_drop_spawned = 0;
+}
+static void mor_drop_clear_from(BwSim *S, float s){   // a faint: drops at/after the banked milestone are gone with the stretch's reset
+    for (int i=0;i<MOR_DROP_N;i++) if (S->mor_drop_on[i] && S->mor_drop_s[i] >= s) S->mor_drop_on[i] = 0;
+}
+static void mor_drop_try_spawn(int pi, float ex, float ey){
+    BwSim *S=&BWS[pi]; Buddy *b=&G.bud[pi];
+    u32 seed = (u32)b->bw_seed ^ 0xD2097u;
+    // mor_kills has already been incremented for this kill at the
+    // call site, so kill #1 rolls with salt 1, kill #2 with 2, ...
+    if (hash_f(S->mor_kills*37 + 11, S->mor_kills ^ 0xD2, seed) >= mor_drop_chance) return;
+    int slot = -1;
+    for (int i=0;i<MOR_DROP_N;i++) if (!S->mor_drop_on[i]){ slot = i; break; }
+    if (slot<0) return;   // the road is full of loot: the new drop is skipped, the drops already down are never overwritten
+    u32 h = hash2(S->mor_kills*53 + 7, S->mor_kills ^ 0x9D, seed);
+    int r = (int)((h>>16) % 100);
+    int kind = r<40? 0 : r<70? 1 : 2;   // the stations' own mix: health 40 / amplification 30 / speed 30
+    float ds = (float)MOR_Y0 - ey;
+    if (ds<0) ds=0; if (ds>(float)mor_total_units(pi)) ds=(float)mor_total_units(pi);
+    float dlat = ex - mor_cx(ds);
+    if (dlat > MOR_LATMAX) dlat = MOR_LATMAX; if (dlat < -MOR_LATMAX) dlat = -MOR_LATMAX;
+    S->mor_drop_s[slot] = ds; S->mor_drop_lat[slot] = dlat; S->mor_drop_kind[slot] = kind; S->mor_drop_on[slot] = 1;
+    S->mor_drop_spawned++;
+}
 // --- the foes: a hash function of (seed, chunk, slot) -----------------------
 static const int MOR_EHP[4] = { 14, 10, 22, 34 };        // goblin, wolf, spider, orc
 static const float MOR_ESPD[4] = { 92, 148, 78, 66 };
@@ -161,7 +217,7 @@ static void mor_start_run(int pi){
     b->mor_on = 1; b->mor_dist = 0; b->mor_mile = 0; b->mor_hp = mor_maxhp(b); b->mor_secs = 0; b->mor_lat = 0;
     S->mor_t = 0; S->mor_kills = 0; S->mor_en_n = 0;
     for (int i=0;i<960;i++) S->mor_dead[i] = 0;
-    mor_pow_clear_all(S); S->mor_amp_t = 0; S->mor_spd_t = 0;
+    mor_pow_clear_all(S); mor_drop_clear_all(S); S->mor_amp_t = 0; S->mor_spd_t = 0;
     S->mor_panel = 0;
     mor_place(pi, 0, 0);
     scpy(S->note, "A NEW RUN. THE SHIRE BEHIND YOU, MORDOR AHEAD. 1000 MOOSE.", 72); S->note_t = 3.6f;
@@ -172,7 +228,7 @@ static void mor_enter(int pi){
     S->mor_en_n = 0; S->mor_spawn_t = 0; S->mor_swing_cd = 0; S->mor_swing_t = 0;
     S->mor_grace = 0; S->mor_faintt = 0; S->mor_cleart = 0; S->mor_confirm_t = 0; S->mor_hurt_t = 0; S->mor_pick_lock = 0;
     S->mor_kills = 0; S->mor_swings = 0; S->mor_panel = 0;
-    mor_pow_clear_all(S); S->mor_amp_t = 0; S->mor_spd_t = 0;   // v1.29: buffs lapse on leaving, so a fresh entry starts clean; the stations re-derive untaken
+    mor_pow_clear_all(S); mor_drop_clear_all(S); S->mor_amp_t = 0; S->mor_spd_t = 0;   // v1.29: buffs lapse on leaving, so a fresh entry starts clean; the stations re-derive untaken. v1.33: kill drops are session-only too — none survive an entry
     for (int i=0;i<960;i++) S->mor_dead[i] = 0;   // a fresh entry re-derives the road's foes; the banked run (Buddy) is what persists
     if (b->mor_on){
         if (b->mor_hp<=0) b->mor_hp = mor_maxhp(b);
@@ -202,6 +258,7 @@ static void mor_faint_home(int pi){   // the faint lands: back at the banked mil
     float sm = b->mor_mile * mor_spacing(pi);
     mor_dead_clear_from(S, (int)(sm / MOR_CHUNK));
     mor_pow_clear_from(pi, S, sm);   // v1.29: the stretch's stations come back too, and the buffs end with the fall
+    mor_drop_clear_from(S, sm);   // v1.33: the stretch's kill drops are gone with its reset, mirroring the stations
     S->mor_amp_t = 0; S->mor_spd_t = 0;
     S->mor_en_n = 0;
     b->mor_hp = mor_maxhp(b);
@@ -325,13 +382,20 @@ static void mor_update(int pi, float dt, const BwIn *in){
         float dx = px - b->x, dy = py - b->y;
         if (dx*dx + dy*dy > 30*30) continue;
         mor_pow_set(S, pk);
-        if (pkind==0){ int mh = mor_maxhp(b); b->mor_hp += 50; if (b->mor_hp > mh) b->mor_hp = mh;
-            scpy(S->note, "+50 HP. THE ROAD PROVIDES.", 72); }
-        else if (pkind==1){ S->mor_amp_t = 30.0f; scpy(S->note, "WEAPON AMPLIFIED! DOUBLE DAMAGE FOR 30 SECONDS.", 72); }
-        else { S->mor_spd_t = 20.0f; scpy(S->note, "SPEED BOOST! SWIFT FEET FOR 20 SECONDS.", 72); }
-        S->note_t = 2.6f;
-        splat(px, py, pkind==0? COL(255,120,120) : pkind==1? COL(255,170,60) : COL(110,220,255), 14, 120);
-        sfx(11);
+        mor_apply_pow(pi, pkind, px, py);   // v1.33: factored into the helper the kill drops share — the station grant itself is unchanged
+    }
+    // --- kill drops (v1.33): run over a fallen foe's loot and it is yours,
+    //     through the very same grant as a station ---------------------------
+    for (int dp=0; dp<MOR_DROP_N; dp++){
+        if (!S->mor_drop_on[dp]) continue;
+        float ds = S->mor_drop_s[dp];
+        if (ds < s - 60 || ds > s + 60) continue;
+        float px = mor_cx(ds) + S->mor_drop_lat[dp], py = (float)MOR_Y0 - ds;
+        float dx = px - b->x, dy = py - b->y;
+        if (dx*dx + dy*dy > 30*30) continue;
+        int dkind = S->mor_drop_kind[dp];
+        S->mor_drop_on[dp] = 0;
+        mor_apply_pow(pi, dkind, px, py);
     }
     // --- the swing: the buddy's standard attack, real time ------------------
     if ((in->sel || in->sel_held) && S->mor_swing_cd<=0){
@@ -351,10 +415,12 @@ static void mor_update(int pi, float dt, const BwIn *in){
             if (dl>0.01f){ e->x += dx/dl*10; e->y += dy/dl*10; }
             splat(e->x, e->y, COL(255,230,160), 4, 80); sfx(5);
             if (e->hp<=0){
+                float dex = e->x, dey = e->y;   // v1.33: where the foe fell — captured before the compaction below overwrites this slot
                 mor_dead_set(S, e->chunk, e->slot);
                 splat(e->x, e->y, e->kind==3? COL(200,90,60) : e->kind==2? COL(90,80,110) : e->kind==1? COL(170,170,180) : COL(120,220,110), 14, 130);
                 sfx(7);
                 S->mor_kills++;
+                mor_drop_try_spawn(pi, dex, dey);   // v1.33: the kill rolls for a drop (salted on the kill count just incremented)
                 S->mor_en[i] = S->mor_en[--S->mor_en_n]; i--;
             }
         }

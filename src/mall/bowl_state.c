@@ -85,7 +85,7 @@ typedef struct {
     char store_msg[64];
     float gameover_t;
     int bind[14];                     // action -> physical key id (see PK_*)
-    int touch_ctl;                    // mobile control scheme: 0 = drag, 1 = virtual d-pad
+    int touch_ctl;                    // FOSSIL (v1.33): the mobile scheme field — the drag scheme is removed, the joystick is the only deck; pinned to 1 at init/load, kept so the save token round-trips
     int zen, zen_run;                 // zen preference + the running game's zen flag
     int eddie;                        // EDDIE MODE: bugs render as fuzzy orange puffballs (cosmetic)
     int whale_own, whale_on;          // WHALES ONLY: this user's unlocks (persisted globally)

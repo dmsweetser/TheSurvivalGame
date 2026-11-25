@@ -50,11 +50,11 @@ static const char *lbl2(int dev, int act){
         }
     } else if (dev==DEV_TOUCH){
         switch (act){
-            case H_FIRE: return G.touch_ctl? "FIRE" : "TAP";
-            case H_INT:  return G.touch_ctl? "USE" : "TAP";
+            case H_FIRE: return "FIRE";   // v1.33: the joystick deck's words, unconditionally (the DRAG "TAP"/"DRAG" variants died with the scheme)
+            case H_INT:  return "USE";
             case H_WALL: return "WALL";
             case H_BEAN: return "TAP BEAN";
-            case H_MOVE: return G.touch_ctl? "STICK" : "DRAG";
+            case H_MOVE: return "STICK";
             default:     return "TAP";   // CONFIRM / BACK / PAUSE / POINT
         }
     }
@@ -75,7 +75,6 @@ static const char *lbla(int act){ return lbl2(hint_dev(), act); }
 static const char *lbl_steer(void){
     int d = hint_dev();
     if (d==DEV_KB) return "STEER WITH THE ARROWS";
-    if (d==DEV_TOUCH && !G.touch_ctl) return "STEER BY DRAGGING";
     return "STEER WITH THE STICK";
 }
 // the one true label for an action, for the device in hand (the

@@ -214,8 +214,8 @@ const ACTN = ['FIRE', 'INT', 'WALL', 'BEAN', 'CONFIRM', 'BACK', 'PAUSE', 'MOVE',
     ok((await str(4)) === 'TAP', 'TOUCH: CONFIRM label is TAP', await str(4));
     ok((await str(5)) === 'TAP', 'TOUCH: BACK label is TAP', await str(5));
     ok((await str(8)) === 'TAP', 'TOUCH: POINT label is TAP', await str(8));
-    ok((await str(7)) === 'DRAG', 'TOUCH: MOVE label is DRAG in the drag scheme', await str(7));
-    ok((await str(0)) === 'TAP', 'TOUCH: FIRE label is TAP in the drag scheme', await str(0));
+    ok((await str(7)) === 'STICK', 'TOUCH: MOVE label is STICK (v1.33: the joystick is the only scheme — the DRAG label died with it)', await str(7));
+    ok((await str(0)) === 'FIRE', 'TOUCH: FIRE label names the FIRE button (v1.33: no TAP variant remains)', await str(0));
     ok((await str(2)) === 'WALL', 'TOUCH: WALL label names the WALL button', await str(2));
     await page.screenshot({ path: 'hud-touch-menu.png' });
     await page.touchscreen.tap(320, 200); await sleep(300);    // a real tap on the menu

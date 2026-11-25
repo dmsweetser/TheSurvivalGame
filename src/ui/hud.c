@@ -296,7 +296,7 @@ static void render_hud(void){
         rect_fill(MG_CHIP_X+8, MG_CHIP_Y+7, 3, 10, COL(255,214,64)); rect_fill(MG_CHIP_X+14, MG_CHIP_Y+7, 3, 10, COL(255,214,64));
         draw_text(MG_CHIP_X+26, MG_CHIP_Y+8, "START", 1, COL(255,244,200));
     }
-    // WALL button (both touch schemes): throws down 3 carcasses as a wall.
+    // WALL button: throws down 3 carcasses as a wall.
     // It pulses once you're carrying enough to build one.
     if (mobile_ui() && !pad_mode()){
         int pulse = (me->stack_n>=3) && (fsin(G.anim_t*4.0f)>0.0f);
@@ -307,13 +307,10 @@ static void render_hud(void){
         rect_fill(TP_WALL_CX+4, TP_WALL_CY-6, 6, 4, br);
         draw_text(TP_WALL_CX-text_w("WALL",1)/2, TP_WALL_CY+4, "WALL", 1, COL(255,244,200));
     }
-    // drag scheme still needs a weapon cycler (stick mode draws its own below)
-    if (G.touch_ctl==0 && mobile_ui()){
-        tbtn_base(TP_WPN_CX, TP_WPN_CY, 18, COL(66,60,96));
-        draw_text(TP_WPN_CX-text_w("WPN",1)/2, TP_WPN_CY-4, "WPN", 1, COL(225,230,245));
-    }
-    // stick controls (touch scheme 1): floating joystick + fixed buttons
-    if (G.touch_ctl==1 && mobile_ui()){
+    // the touch deck (v1.33: the ONLY touch scheme — the drag
+    // scheme's lone WPN button that used to draw here is gone with
+    // it): floating joystick + fixed buttons
+    if (mobile_ui()){
         tbtn_base(TP_FIRE_CX, TP_FIRE_CY, 34, (IN.tp_held&32)? COL(224,88,62):COL(158,54,46));
         { u32 lc = COL(255,240,230); int gy = TP_FIRE_CY-6;   // crosshair glyph
           rect_fill(TP_FIRE_CX-1, gy-10, 3, 6, lc); rect_fill(TP_FIRE_CX-1, gy+5, 3, 6, lc);

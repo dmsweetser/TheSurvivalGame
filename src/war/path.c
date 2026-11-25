@@ -256,8 +256,8 @@ static void war_bharv_update(int pi, int i, float dt){
         return;
     }
     if (S->war_ucarry[i] >= WAR_CARRY || st==4){   // full (or already homeward): haul it to the home hive
-        int h = war_home_hive(S, x, y);
-        if (h<0){ S->war_ustate[i]=0; return; }   // no hive left to pay — the battle is already decided
+        int h = war_home_hive_c(S, x, y, war_u_team(S, i));
+        if (h<0){ S->war_ustate[i]=0; return; }   // no hive of ITS clan left to pay — its war is over, even if rivals still stand
         float d = war_move_to(S, i, S->war_sx[h], S->war_sy[h], WAR_SRAD[WAR_S_HIVE]+8.0f, dt);
         if (d <= WAR_SRAD[WAR_S_HIVE]+16.0f){
             if (S->war_ucarry[i]>0){ S->war_hbits[h] += S->war_ucarry[i]; S->war_ucarry[i]=0; war_fx_spawn(S, x, y-6, 1); }   // cosmetic: the deposit sparkle (no sfx — the hive works in silence)
@@ -275,7 +275,7 @@ static void war_bharv_update(int pi, int i, float dt){
       }
       if (bn<0){   // the field is dry: hand over what's carried, then wait by the hive
           if (S->war_ucarry[i]>0){ S->war_ustate[i]=4; return; }
-          int h = war_home_hive(S, x, y);
+          int h = war_home_hive_c(S, x, y, war_u_team(S, i));
           if (h>=0) war_move_to(S, i, S->war_sx[h]+52, S->war_sy[h]+38, 6.0f, dt);
           return;
       }
@@ -360,11 +360,21 @@ static void war_unit_update(int pi, int i, float dt){
         float aggro = state==1? 80.0f : 150.0f;
         tref = war_nearest_enemy(S, 0, x, y, aggro, 1, 0);
         if (!tref && state==0) tref = war_nearest_enemy(S, 0, x, y, 70.0f, 0, 1);
-    } else if (state==1){   // a wave bug: whatever it meets, then the base
-        tref = war_nearest_enemy(S, 1, x, y, 170.0f, 1, 0);
-        if (!tref) tref = war_nearest_enemy(S, 1, x, y, 210.0f, 0, 1);
-    } else {   // a hive guard: anything of yours that wanders close
-        tref = war_nearest_enemy(S, 1, x, y, 180.0f, 1, 1);
+    } else {   // a bug: its foes are every OTHER team (v1.33 — the player and, in a free-for-all, the rival clans)
+        int team = war_u_team(S, i);
+        // v1.33 (Section F): a latched grudge outranks every default
+        // target while the attacker lives — at any range. The bug
+        // hunts the one who hit it; when the grudge dies the latch
+        // clears here and the defaults below take over again (the
+        // next hit re-latches).
+        int agg = S->war_uaggro[i];
+        if (agg){ float ax2, ay2; if (war_ref_alive(S, agg, &ax2, &ay2)) tref = agg; else S->war_uaggro[i] = 0; }
+        if (!tref && state==1){   // a wave bug: whatever foe it meets, then a foe base
+            tref = war_nearest_foe(S, team, x, y, 170.0f, 1, 0);
+            if (!tref) tref = war_nearest_foe(S, team, x, y, 210.0f, 0, 1);
+        } else if (!tref) {   // a hive guard: any foe that wanders close
+            tref = war_nearest_foe(S, team, x, y, 180.0f, 1, 1);
+        }
     }
     if (tref){
         float tx, ty;
@@ -383,10 +393,10 @@ static void war_unit_update(int pi, int i, float dt){
                 // and rubble take the plain rate, never the x2.
                 if (type==WAR_U_SIEGE && tref<0 && ft<0) dmg *= 2;
                 if (type==WAR_U_MELEE || type==WAR_U_CRAWL){
-                    if (tref>0) war_hurt_unit(pi, tref-1, dmg);
+                    if (tref>0) war_hurt_unit_from(pi, tref-1, dmg, i+1);   // v1.33: the blow names its striker — the victim remembers (Section F)
                     else if (ft>=0) war_hurt_terrain(pi, ft, dmg, side);
                     else war_hurt_struct(pi, -tref-1, dmg);
-                } else war_fire(S, side, x, y, tref, dmg);
+                } else war_fire(S, side, x, y, tref, dmg, i+1);
             }
             return;
         }
@@ -395,9 +405,9 @@ static void war_unit_update(int pi, int i, float dt){
         if (war_move_to(S, i, S->war_utx[i], S->war_uty[i], 4.0f, dt) <= 6.0f) S->war_ustate[i]=0;
         return;
     }
-    if (side==1 && state==1){   // wave bug, nothing in the way: march on the Core
-        int hq = war_find_hq(S);
-        if (hq>=0 && war_struct_alive(S, hq)) war_move_to(S, i, S->war_sx[hq], S->war_sy[hq], WAR_SRAD[WAR_S_HQ]+10.0f, dt);
+    if (side==1 && state==1){   // wave bug, nothing in the way: march on a foe base
+        int bs = war_foe_base(S, war_u_team(S, i), x, y);   // v1.33: the nearest hostile base — in a free-for-all a rival hive is as good a march as the Core; in a single-clan field this finds the Core exactly as before
+        if (bs>=0) war_move_to(S, i, S->war_sx[bs], S->war_sy[bs], (float)WAR_SRAD[S->war_stype[bs]]+10.0f, dt);
         return;
     }
     if (side==1 && state==0){   // guard bug: drift back home if it strayed
@@ -413,7 +423,21 @@ static void war_struct_update(int pi, int s, float dt){
     if (type==WAR_S_ZAP){
         if (S->war_scd[s] <= 0){
             int tref = war_nearest_enemy(S, 0, S->war_sx[s], S->war_sy[s], 118.0f, 1, 0);
-            if (tref){ war_fire(S, 0, S->war_sx[s], S->war_sy[s]-10, tref, 8); S->war_scd[s]=0.55f; }
+            if (tref){ war_fire(S, 0, S->war_sx[s], S->war_sy[s]-10, tref, 8, -(s+1)); S->war_scd[s]=0.55f; }   // v1.33: the tower signs its shots — a bug it stings turns on the TOWER (Section F)
+        }
+    } else if (type==WAR_S_MINER){
+        // v1.33: the BIT MINER's trickle — one bit per WAR_MINER_RATE
+        // seconds into the owner's purse: yours if it's yours, the
+        // clan's hive purse if it's a clan's. Fractional time rides
+        // war_smineracc; only whole bits land.
+        S->war_smineracc[s] += dt;
+        while (S->war_smineracc[s] >= WAR_MINER_RATE){
+            S->war_smineracc[s] -= WAR_MINER_RATE;
+            if (S->war_sside[s]==0) S->war_bits += 1;
+            else {
+                int h = war_home_hive_c(S, S->war_sx[s], S->war_sy[s], war_s_team(S, s));
+                if (h>=0) S->war_hbits[h] += 1;
+            }
         }
     } else if (type==WAR_S_HIVE){
         // v1.21: the hive spends NOTHING between waves. The old
@@ -495,7 +519,7 @@ static void war_proj_update(int pi, float dt){
         float sp = S->war_pside[i]==0? 320.0f : 250.0f;
         if (d <= sp*dt + 7.0f){
             int ft = war_ref_feat(S->war_ptar[i]);
-            if (S->war_ptar[i]>0) war_hurt_unit(pi, S->war_ptar[i]-1, S->war_pdmg[i]);
+            if (S->war_ptar[i]>0) war_hurt_unit_from(pi, S->war_ptar[i]-1, S->war_pdmg[i], S->war_psrc[i]);   // v1.33: the shot lands with its shooter's name on it (Section F)
             else if (ft>=0) war_hurt_terrain(pi, ft, S->war_pdmg[i], S->war_pside[i]);
             else war_hurt_struct(pi, -S->war_ptar[i]-1, S->war_pdmg[i]);
             S->war_pt[i]=0;
@@ -561,7 +585,7 @@ static void war_jitter_nodes(BwSim *S){
 // war_ah / gw / gh / lines / skirmish) and placed the bit nodes —
 // terrain generation tests against the nodes and hives, so the
 // nodes must be down before this runs.
-static void war_build_battle(int pi, int region, int bits, int nh){
+static void war_build_battle(int pi, int region, int bits, int nh, int clans){
     BwSim *S = &BWS[pi];
     // v1.18 (Daniel: "novel every time you play"): this battle's
     // seed mixes the region, the run clock and a per-process
@@ -595,12 +619,14 @@ static void war_build_battle(int pi, int region, int bits, int nh){
     // where it stood last time. No more "just go to the far right".
     // (At the campaign's 1600x1200: x 1240..1460, margin 130 —
     // v1.27 widened the x roll from 150 to 220.)
+    S->war_clans = clans;   // v1.33: the battle's clan count (1 for every campaign fight — the swarm is one clan there)
     { float band_h = S->war_ah / (float)nh;
       float hmargin = S->war_ah*(130.0f/1200.0f);
       for (int h=0;h<nh;h++){
           float hx = (S->war_aw-360.0f) + hash_f(h, 11, S->war_bseed) * 220.0f;
           float hy = (float)h * band_h + hmargin + hash_f(h, 12, S->war_bseed) * (band_h - 2.0f*hmargin);
           int hi = war_spawn_struct(S, WAR_S_HIVE, 1, WAR_OX+hx, WAR_OY+hy);
+          if (hi>=0) S->war_sclan[hi] = (h % clans) + 1;   // v1.33: hive h belongs to clan (h mod clans)+1 — a skirmish deals one hive per clan, the campaign's hives all fly clan 1
           // v1.27: garrison jitter — 2-3 guards by hash (was a
           // flat 2); the region>=2 bonus bug still stacks on top
           int guards = 2 + (hash_f(h, 41, S->war_bseed) < 0.5f? 1 : 0);
@@ -618,9 +644,8 @@ static void war_build_battle(int pi, int region, int bits, int nh){
     S->war_camx = WAR_OX+280; S->war_camy = WAR_OY+corey;
     war_clamp_cam(S);
     if (S->war_skirmish){
-        static const char *SKN[4] = { "", "SMALL", "STANDARD", "LARGE" };
         static const char *SKD[4] = { "", "EASY", "NORMAL", "HARD" };
-        char buf[72]; char *q=buf; q=sappend(q, "SKIRMISH - "); q=sappend(q, SKN[S->war_size]); q=sappend(q, " FIELD, "); q=sappend(q, SKD[S->war_diff]); q=sappend(q, " ENEMY. KILL THE HIVE"); if (nh>1) q=sappend(q, "S"); q=sappend(q, "."); *q=0;
+        char buf[72]; char *q=buf; q=sappend(q, "SKIRMISH - "); q=sapp_int(q, (int)S->war_aw); q=sappend(q, " X "); q=sapp_int(q, (int)S->war_ah); q=sappend(q, ", "); q=sappend(q, SKD[S->war_diff]); q=sappend(q, ", "); q=sapp_int(q, clans); q=sappend(q, clans>1? " CLANS. EVERY HIVE MUST FALL." : " CLAN. KILL THE HIVE."); *q=0;
         war_note(S, buf);
     } else {
         char buf[72]; char *q=buf; q=sappend(q, "CONQUER "); q=sappend(q, REGION_NAME[region]);
@@ -635,7 +660,7 @@ static void war_start_battle(int pi, int region){
     war_clear_field(S);   // resets to campaign geometry, war_skirmish=0
     war_place_nodes(S, WAR_ND, WAR_NA, 11, 1.0f, 1.0f);
     int nh = 1 + (region>=3? 1:0) + (region>=6? 1:0);
-    war_build_battle(pi, region, 300, nh);   // v1.19: 300 starting bits (was 250)
+    war_build_battle(pi, region, 300, nh, 1);   // v1.19: 300 starting bits (was 250). v1.33: the campaign swarm is one clan
     war_link_pull(pi);   // feat 13: a launch pulls the other local commander in
 }
 // v1.19: a SKIRMISH — an ad-hoc battle on the player's picked
@@ -649,18 +674,19 @@ static void war_start_battle(int pi, int region){
 // reads it exactly as it would a campaign region.
 static void war_start_skirmish(int pi){
     BwSim *S = &BWS[pi];
-    int size = (S->war_size>=1 && S->war_size<=3)? S->war_size : 2;
+    int size = (S->war_size>=1 && S->war_size<=5)? S->war_size : 2;   // v1.33: the ladder runs to 5 now
     int diff = (S->war_diff>=1 && S->war_diff<=3)? S->war_diff : 2;
-    S->war_size = size; S->war_diff = diff;
+    int clans = (S->war_clanpick>=1 && S->war_clanpick<=9)? S->war_clanpick : 1;   // v1.33: the CLANS pick (unset = 1, the classic single swarm)
+    S->war_size = size; S->war_diff = diff; S->war_clanpick = clans;
     war_clear_field(S);
     war_snap_sk_clear(pi);   // v1.29: a fresh skirmish supersedes the saved one
     S->war_skirmish = 1;
-    if (size==1){ S->war_aw=1200.0f; S->war_ah=900.0f; S->war_lines=2; }
-    else if (size==3){ S->war_lines=4; }
-    else { S->war_lines=3; }
+    S->war_aw = (float)WAR_SIZE_AW[size]; S->war_ah = (float)WAR_SIZE_AH[size];
+    S->war_lines = WAR_SIZE_LINES[size];
     S->war_gw = (int)(S->war_aw/40.0f); S->war_gh = (int)(S->war_ah/40.0f);
-    int region = diff==1? 1 : diff==3? 6 : 3;   // EASY / NORMAL / HARD as region equivalents
-    int bits = size==1? 250 : size==3? 400 : 300;
+    int region = diff==1? 1 : diff==3? 6 : 3;   // EASY / NORMAL / HARD as region equivalents — difficulty stays the STRENGTH axis; clans are the COUNT axis (v1.33: hive count no longer rides difficulty)
+    int bits = WAR_SIZE_BITS[size];
+    float sx = S->war_aw/1600.0f, sy = S->war_ah/1200.0f;
     if (size==1){
         // a subset of the standard table, scaled onto the small
         // field: both west nodes, the centre, both east nodes and
@@ -668,21 +694,24 @@ static void war_start_skirmish(int pi){
         static const int IDX[6] = { 0, 1, 4, 5, 6, 10 };
         float nd[6][2]; int na[6];
         for (int k=0;k<6;k++){ nd[k][0]=WAR_ND[IDX[k]][0]; nd[k][1]=WAR_ND[IDX[k]][1]; na[k]=WAR_NA[IDX[k]]; }
-        war_place_nodes(S, (const float (*)[2])nd, na, 6, S->war_aw/1600.0f, S->war_ah/1200.0f);
-    } else if (size==3){
-        // the standard eleven plus two corner nodes — 9,500 bits,
-        // a dense field
-        float nd[13][2]; int na[13];
-        for (int k=0;k<11;k++){ nd[k][0]=WAR_ND[k][0]; nd[k][1]=WAR_ND[k][1]; na[k]=WAR_NA[k]; }
-        nd[11][0]=300.0f; nd[11][1]=150.0f; na[11]=500;
-        nd[12][0]=1450.0f; nd[12][1]=900.0f; na[12]=800;
-        war_place_nodes(S, (const float (*)[2])nd, na, 13, 1.0f, 1.0f);
-    } else {
+        war_place_nodes(S, (const float (*)[2])nd, na, 6, sx, sy);
+    } else if (size==2){
         war_place_nodes(S, WAR_ND, WAR_NA, 11, 1.0f, 1.0f);
+    } else {
+        // the standard eleven plus extra nodes in the same
+        // 1600x1200 table space, all scaled onto the big field;
+        // amounts scale with the field's AREA so bit density (and
+        // harvester trip value) stays the standard game's
+        static const float EX[5][2] = { {300,150},{1450,900},{1300,150},{300,1050},{800,1050} };
+        static const int EXA[5] = { 500, 800, 650, 650, 700 };
+        int nextra = size==3? 2 : 5;   // 13 nodes on 2400x1800, the full 16 past that
+        float nd[16][2]; int na[16];
+        float amf = (S->war_aw*S->war_ah)/(1600.0f*1200.0f);
+        for (int k=0;k<11;k++){ nd[k][0]=WAR_ND[k][0]; nd[k][1]=WAR_ND[k][1]; na[k]=(int)((float)WAR_NA[k]*amf + 0.5f); }
+        for (int k=0;k<nextra;k++){ nd[11+k][0]=EX[k][0]; nd[11+k][1]=EX[k][1]; na[11+k]=(int)((float)EXA[k]*amf + 0.5f); }
+        war_place_nodes(S, (const float (*)[2])nd, na, 11+nextra, sx, sy);
     }
-    int nh = diff;              // EASY 1 / NORMAL 2 / HARD 3 hives
-    if (size==1 && nh>2) nh=2;  // a SMALL field caps at 2
-    war_build_battle(pi, region, bits, nh);
+    war_build_battle(pi, region, bits, clans, clans);   // v1.33: one hive per clan
     war_link_pull(pi);   // feat 13: a launch pulls the other local commander in
 }
 static float war_axis(float a);   // defined with the pad code below; the pause menu's pad handler needs it early

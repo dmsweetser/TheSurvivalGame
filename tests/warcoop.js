@@ -350,7 +350,7 @@ async function enterWar(page, P, pi) {
       panel = (await poll(page, 'dbg_warstate', v => v === 4, 2500)) === 4;
     }
     ok(panel, 'leg8: the skirmish setup panel opened');
-    await P.tap(0, 13); await P.tap(0, 13);   // down to LAUNCH
+    await P.tap(0, 13); await P.tap(0, 13); await P.tap(0, 13);   // down to LAUNCH (row 3 since v1.33's CLANS row joined the panel)
     await P.tap(0, 0);
     ok((await poll(page, 'dbg_warstate', v => v === 1)) === 1 && (await call(page, 'dbg_warskirmish')) === 1, 'leg8: P1 launched the skirmish');
     ok((await poll(page, 'dbg_warlink2', v => v === 1, 6000)) === 1, 'leg8: the launch PULLED P2 in as guest');

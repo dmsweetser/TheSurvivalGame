@@ -336,6 +336,7 @@ static void coop_frame(float dt){
 }
 static void game_init(void){
     smemset(&G, 0, sizeof(G));
+    G.touch_ctl = 1;   // v1.33: the joystick is the only touch scheme (the field is a save-token fossil now — a stored DRAG value is clamped to 1 at load in save/start.c)
     scpy(G.my_name, "DEV", 13);
     scpy(G.rec_name, "NOBODY", 13);
     G.my_id=0;
@@ -464,27 +465,14 @@ void frame(void){
     g_dev_ctx = -1;   // v1.25: hint labels default to the local player's device each frame
     G.view_pi = G.my_id>=0? G.my_id : 0;   // split passes override per view
     touch_update(dt);
-    // v1.30 (audit D2): on the DRAG scheme a tap IS the interact button in
-    // the main game too — Banzai World always folded it (banzai/input.c),
-    // the meadow/mall frame never did, so a DRAG player could walk into
-    // the mall but open no station panel and never trigger the exit mat:
-    // trapped, with SAVE & QUIT the only way out. The weapon chips and
-    // the bean (consumed inside touch_update) keep first claim on their
-    // taps; every other DRAG tap in play interacts (doors, station
-    // discs, the exit mat). Mouse clicks ride the same channel, so a
-    // desktop click now interacts under DRAG too. The fold stays out of
-    // open panels (co-op P1's lstore and a client's store_open_local run
-    // in GS_PLAY, where their own tap handling owns the tap and an
-    // interact edge would read as "close"). It also stays out of Banzai
-    // World and the gate panels: there a tap has its own meanings (the
-    // WAR! map's SKIRMISH button, battle taps, gate rows) and BW's own
-    // fill folds taps where they belong — an interact edge leaking in
-    // confirmed the selected region instead of opening the skirmish
-    // panel (skirmishpathtest caught the first version of this fold).
-    if (G.touch_ctl==0 && G.state==GS_PLAY && IN.tapped && !lstore[0] &&
-        !(G.net_mode==NET_CLIENT && store_open_local) &&
-        !G.bud[G.my_id].in_bw && !arcgate[G.my_id] && !bwgate[G.my_id])
-        IN.interact_pressed=1;
+    // v1.30 (audit D2) put a tap-to-interact fold here for the DRAG
+    // scheme (a DRAG player could enter the mall but open no station
+    // and never trigger the exit mat — trapped). v1.33 removes the
+    // DRAG scheme whole: the fold is gone, and the USE button (zone
+    // 6 -> tp_act_edge -> interact_pressed in touch_update) is the
+    // interact verb on touch, as it always was on the stick deck.
+    // Tapping the store building itself still enters the mall (the
+    // scheme-independent tap_on_store() disjunct at the consumer).
     update_audio(dt);
     whale_poll(dt);
 

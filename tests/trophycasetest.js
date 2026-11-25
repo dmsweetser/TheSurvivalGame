@@ -190,7 +190,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
     L = setTok(L, 'cb', 1250); L = setTok(L, 'cr', 9); L = setTok(L, 'wr', 8);
     L = setTok(L, 'bx', 240); L = setTok(L, 'b1', 3); L = setTok(L, 'b2', 2); L = setTok(L, 'b3', 1);
     L = setTok(L, 'bs', 15); L = setTok(L, 'bn', 26);
-    return L + ' mc=230,271,0,0,0,0,0,880 mr=261,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0 mo=2 mb=754';
+    return L + ' mc=251,295,0,0,0,0,0,981 mr=261,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0 mo=2 mb=754';   // v1.33: the mc= times sit at the re-derived medal table's equivalent boundaries (t0 gold-exact 251, t1 gold+1 295, t7 silver-exact 981) — same intended mix: 1G 2S 0B
   }).join('\n').replace(/^fs=.*$/m, 'fs=2,6,0');
   ok(crafted.includes('cb=1250') && crafted.includes('wr=8') && crafted.includes('fs=2,6,0'), 'A: crafted blob carries the record tokens');
   const globA = await pollGlobal('rec_hat=');

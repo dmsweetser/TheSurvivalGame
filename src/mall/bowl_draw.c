@@ -250,7 +250,7 @@ static void draw_bowling(void){
       const char *ak = tch? "TAP" : lbla(H_FIRE);
       char pb[128]; char *q=pb;
       if (!bw->active || bw->game_over){ q=sappend(q, ak); q=sappend(q, " - NEW GAME"); }
-      else if (bw->phase==0){ if (tch) q=sappend(q, "DRAG - POSITION - TAP - AIM");
+      else if (bw->phase==0){ if (tch) q=sappend(q, "HOLD TO AIM - TAP TO THROW");
                               else { q=sappend(q, "LEFT/RIGHT - POSITION - "); q=sappend(q, ak); q=sappend(q, " - AIM"); } }
       else if (bw->phase==1){ q=sappend(q, ak); q=sappend(q, " - LOCK THE ANGLE"); }
       else if (bw->phase==2){ q=sappend(q, ak); q=sappend(q, " - THROW!"); }

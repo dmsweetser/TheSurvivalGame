@@ -458,7 +458,7 @@ static void craft_render(int pi){
               // search row again; "ESC" was unconditional.
               draw_text_center(x+w/2, y+h-14, hint_dev()==DEV_PAD? "TYPE TO FILTER - BACK WHEN DONE" : (hint_dev()==DEV_TOUCH? "TYPE TO FILTER - TAP THE SEARCH ROW WHEN DONE" : "TYPE TO FILTER - ESC WHEN DONE"), 1, COL(150,170,190));
           } else if (hint_dev()==DEV_TOUCH){
-              draw_text_center(x+w/2, y+h-14, G.touch_ctl? "STICK PICKS - FIRE CRAFTS - TAP ROWS TOO" : "TAP A ROW - TAP IT AGAIN TO CRAFT - TAP OUTSIDE TO CLOSE", 1, COL(150,170,190));
+              draw_text_center(x+w/2, y+h-14, "STICK PICKS - FIRE CRAFTS - TAP ROWS TOO", 1, COL(150,170,190));
           } else if (hint_dev()==DEV_PAD){
               // v1.31 (audit P8): the pad footer names the search key
               draw_text_center(x+w/2, y+h-14, "DPAD/STICK PICK - A CRAFTS - X SEARCHES - BACK CLOSES", 1, COL(150,170,190));

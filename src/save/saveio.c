@@ -5,7 +5,7 @@
 // ---------------------------------------------------------------------------
 // Save / load — a small line-based text format in one block.
 // ---------------------------------------------------------------------------
-#define SAVE_CAP 131072   // v1.29: doubled for the second (skirmish) WAR! snapshot per player — see the audit below
+#define SAVE_CAP 262144   // v1.29: doubled for the second (skirmish) WAR! snapshot per player — see the audit below. v1.33: doubled again for the 120x90 fog key and the raised unit/struct caps
 static char savebuf[SAVE_CAP];
 static int parse_int(const char *s){ int v=0, neg=0; if (*s=='-'){ neg=1; s++; }
     while (*s>='0'&&*s<='9'){ v=v*10+(*s-'0'); s++; } return neg?-v:v; }
@@ -43,7 +43,12 @@ static void refresh_has_save(void){ G.has_save = (G.slot_has[1]||G.slot_has[2]||
 // most ~0.5K per player — ~59.6K worst case, still inside. Feat
 // 10's bl= token adds at most ~90 bytes per player (~0.4K over
 // four) — ~60K worst case, still inside.)
-#define WAR_SNAP_CAP 12288
+// (v1.33 audit: the fog key is now the whole 120x90 array — 338
+// words, ~2.3K of text — the unit cap rose to 128 and the struct
+// cap to 44 (wu ~6.3K, ws ~2.8K), and the wt worst case stands at
+// ~4.3K: one snapshot's worst case is ~16K. The cap rises to
+// 24576; the SAVE_CAP audit below is redone with it.)
+#define WAR_SNAP_CAP 24576
 static char war_snap[MAXP][WAR_SNAP_CAP];
 static int war_snap_on[MAXP];
 // v1.29: the SKIRMISH park — a second snapshot slot per player,
@@ -53,6 +58,9 @@ static int war_snap_on[MAXP];
 // <=10.7K campaign snapshot + <=10.7K skirmish snapshot = ~24.9K;
 // x4 players = ~99.6K + ~420 shared walls + ~0.4K headers =
 // ~100K, inside the doubled 131072 cap with ~31K to spare.
+// (v1.33: with WAR_SNAP_CAP at 24576 the per-player worst is
+// ~3.5K pl-line + ~16K + ~16K = ~35.5K; x4 = ~142K + walls and
+// headers — past the old cap, so SAVE_CAP doubles again below.)
 static char war_snap_sk[MAXP][WAR_SNAP_CAP];
 static int war_snap_sk_on[MAXP];
 static int war_snap_reg[MAXP] = { -1, -1, -1, -1 };   // v1.18: WHICH region the parked battle belongs to — the map needs it to offer a resume instead of a restart

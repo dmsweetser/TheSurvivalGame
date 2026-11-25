@@ -87,10 +87,11 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   const cv = await page.$('canvas');
   if (cv) await cv.screenshot({ path: __dirname + '/war-touch-setup.png' });
 
-  // LAUNCH is setup row 2: the panel (px=122, py=58, pw=396) puts
-  // its rows at ry = py+58+n*38 with h 32 — LAUNCH centre (320,208),
-  // the same point wartest's check 26 taps through evt_tap
-  await ftap(320, 208);
+  // LAUNCH is setup row 3: the panel (px=122, py=29, pw=396, ph 282
+  // since v1.33's CLANS row) puts its rows at ry = py+58+n*38 with
+  // h 32 — LAUNCH centre (320,217), the same point wartest's check
+  // 26 taps through evt_tap
+  await ftap(320, 217);
   ok((await poll('dbg_warstate', v => v === 1)) === 1, 'touch: finger tap on LAUNCH started the battle', await call('dbg_warstate'));
   ok((await call('dbg_warskirmish')) === 1, 'touch: the battle is a skirmish');
   ok((await call('dbg_warhives')) >= 1 && (await call('dbg_warbits')) > 0, 'touch: the skirmish field is live (hive + purse)',

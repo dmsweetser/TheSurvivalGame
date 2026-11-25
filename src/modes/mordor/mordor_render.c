@@ -238,6 +238,33 @@ static void mor_render(int pi){
             tri_fill(x-1, y-1+bob, x-7, y+11+bob, x+5, y-2+bob, COL(140,230,255));
         }
     }
+    // --- kill drops (v1.33): the same gift icons as the stations, drawn as
+    //     dropped loot — smaller, settled on the ground (a shadow and a
+    //     barely-there bob instead of the stations' high bob), a dimmer
+    //     halo, and a square loot frame around the icon so a drop never
+    //     reads as a station from across the road ---------------------------
+    for (int dp=0; dp<MOR_DROP_N; dp++){
+        if (!S->mor_drop_on[dp]) continue;
+        float ds = S->mor_drop_s[dp]; int dkind = S->mor_drop_kind[dp];
+        int x = SX(mor_cx(ds) + S->mor_drop_lat[dp]), y = SY((float)MOR_Y0 - ds);
+        if (x<vx-40 || x>vx+vw2+40 || y<vy-40 || y>vy+vh2+40) continue;
+        int bob = (int)(fsin(G.anim_t*2.4f + dp*1.7f)*1.5f);
+        int pulse = 9 + (int)(fsin(G.anim_t*3.0f + dp)*2.0f);
+        shadow_ellipse(x, y+8, 11, 3);
+        disc_fill(x, y+bob, pulse, dkind==0? COL(96,32,32) : dkind==1? COL(96,64,16) : COL(24,64,88));
+        rect_line(x-8, y-8+bob, 16, 16, dkind==0? COL(255,150,150) : dkind==1? COL(255,200,110) : COL(150,225,255));   // the loot frame
+        if (dkind==0){   // health: the station's cross, dropped size
+            rect_fill(x-6, y-6+bob, 12, 12, COL(240,240,244));
+            rect_fill(x-1, y-4+bob, 3, 8, COL(220,50,50)); rect_fill(x-4, y-1+bob, 8, 3, COL(220,50,50));
+        } else if (dkind==1){   // amplification: the station's sword, dropped size
+            line_thick(x-4, y+5+bob, x+3, y-2+bob, 2, COL(255,190,80));
+            line_thick(x+2, y-5+bob, x+5, y-2+bob, 2, COL(255,230,170));
+            line_thick(x-5, y+2+bob, x-2, y+6+bob, 2, COL(150,100,40));
+        } else {   // speed: the station's bolt, dropped size
+            tri_fill(x+1, y-7+bob, x-4, y+1+bob, x-1, y+1+bob, COL(140,230,255));
+            tri_fill(x-1, y-1+bob, x-4, y+7+bob, x+3, y-1+bob, COL(140,230,255));
+        }
+    }
     // --- the runner ----------------------------------------------------------------
     if (S->mor_faintt<=0){
         draw_buddy(b);

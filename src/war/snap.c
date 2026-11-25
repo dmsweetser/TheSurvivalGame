@@ -23,7 +23,7 @@ static void war_snap_write(int pi, char *dst, int sk){
     p = put_int(p, (int)(S->war_wavet*10.0f + 0.5f)); *p++=','; *p=0;
     p = put_int(p, (int)(S->war_camx - WAR_OX)); *p++=','; *p=0;
     p = put_int(p, (int)(S->war_camy - WAR_OY));
-    if (sk){ *p++=','; *p=0; p = put_int(p, S->war_size); *p++=','; *p=0; p = put_int(p, S->war_diff); }   // v1.29: the skirmish park carries its setup (size, difficulty) as trailing wb fields — the campaign parse reads six and never sees them
+    if (sk){ *p++=','; *p=0; p = put_int(p, S->war_size); *p++=','; *p=0; p = put_int(p, S->war_diff); *p++=','; *p=0; p = put_int(p, S->war_clans); }   // v1.29: the skirmish park carries its setup (size, difficulty) as trailing wb fields — the campaign parse reads six and never sees them. v1.33: the CLAN COUNT rides as a third trailing field; its PRESENCE marks the new format (a pre-v1.33 park's size 3 meant the old 1600x1200 LARGE — see war_snap_sk_restore)
     { int first=1;   // wu: ALIVE units only, slot-stable (dead slots stay dead — refs in utarget must land)
       for (int i=0;i<WAR_MAXU;i++){
           if (S->war_uhp[i]<=0) continue;
@@ -39,7 +39,8 @@ static void war_snap_write(int pi, char *dst, int sk){
           p = put_int(p, (int)(S->war_utx[i]-WAR_OX)); *p++=','; *p=0;
           p = put_int(p, (int)(S->war_uty[i]-WAR_OY)); *p++=','; *p=0;
           p = put_int(p, S->war_ucarry[i]); *p++=','; *p=0;
-          p = put_int(p, (int)(S->war_uharv[i]*10.0f + 0.5f));
+          p = put_int(p, (int)(S->war_uharv[i]*10.0f + 0.5f)); *p++=','; *p=0;
+          p = put_int(p, S->war_uclan[i]);   // v1.33: the unit's clan, trailing — old parks lack it and default on read (bugs to clan 1, yours to 0)
       } }
     { int first=1;   // ws: ALIVE structs — queue rides as qlen + the queued types (addendum 2), rally last (addendum 3)
       for (int s=0;s<WAR_MAXS;s++){
@@ -57,7 +58,8 @@ static void war_snap_write(int pi, char *dst, int sk){
           p = put_int(p, (int)(S->war_scd[s]*10.0f + 0.5f));
           for (int k=0;k<S->war_qlen[s];k++){ *p++=','; *p=0; p = put_int(p, S->war_queue[s][k]); }
           *p++=','; *p=0; p = put_int(p, (int)S->war_rallyx[s]);
-          *p++=','; *p=0; p = put_int(p, (int)S->war_rallyy[s]);
+          *p++=','; *p=0; p = put_int(p, (int)S->war_rallyy[s]); *p++=','; *p=0;
+          p = put_int(p, S->war_sclan[s]);   // v1.33: the structure's clan, trailing — old parks default on read (hives to clan 1, yours to 0)
       } }
     *p++=' '; *p=0; p = war_put_key(p, P, 'g');   // bit nodes: every slot, amounts may be 0 — indices matter
     for (int n=0;n<S->war_nn;n++){
@@ -76,8 +78,8 @@ static void war_snap_write(int pi, char *dst, int sk){
         p = put_int(p, (int)S->war_thp[t]); *p++=','; *p=0;
         p = put_int(p, S->war_tmaxhp[t]);
     }
-    *p++=' '; *p=0; p = war_put_key(p, P, 'f');   // fog: explored-or-visible as a 1200-bit set in 38 u32 words
-    for (int w=0;w<38;w++){
+    *p++=' '; *p=0; p = war_put_key(p, P, 'f');   // fog: explored-or-visible as a bit set over the whole fog array in its own memory order (v1.33: 338 words — any field size round-trips bit-for-bit; pre-v1.33 parks carried 38 words in 40-stride order and the reader still speaks that, see war_snap_restore_text)
+    for (int w=0;w<(WAR_FOG_W*WAR_FOG_H+31)/32;w++){
         if (w){ *p++=','; *p=0; }
         u32 word=0;
         for (int b=0;b<32;b++){ int c=w*32+b; if (c<WAR_FOG_W*WAR_FOG_H && S->war_fog[c]) word |= (1u<<b); }
@@ -146,6 +148,11 @@ static int war_rd_int(const char **qp){   // one int, then step over exactly one
     *qp = q;
     return v;
 }
+static int war_rec_fields(const char *v){   // v1.33: fields in the record starting at v (','-separated, ';'/' '/end-terminated) — how the reader knows a TRAILING field (a clan) is present without mistaking the next record's first field for it
+    int n=1;
+    while (*v && *v!=';' && *v!=' '){ if (*v==',') n++; v++; }
+    return n;
+}
 static void war_snap_restore_text(int pi, const char *snap, char pfx){
     BwSim *S = &BWS[pi];
     char kb[3]={pfx,'b',0}, ku[3]={pfx,'u',0}, ks[3]={pfx,'s',0}, kg[3]={pfx,'g',0}, kt[3]={pfx,'t',0}, kf[3]={pfx,'f',0}, kh[3]={pfx,'h',0};
@@ -162,6 +169,7 @@ static void war_snap_restore_text(int pi, const char *snap, char pfx){
     if (S->war_region<0) S->war_region=0; if (S->war_region>7) S->war_region=7;
     if ((v = war_snap_val(snap, ku))){
         while (*v && *v!=' '){
+            int nf = war_rec_fields(v);   // v1.33: 13 fields = the clan rides; 12 = a pre-v1.33 park
             int idx = war_rd_int(&v);
             int type = war_rd_int(&v);
             int x = war_rd_int(&v), y = war_rd_int(&v);
@@ -169,12 +177,14 @@ static void war_snap_restore_text(int pi, const char *snap, char pfx){
             int state = war_rd_int(&v), target = war_rd_int(&v);
             int tx = war_rd_int(&v), ty = war_rd_int(&v);
             int carry = war_rd_int(&v), harv = war_rd_int(&v);
+            int uclan = nf>12? war_rd_int(&v) : -1;
             if (idx>=0 && idx<WAR_MAXU){
                 S->war_utype[idx]=type; S->war_ux[idx]=WAR_OX+(float)x; S->war_uy[idx]=WAR_OY+(float)y;
                 S->war_uhp[idx]=(float)hp; S->war_umaxhp[idx]=maxhp;
                 S->war_ustate[idx]=state; S->war_utarget[idx]=target;
                 S->war_utx[idx]=WAR_OX+(float)tx; S->war_uty[idx]=WAR_OY+(float)ty;
                 S->war_ucarry[idx]=carry; S->war_uharv[idx]=harv*0.1f;
+                S->war_uclan[idx] = uclan>=0? uclan : (war_u_side(type)? 1 : 0);   // v1.33: an old park's bugs all fly clan 1 — the single swarm they were saved as
                 S->war_uatk[idx]=0; S->war_usel[idx]=0;
                 S->war_wpn[idx]=0; S->war_wpi[idx]=0; S->war_stallt[idx]=0; S->war_repath[idx]=0;
                 S->war_stallx[idx]=S->war_ux[idx]; S->war_stally[idx]=S->war_uy[idx];
@@ -183,6 +193,7 @@ static void war_snap_restore_text(int pi, const char *snap, char pfx){
     }
     if ((v = war_snap_val(snap, ks))){
         while (*v && *v!=' '){
+            int nf = war_rec_fields(v);   // v1.33: 13+qlen fields = the clan rides; 12+qlen = a pre-v1.33 park
             int idx = war_rd_int(&v);
             int type = war_rd_int(&v), side = war_rd_int(&v);
             int x = war_rd_int(&v), y = war_rd_int(&v);
@@ -193,6 +204,7 @@ static void war_snap_restore_text(int pi, const char *snap, char pfx){
             int qt_[9];
             for (int k=0;k<qn;k++) qt_[k] = war_rd_int(&v);
             int rx = war_rd_int(&v), ry = war_rd_int(&v);
+            int sclan = nf>12+qn? war_rd_int(&v) : -1;
             if (idx>=0 && idx<WAR_MAXS){
                 S->war_stype[idx]=type; S->war_sside[idx]=side;
                 S->war_sx[idx]=WAR_OX+(float)x; S->war_sy[idx]=WAR_OY+(float)y;
@@ -201,6 +213,7 @@ static void war_snap_restore_text(int pi, const char *snap, char pfx){
                 for (int k=0;k<qn;k++) S->war_queue[idx][k]=qt_[k];
                 S->war_qt[idx]=qt*0.1f; S->war_scd[idx]=scd*0.1f;
                 S->war_rallyx[idx]=(float)rx; S->war_rallyy[idx]=(float)ry;
+                S->war_sclan[idx] = sclan>=0? sclan : (type==WAR_S_HIVE? 1 : 0);   // v1.33: an old park's hives fly clan 1; everything else of the enemy's was a hive anyway
             }
         }
     }
@@ -243,10 +256,17 @@ static void war_snap_restore_text(int pi, const char *snap, char pfx){
     }
     for (int c=0;c<WAR_FOG_W*WAR_FOG_H;c++) S->war_fog[c]=0;
     if ((v = war_snap_val(snap, kf))){
-        for (int w=0;w<38;w++){
-            if (!*v || *v==' ') break;
-            u32 word = (u32)war_rd_int(&v);
-            for (int b=0;b<32;b++){ int c=w*32+b; if (c<WAR_FOG_W*WAR_FOG_H && ((word>>b)&1u)) S->war_fog[c]=1; }
+        // v1.33: read the words first and count them — 38 words is a
+        // pre-v1.33 park (1200 bits in 40-stride order over the old
+        // 40x30 grid); anything else is the new format, the array's
+        // own memory order, copied straight across
+        u32 words[(WAR_FOG_W*WAR_FOG_H+31)/32];
+        int nw=0;
+        while (*v && *v!=' ' && nw<(WAR_FOG_W*WAR_FOG_H+31)/32) words[nw++] = (u32)war_rd_int(&v);
+        if (nw==38){
+            for (int c=0;c<1200;c++) if ((words[c>>5]>>(c&31))&1u) S->war_fog[(c/40)*WAR_FOG_W + (c%40)]=1;
+        } else {
+            for (int w=0;w<nw;w++) for (int b=0;b<32;b++){ int c=w*32+b; if (c<WAR_FOG_W*WAR_FOG_H && ((words[w]>>b)&1u)) S->war_fog[c]=1; }
         }
     }
     S->war_state=1; S->war_pause=0; S->war_bcat=-1;
@@ -266,17 +286,30 @@ static void war_snap_restore(int pi){
 static void war_snap_sk_restore(int pi){
     BwSim *S = &BWS[pi];
     const char *snap = war_snap_sk[pi];
-    int size = 2, diff = 2;
+    int size = 2, diff = 2, clans = 0;
     const char *v = war_snap_val(snap, "kb");
-    if (v){ for (int i=0;i<6;i++) (void)war_rd_int(&v); if (*v && *v!=' '){ size = war_rd_int(&v); if (*v && *v!=' ') diff = war_rd_int(&v); } }
-    if (size<1 || size>3) size = 2;
+    if (v){ for (int i=0;i<6;i++) (void)war_rd_int(&v); if (*v && *v!=' '){ size = war_rd_int(&v); if (*v && *v!=' '){ diff = war_rd_int(&v); if (*v && *v!=' ') clans = war_rd_int(&v); } } }
+    if (size<1 || size>5) size = 2;
     if (diff<1 || diff>3) diff = 2;
     war_snap_restore_text(pi, snap, 'k');
     S->war_skirmish = 1; S->war_size = size; S->war_diff = diff;
-    if (size==1){ S->war_aw=1200.0f; S->war_ah=900.0f; S->war_lines=2; }
-    else if (size==3){ S->war_lines=4; }
-    else { S->war_lines=3; }
+    // v1.33: geometry from the ladder — EXCEPT a pre-v1.33 park
+    // (no clans field) whose size 3 was the old LARGE: 1600x1200
+    // with 4 lines. Restoring it at the ladder's 2400x1800 would
+    // stretch its saved field over ground it never had; it comes
+    // back at exactly the size it was saved at. (Sizes 1/2 agree
+    // between the eras, so only size 3 needs the distinction.)
+    if (clans>0 || size!=3){
+        S->war_aw = (float)WAR_SIZE_AW[size]; S->war_ah = (float)WAR_SIZE_AH[size];
+        S->war_lines = WAR_SIZE_LINES[size];
+    } else S->war_lines = 4;
     S->war_gw = (int)(S->war_aw/40.0f); S->war_gh = (int)(S->war_ah/40.0f);
+    if (clans>=1 && clans<=9){ S->war_clans = clans; S->war_clanpick = clans; }
+    else {   // a legacy park: one swarm, but its award counts the hives it actually fields
+        int hv = war_hives_alive(S);
+        S->war_clans = hv>=1? hv : 1;
+        S->war_clanpick = S->war_clans<=9? S->war_clans : 9;
+    }
     war_clamp_cam(S);
     war_note(S, "SKIRMISH RESTORED. THE BUGS REMEMBER NOTHING.");
 }

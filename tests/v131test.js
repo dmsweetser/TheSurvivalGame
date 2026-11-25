@@ -56,8 +56,8 @@ function T(name, cond, extra) { if (cond) { pass++; } else { fail++; console.log
   await call('dbg_adopt', 0);
   T('buddy adopted', (await call('dbg_buddy')) !== 0, await call('dbg_buddy'));
 
-  // ---------- P6: the main-game pause chip, both touch schemes ----------
-  for (const [scheme, nm] of [[1, 'STICK'], [0, 'DRAG']]) {
+  // ---------- P6: the main-game pause chip (v1.33: one touch scheme — the loop's old DRAG iteration is retired with the scheme) ----------
+  for (const [scheme, nm] of [[1, 'STICK']]) {
     await call('dbg_touchctl', scheme);
     await tap(596, 79);   // the chip: (560,67) 72x24, centre (596,79) — v1.32 moved it under the leaderboard
     T(nm + ': tapping the START chip opens the pause', (await poll('dbg_state', v => v === 5, 4000)) === 5, await call('dbg_state'));

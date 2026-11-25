@@ -405,11 +405,26 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   await cv.screenshot({ path: __dirname + '/war2-fleet.png' });
 
   // triple-click: three quick taps on a melee buddy select EVERY
-  // combat unit — melee, ranged and both vehicles — never harvesters
+  // combat unit — melee, ranged and both vehicles — never harvesters.
+  // v1.33 (Daniel, section D): the muster is viewport-scoped now, so
+  // the ranks are first gathered around the tapped melee, well inside
+  // the camera window — the assertion below keeps its full strength
+  // (ALL combat units), and the v1.33 tail checks prove the off-screen
+  // exclusion separately.
   const combatN = (await call('dbg_warunits', 0, 1)) + (await call('dbg_warunits', 0, 2))
                 + (await call('dbg_warunits', 0, 5)) + (await call('dbg_warunits', 0, 6));
   const mi3 = await call('dbg_warfind', 1);
   const [m3x, m3y] = unxy(await call('dbg_warunitxy', mi3));
+  { let gx = 0;
+    for (let i = 0; i < 128; i++){
+      const hp = await call('dbg_warunithp', i); if (hp <= 0) continue;
+      const ty = await call('dbg_warutype', i), cl = await call('dbg_waruclan', i);
+      if (cl === 0 && (ty === 1 || ty === 2 || ty === 5 || ty === 6) && i !== mi3){
+        await call('dbg_warmove', i, m3x - 120 + (gx % 5) * 55, m3y + 70 + ((gx / 5) | 0) * 45); gx++;
+      }
+    }
+    await sleep(300);
+  }
   await call('dbg_warcam', m3x, m3y); await sleep(250);
   for (let k = 0; k < 3; k++) {
     const pp = unpos(await call('dbg_warunitpos', mi3));
@@ -1664,9 +1679,10 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   // checks 25-28: SKIRMISH. (The richer campaign field rode check 1
   // — 300 bits, 11 nodes / 8,200 — check 2's 30-bit carry, and
   // check 29's conquest XP above.) Setup-panel geometry in the
-  // 640x360 view: panel px=122, py=58, rows at y 116/154/192/230
-  // (h 32) — centres 132 (MAP SIZE), 170 (ENEMY), 208 (LAUNCH),
-  // 246 (BACK); a value row's left third (x < 254) steps back. The
+  // 640x360 view: panel px=122, py=29 (v1.33: ph 282, five rows),
+  // rows at y 87/125/163/201/239 (h 32) — centres 103 (MAP SIZE),
+  // 141 (ENEMY), 179 (CLANS), 217 (LAUNCH), 255 (BACK); a value
+  // row's left third (x < 254) steps back. The
   // map's SKIRMISH button is (500..628, 292..320), centre (564,306).
 
   // check 25: a fresh campaign battle carries the v1.19 field and
@@ -1683,9 +1699,9 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   await tap(568, 307);   // the SKIRMISH button, bottom-right of the map
   ok((await poll('dbg_warstate', [], v => v === 4, 4000)) === 4, 'v1.19 check 26: the SKIRMISH button opened the setup panel');
   await cv.screenshot({ path: __dirname + '/war-skirmish-setup.png' });
-  await tap(170, 132);   // MAP SIZE row, left third: STANDARD -> SMALL
-  await tap(170, 170);   // ENEMY row, left third: NORMAL -> EASY
-  await tap(320, 208);   // LAUNCH
+  await tap(170, 103);   // MAP SIZE row, left third: STANDARD -> SMALL
+  await tap(170, 141);   // ENEMY row, left third: NORMAL -> EASY
+  await tap(320, 217);   // LAUNCH
   ok((await poll('dbg_warstate', [], v => v === 1, 5000)) === 1, 'v1.19 check 26: LAUNCH started the battle');
   ok((await call('dbg_warskirmish')) === 1, 'v1.19 check 26: the battle is a skirmish');
   ok(nodesInBand(await call('dbg_warnodes'), 6, 4550), 'v1.19 check 26: SMALL field — six nodes (standard-table indices {0,1,4,5,6,10}), total inside the v1.27 ±20% jitter band of the nominal 4,550', await call('dbg_warnodes'));
@@ -1707,7 +1723,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   await sleep(500);
   await tap(568, 307);
   ok((await poll('dbg_warstate', [], v => v === 4, 4000)) === 4, 'v1.19 check 28: setup panel again (picks kept: SMALL / EASY)');
-  await tap(320, 208);   // LAUNCH
+  await tap(320, 217);   // LAUNCH
   ok((await poll('dbg_warstate', [], v => v === 1, 5000)) === 1 && (await call('dbg_warskirmish')) === 1, 'v1.19 check 28: skirmish relaunched');
   await key('Escape', 300);
   ok((await poll('dbg_warpause', [], v => v === 1, 4000)) === 1, 'v1.19 check 28: pause menu up in the skirmish');
@@ -1725,7 +1741,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   ok((await call('dbg_warsnap')) === 1, 'v1.19 check 28: campaign battle parked');
   await tap(568, 307);
   ok((await poll('dbg_warstate', [], v => v === 4, 4000)) === 4, 'v1.19 check 28: setup panel over the map (park in place)');
-  await tap(320, 208);   // LAUNCH
+  await tap(320, 217);   // LAUNCH
   ok((await poll('dbg_warstate', [], v => v === 1, 5000)) === 1 && (await call('dbg_warskirmish')) === 1, 'v1.19 check 28: skirmish launched beside the park');
   await key('Escape', 300);
   ok((await poll('dbg_warpause', [], v => v === 1, 4000)) === 1, 'v1.19 check 28: pause menu up');
@@ -2075,9 +2091,9 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   ok((await call('dbg_warsnap')) === 1, 'v1.29 check 35: the campaign battle is parked before the skirmish');
   await tap(568, 307);   // SKIRMISH button
   ok((await poll('dbg_warstate', [], v => v === 4, 4000)) === 4, 'v1.29 check 35: setup panel for the saveable skirmish');
-  await tap(400, 132);   // MAP SIZE forward: SMALL -> STANDARD
-  await tap(400, 170);   // ENEMY forward: EASY -> NORMAL
-  await tap(320, 208);   // LAUNCH
+  await tap(400, 103);   // MAP SIZE forward: SMALL -> STANDARD
+  await tap(400, 141);   // ENEMY forward: EASY -> NORMAL
+  await tap(320, 217);   // LAUNCH
   ok((await poll('dbg_warstate', [], v => v === 1, 5000)) === 1 && (await call('dbg_warskirmish')) === 1, 'v1.29 check 35: STANDARD/NORMAL skirmish launched');
   await call('dbg_waraddbits', 600);
   const pb35 = await call('dbg_warbuildat', 1);
@@ -2163,6 +2179,324 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   ok((await poll2('dbg_warstate', v => v === 4, 4000)) === 4, 'v1.29 check 37: a fresh skirmish can be set up (the discard freed the field)');
   await key('Escape', 300);
   ok((await poll2('dbg_warstate', v => v === 0, 4000)) === 0, 'v1.29 check 37: setup backed out to the map');
+
+  // ================= v1.33 "EVERY CLAN FOR ITSELF" ==================
+  // checks 40-47: the skirmish overhaul. 40: XP scales by difficulty
+  // x clans x map size, quoted and paid. 41: nine clans field nine
+  // hives. 42: the BIT MINER (player income with the harvesters dead,
+  // and a clan raising its own at the first wave tick). 43: rival
+  // clans hurt each other (free-for-all). 44: retaliation — a bug
+  // latches onto its first attacker and hunts it. 45: triple-click
+  // musters only the viewport. 46: drag-built walls — preview, one
+  // APPROVE, one charge; CANCEL builds nothing. 47: the fat battle
+  // (clans + miner) survives the snapshot round trip.
+  // Panel geometry (640x360): rows at centres 103 (MAP SIZE), 141
+  // (ENEMY), 179 (CLANS), 217 (LAUNCH); a value row's left third
+  // (x=170) steps back, right third (x=470) steps forward.
+  const stepRow = async (y, dir) => { await tap(dir < 0 ? 170 : 470, y); };
+  const pollA = async (fn, args, pred, ms = 10000) => { const t0 = Date.now(); let v; while (Date.now() - t0 < ms) { v = await call2(fn, ...args); if (pred(v)) return v; await sleep(120); } return v; };
+  const hiveStructs = async () => { const a = []; for (let s = 0; s < 44; s++) if ((await call2('dbg_warsclan', s)) > 0) a.push(s); return a; };
+  const killHives = async () => { for (const s of await hiveStructs()) await call2('dbg_warhurt', 1, s, 99999); };
+  const openPanel = async () => { for (let k = 0; k < 3; k++){ await tap(568, 307);
+      const v = await poll2('dbg_warstate', v2 => v2 === 4, 1600); if (v === 4) return 4; await sleep(400); }
+    return call2('dbg_warstate'); };
+
+  // check 40: HARD x 3 clans x STANDARD pays 80 x 3 x 1.25 = 300
+  ok((await openPanel()) === 4, 'v1.33 check 40: setup panel (picks kept: STANDARD / NORMAL)');
+  await stepRow(141, +1);                    // ENEMY: NORMAL -> HARD
+  await stepRow(179, +1); await stepRow(179, +1);   // CLANS: 1 -> 3
+  ok((await call2('dbg_wardiff')) === 3 && (await call2('dbg_warclanpick')) === 3 && (await call2('dbg_warsize')) === 2,
+     'v1.33 check 40: the panel stepped to HARD / 3 clans / STANDARD',
+     'diff=' + (await call2('dbg_wardiff')) + ' clans=' + (await call2('dbg_warclanpick')) + ' size=' + (await call2('dbg_warsize')));
+  await tap(320, 217);   // LAUNCH
+  ok((await poll2('dbg_warstate', v => v === 1, 5000)) === 1, 'v1.33 check 40: skirmish launched');
+  ok((await call2('dbg_warclans')) === 3 && (await call2('dbg_warhives')) === 3,
+     'v1.33 check 40: three clans field three hives', 'clans=' + (await call2('dbg_warclans')) + ' hives=' + (await call2('dbg_warhives')));
+  const xp40 = await call2('dbg_buddyxp');
+  await killHives();
+  ok((await poll2('dbg_warstate', v => v === 2, 9000)) === 2, 'v1.33 check 40: every hive down — the skirmish is won');
+  ok((await call2('dbg_buddyxp')) === xp40 + 300, 'v1.33 check 40: the win paid 80 x 3 clans x 1.25 (STANDARD) = +300 XP',
+     'xp ' + xp40 + ' -> ' + (await call2('dbg_buddyxp')));
+  ok((await poll2('dbg_warstate', v => v === 0, 8000)) === 0, 'v1.33 check 40: back on the map');
+
+  // check 41: nine clans — the top of the axis
+  ok((await openPanel()) === 4, 'v1.33 check 41: setup panel again');
+  for (let k = 0; k < 6; k++) await stepRow(179, +1);   // CLANS: 3 -> 9
+  ok((await call2('dbg_warclanpick')) === 9, 'v1.33 check 41: CLANS stepped to 9', 'pick=' + (await call2('dbg_warclanpick')));
+  await tap(320, 217);
+  ok((await poll2('dbg_warstate', v => v === 1, 5000)) === 1, 'v1.33 check 41: the nine-clan skirmish launched');
+  ok((await call2('dbg_warclans')) === 9 && (await call2('dbg_warhives')) === 9,
+     'v1.33 check 41: nine clans field nine hives', 'clans=' + (await call2('dbg_warclans')) + ' hives=' + (await call2('dbg_warhives')));
+  await killHives();
+  ok((await poll2('dbg_warstate', v => v === 0, 12000)) === 0, 'v1.33 check 41: the nine-hive field is cleared back to the map');
+
+  // check 42: one HARD two-clan battle hosts the miner checks.
+  // Picks in hand: STANDARD / HARD / 9 — walk CLANS back to 2.
+  ok((await openPanel()) === 4, 'v1.33 check 42: setup panel for the long battle');
+  await stepRow(179, +1); await stepRow(179, +1);   // 9 -> 1 -> 2 (the axis wraps)
+  ok((await call2('dbg_warclanpick')) === 2 && (await call2('dbg_wardiff')) === 3, 'v1.33 check 42: HARD / 2 clans set');
+  await tap(320, 217);
+  ok((await poll2('dbg_warstate', v => v === 1, 5000)) === 1, 'v1.33 check 42: the long battle launched');
+  await call2('dbg_waraddbits', 600);
+  // the BIT MINER through the real bar: Core -> BUILD -> strip slot 2
+  const [hqx, hqy] = unxy(await call2('dbg_warstructxy', 0));
+  await call2('dbg_warcam', hqx, hqy); await sleep(300);
+  await tap(320, 157);   // the Core, dead centre
+  ok((await poll2('dbg_warselstruct', v => v === 0, 4000)) === 0, 'v1.33 check 42: the Core is selected');
+  await tap(138, 337);   // bar slot 1: BUILD
+  ok((await poll2('dbg_warbcat', v => v === 1, 4000)) === 1, 'v1.33 check 42: BUILD opened');
+  await tap(228, 291);   // strip slot 2: BIT MINER
+  ok((await poll2('dbg_warplace', v => v === 7, 4000)) === 7, 'v1.33 check 42: BIT MINER placement armed');
+  { let placed = 0;
+    for (const [px, py] of [[320, 60], [392, 84], [248, 84], [320, 252], [400, 220], [240, 220]]){
+      await tap(px, py);   // a ring around the Core, all inside the 340u leash
+      if ((await call2('dbg_warminers', 0)) === 1){ placed = 1; break; }
+      if ((await call2('dbg_warplace')) !== 7) break;   // disarmed without building: a real refusal, not a blocked spot
+    }
+    ok(placed === 1, 'v1.33 check 42: the BIT MINER stands', 'miners=' + (await call2('dbg_warminers', 0))); }
+  // income, isolated: kill the player harvesters so nothing else pays
+  for (let i = 0; i < 128; i++){
+    if ((await call2('dbg_warunithp', i)) > 0 && (await call2('dbg_waruclan', i)) === 0 && (await call2('dbg_warutype', i)) === 0)
+      await call2('dbg_warhurt', 0, i, 99999);
+  }
+  const bits42 = await call2('dbg_warbits');
+  const bits42b = await (async () => { const t0 = Date.now(); let v = bits42;
+    while (Date.now() - t0 < 90000){ v = await call2('dbg_warbits'); if (v >= bits42 + 3) break; await sleep(1000); } return v; })();
+  ok(bits42b >= bits42 + 3, 'v1.33 check 42: the miner trickles ~1 bit/sec into the purse (harvesters dead)',
+     bits42 + ' -> ' + bits42b);
+  // clan sustain: at the first wave tick (~45s) a rich hive raises
+  // its own miner before it buys the wave
+  const clanMiner = await (async () => { const t0 = Date.now();
+    while (Date.now() - t0 < 240000){ if ((await call2('dbg_warminers', 1)) >= 1 || (await call2('dbg_warminers', 2)) >= 1) return 1; await sleep(1000); } return 0; })();
+  ok(clanMiner === 1, 'v1.33 check 42: a clan raised its own BIT MINER at the wave tick',
+     'clan miners: c1=' + (await call2('dbg_warminers', 1)) + ' c2=' + (await call2('dbg_warminers', 2)));
+
+  // check 43: free-for-all — two rival crawlers left adjacent fight
+  const findClanBug = async (type, clan) => { for (let i = 0; i < 128; i++)
+    if ((await call2('dbg_warunithp', i)) > 0 && (await call2('dbg_warutype', i)) === type && (await call2('dbg_waruclan', i)) === clan) return i; return -1; };
+  let cA = -1, cB = -1;
+  { const t0 = Date.now();
+    while (Date.now() - t0 < 240000 && (cA < 0 || cB < 0)){
+      if (cA < 0){ cA = await findClanBug(3, 1); if (cA < 0) cA = await findClanBug(4, 1); }
+      if (cB < 0){ cB = await findClanBug(3, 2); if (cB < 0) cB = await findClanBug(4, 2); }
+      if (cA < 0 || cB < 0) await sleep(1500);
+    } }
+  ok(cA >= 0 && cB >= 0, 'v1.33 check 43: a combat bug from each clan found', 'cA=' + cA + ' cB=' + cB);
+  if (cA >= 0 && cB >= 0){
+    await call2('dbg_warmove', cA, 800, 600);
+    await call2('dbg_warmove', cB, 836, 600);
+    const hpA0 = await call2('dbg_warunithp', cA), hpB0 = await call2('dbg_warunithp', cB);
+    const fought = await (async () => { const t0 = Date.now();
+      while (Date.now() - t0 < 25000){ const a = await call2('dbg_warunithp', cA), b = await call2('dbg_warunithp', cB);
+        if ((a >= 0 && a < hpA0) || (b >= 0 && b < hpB0)) return 1; await sleep(400); } return 0; })();
+    ok(fought === 1, 'v1.33 check 43: rival-clan bugs hurt each other with the player idle (free-for-all)',
+       'hp ' + hpA0 + '/' + hpB0 + ' -> ' + (await call2('dbg_warunithp', cA)) + '/' + (await call2('dbg_warunithp', cB)));
+  }
+
+  // check 44: retaliation — a crawler latches onto its first attacker
+  const melee44 = await (async () => {   // train a wrench if none stands
+    if ((await call2('dbg_warunits', 0, 1)) < 1){ await call2('dbg_warbuildat', 1); await call2('dbg_wartrain', 1);
+      await pollA('dbg_warunits', [0, 1], v => v >= 1, 20000); }
+    for (let i = 0; i < 128; i++) if ((await call2('dbg_warunithp', i)) > 0 && (await call2('dbg_waruclan', i)) === 0 && (await call2('dbg_warutype', i)) === 1) return i; return -1; })();
+  // the crawler must be FRESH: first-attacker-wins means a veteran
+  // of check 43's brawl already holds a grudge (correctly) and will
+  // never re-latch. Wait for a wave-spawned crawler nobody has hit.
+  const knownBugs44 = new Set();
+  for (let i = 0; i < 128; i++) if ((await call2('dbg_warunithp', i)) > 0 && (await call2('dbg_waruclan', i)) > 0) knownBugs44.add(i);
+  let cr44 = -1;
+  { const t0 = Date.now();
+    while (Date.now() - t0 < 180000 && cr44 < 0){
+      for (let i = 0; i < 128; i++){
+        if (knownBugs44.has(i)) continue;
+        if ((await call2('dbg_warunithp', i)) <= 0 || (await call2('dbg_waruclan', i)) <= 0) continue;
+        const ty = await call2('dbg_warutype', i);
+        if ((ty === 3 || ty === 4) && (await call2('dbg_waraggro', i)) === 0){ cr44 = i; break; }
+        knownBugs44.add(i);
+      }
+      if (cr44 < 0) await sleep(1500);
+    } }
+  ok(melee44 >= 0 && cr44 >= 0, 'v1.33 check 44: a player melee and a FRESH clan crawler found', 'melee=' + melee44 + ' crawler=' + cr44);
+  if (melee44 >= 0 && cr44 >= 0){
+    await call2('dbg_warmove', cr44, 1000, 900);
+    await call2('dbg_warmove', melee44, 984, 900);   // 16u west: inside wrench range, it swings on its own
+    const hp44 = await call2('dbg_warunithp', cr44);
+    const fought44 = await (async () => { const t0 = Date.now();
+      while (Date.now() - t0 < 15000){ const h = await call2('dbg_warunithp', cr44);
+        if (h >= 0 && h < hp44) return 1; await sleep(300); } return 0; })();
+    ok(fought44 === 1, 'v1.33 check 44: the melee is landing blows on the crawler', 'hp stuck at ' + (await call2('dbg_warunithp', cr44)));
+    const latched = await (async () => { const t0 = Date.now();
+      while (Date.now() - t0 < 15000){ if ((await call2('dbg_waraggro', cr44)) === melee44 + 1) return 1; await sleep(300); } return 0; })();
+    ok(latched === 1, 'v1.33 check 44: the crawler latched onto the first unit that hurt it',
+       'aggro=' + (await call2('dbg_waraggro', cr44)) + ' want ' + (melee44 + 1));
+    if (latched){
+      await call2('dbg_warmove', melee44, 1420, 900);   // the attacker flees east
+      const [cx0] = unxy(await call2('dbg_warunitxy', cr44));
+      await sleep(3500);
+      const [cx1] = unxy(await call2('dbg_warunitxy', cr44));
+      ok(cx1 > cx0 + 40, 'v1.33 check 44: the latched crawler hunts its attacker east', 'x ' + cx0 + ' -> ' + cx1);
+    }
+  }
+
+  // check 45: triple-click musters only the viewport
+  await page.evaluate(() => { if (window.__FAKEPAD){ window.__FAKEPAD.axes = [0, 0, 0, 0];
+    for (const b of window.__FAKEPAD.buttons){ b.pressed = false; b.value = 0; } } });
+  // two melee, guaranteed by our own hand: check 44's starter may
+  // be dead by now (it dueled a crawler, then got hunted across the
+  // field), and whether a Patch Bay exists depends on that history.
+  // Train fresh ones and take the two healthiest.
+  if ((await call2('dbg_warunits', 0, 1)) < 2){
+    await call2('dbg_waraddbits', 300);
+    if ((await call2('dbg_warstructs', 1)) === 0) await call2('dbg_warbuildat', 1);
+    await call2('dbg_wartrain', 1); await call2('dbg_wartrain', 1);
+    await pollA('dbg_warunits', [0, 1], v => v >= 2, 60000);
+  }
+  const melee45 = [];
+  { const cand = [];
+    for (let i = 0; i < 128; i++)
+      if ((await call2('dbg_warunithp', i)) > 0 && (await call2('dbg_waruclan', i)) === 0 && (await call2('dbg_warutype', i)) === 1)
+        cand.push([await call2('dbg_warunithp', i), i]);
+    cand.sort((a, b) => b[0] - a[0]);
+    for (const c of cand.slice(0, 2)) melee45.push(c[1]);
+  }
+  ok(melee45.length >= 2, 'v1.33 check 45: two player melee stand', 'n=' + melee45.length);
+  if (melee45.length >= 2){
+    for (let i = 0; i < 128; i++)   // every bug to the far corner: the muster ground is sterile
+      if ((await call2('dbg_warunithp', i)) > 0 && (await call2('dbg_waruclan', i)) > 0)
+        await call2('dbg_warmove', i, 1950, 1150);
+    for (let i = 0; i < 128; i++){   // every other player combat unit far out of the window
+      if ((await call2('dbg_warunithp', i)) <= 0 || (await call2('dbg_waruclan', i)) !== 0) continue;
+      const ty = await call2('dbg_warutype', i);
+      if ((ty === 1 || ty === 2 || ty === 5 || ty === 6) && i !== melee45[0] && i !== melee45[1])
+        await call2('dbg_warmove', i, 1950, 1150);
+    }
+    await call2('dbg_warmove', melee45[0], 600, 600);
+    await call2('dbg_warmove', melee45[1], 1840, 600);   // 1240u east: far off-screen
+    await call2('dbg_warcam', 600, 600); await sleep(300);
+    for (let k = 0; k < 3; k++){
+      const pp = unpos(await call2('dbg_warunitpos', melee45[0]));
+      await page.evaluate(([tx, ty]) => window.__TSG.evt_tap(tx, ty), pp);
+      await sleep(150);
+    }
+    await sleep(300);
+    ok((await call2('dbg_warsel')) === 1, 'v1.33 check 45: triple-click selected ONLY the visible melee (the twin 1240u away stayed out)',
+       'sel=' + (await call2('dbg_warsel')));
+  }
+
+  // check 46: drag-built walls — preview, approve, one charge; then
+  // a second run cancelled clean. The player miner dies first: its
+  // trickle would move the purse inside the charge assertions.
+  for (let s = 0; s < 44; s++)
+    if ((await call2('dbg_warstype', s)) === 7 && (await call2('dbg_warsclan', s)) === 0)
+      await call2('dbg_warhurt', 1, s, 99999);
+  ok((await call2('dbg_warminers', 0)) === 0, 'v1.33 check 46: the player miner is down (purse isolated)');
+  await call2('dbg_waraddbits', 400);
+  await call2('dbg_warcam', hqx, hqy); await sleep(300);
+  await tap(320, 157);
+  ok((await poll2('dbg_warselstruct', v => v === 0, 4000)) === 0, 'v1.33 check 46: the Core is selected again');
+  await tap(228, 337);   // bar slot 2: DEFENSE
+  ok((await poll2('dbg_warbcat', v => v === 2, 4000)) === 2, 'v1.33 check 46: DEFENSE opened');
+  await tap(138, 291);   // strip slot 1: FIREWALL
+  ok((await poll2('dbg_warplace', v => v === 3, 4000)) === 3, 'v1.33 check 46: FIREWALL placement armed');
+  const walls46 = await call2('dbg_warstructs', 3), bits46 = await call2('dbg_warbits');
+  const dragRun = async () => {
+    await page.evaluate(() => window.__TSG.touch_point(7, 200, 120, 0));
+    for (let k = 1; k <= 6; k++){ await page.evaluate(([x, y]) => window.__TSG.touch_point(7, x, y, 1), [200 + k * 22, 120]); await sleep(90); }
+    await page.evaluate(() => window.__TSG.touch_point(7, 332, 120, 2));
+    return poll2('dbg_warwdrag', v => v === 2, 5000);
+  };
+  // a run over blocked ground commits NOTHING and its preview
+  // stands (by design) — walk candidate fields until one builds
+  let built46 = 0, spent46 = 0;
+  for (const [fx, fy] of [[hqx + 150, hqy + 37], [hqx + 150, hqy + 120], [hqx - 24, hqy + 200], [hqx + 60, hqy + 37]]){   // drag lines ~30-165u from the Core: inside the property zone (the first run's fields were hundreds of units out — correctly refused)
+    await call2('dbg_warcam', fx, fy); await sleep(300);
+    const w0 = await call2('dbg_warstructs', 3), b0 = await call2('dbg_warbits');
+    ok((await dragRun()) === 2, 'v1.33 check 46: the drag left a wall run standing in preview',
+       'wdrag=' + (await call2('dbg_warwdrag')) + ' at field ' + fx + ',' + fy);
+    ok((await call2('dbg_warstructs', 3)) === w0 && (await call2('dbg_warbits')) === b0,
+       'v1.33 check 46: the preview built nothing and charged nothing yet');
+    await tap(496, 293);   // the APPROVE chip
+    await sleep(600);
+    const w1 = await call2('dbg_warstructs', 3), b1 = await call2('dbg_warbits');
+    if (w1 > w0){ built46 = w1 - w0; spent46 = b0 - b1;
+      ok((await call2('dbg_warwdrag')) === 0, 'v1.33 check 46: APPROVE committed the run');
+      break;
+    }
+    await tap(588, 293);   // CANCEL the unbuildable preview, try the next field
+    await poll2('dbg_warwdrag', v => v === 0, 4000);
+    await tap(228, 337); await tap(138, 291);   // re-arm FIREWALL (Core still selected)
+    await poll2('dbg_warplace', v => v === 3, 4000);
+  }
+  const walls46b = await call2('dbg_warstructs', 3), bits46b = await call2('dbg_warbits');
+  ok(built46 >= 2 && spent46 === built46 * 25,
+     'v1.33 check 46: the run built, charged exactly 25 bits per standing segment, once',
+     'walls ' + walls46 + ' -> ' + walls46b + ', bits ' + bits46 + ' -> ' + bits46b);
+  // second run: CANCEL this time
+  await call2('dbg_warcam', hqx, hqy); await sleep(300);
+  await tap(320, 157);
+  await tap(228, 337); await tap(138, 291);
+  ok((await poll2('dbg_warplace', v => v === 3, 4000)) === 3, 'v1.33 check 46: FIREWALL armed again');
+  await call2('dbg_warcam', hqx + 150, hqy + 37); await sleep(300);
+  await page.evaluate(() => window.__TSG.touch_point(7, 200, 200, 0));
+  for (let k = 1; k <= 6; k++){ await page.evaluate(([x, y]) => window.__TSG.touch_point(7, x, y, 1), [200 + k * 22, 200]); await sleep(90); }
+  await page.evaluate(() => window.__TSG.touch_point(7, 332, 200, 2));
+  ok((await poll2('dbg_warwdrag', v => v === 2, 5000)) === 2, 'v1.33 check 46: the second run previews too');
+  await tap(588, 293);   // the CANCEL chip
+  ok((await poll2('dbg_warwdrag', v => v === 0, 5000)) === 0, 'v1.33 check 46: CANCEL stood the run down');
+  ok((await call2('dbg_warstructs', 3)) === walls46b && (await call2('dbg_warbits')) === bits46b,
+     'v1.33 check 46: the cancelled run built nothing and charged nothing');
+
+  // check 47: this battle — two clans, a player miner, clan tags —
+  // survives SAVE & QUIT and RESUME. Check 46 killed the miner for
+  // its purse isolation, so raise a fresh one through the real bar.
+  if ((await call2('dbg_warminers', 0)) === 0){
+    await call2('dbg_waraddbits', 300);
+    // check 46 leaves FIREWALL placement ARMED (cancelling a wall
+    // run keeps the arm) — stand it down first, or every "select"
+    // tap below is read as a placement attempt
+    if ((await call2('dbg_warplace')) !== -1){ await tap(48, 337);   // the bar is [CANCEL] while placing
+      await poll2('dbg_warplace', v => v === -1, 3000); }
+    // the whole bar flow, retried once: a unit crossing the Core at
+    // tap time can eat the select tap (units take taps before
+    // structs), so every step verifies and re-taps
+    for (let attempt = 0; attempt < 2 && (await call2('dbg_warminers', 0)) === 0; attempt++){
+      await call2('dbg_warcam', hqx, hqy); await sleep(300);
+      for (let k = 0; k < 3 && (await call2('dbg_warselstruct')) !== 0; k++) await tap(320, 157);
+      if ((await call2('dbg_warselstruct')) !== 0) continue;
+      await tap(138, 337);
+      if ((await poll2('dbg_warbcat', v => v === 1, 2500)) !== 1) continue;
+      await tap(228, 291);
+      if ((await poll2('dbg_warplace', v => v === 7, 2500)) !== 7) continue;
+      for (const [px, py] of [[320, 60], [392, 84], [248, 84], [320, 252], [400, 220], [240, 220]]){
+        await tap(px, py);
+        if ((await call2('dbg_warminers', 0)) === 1) break;
+        if ((await call2('dbg_warplace')) !== 7) break;
+      }
+    }
+  }
+  ok((await call2('dbg_warminers', 0)) === 1, 'v1.33 check 47: a fresh BIT MINER stands before the park');
+  const clanTag47 = await (async () => { for (let i = 0; i < 128; i++)
+    if ((await call2('dbg_warunithp', i)) > 0 && (await call2('dbg_waruclan', i)) > 0) return [i, await call2('dbg_waruclan', i)]; return [-1, 0]; })();
+  await key('Escape', 300);
+  ok((await poll2('dbg_warpause', v => v === 1, 4000)) === 1, 'v1.33 check 47: pause up over the long battle');
+  await tap(320, 234);   // SAVE & QUIT
+  ok((await poll2('dbg_warstate', v => v === 0, 5000)) === 0 && (await call2('dbg_warsksnap')) === 1,
+     'v1.33 check 47: the long battle parked');
+  await key('Escape', 300);   // out of the cabinet
+  ok((await poll2('dbg_bwmode', v => v === -1, 4000)) === -1, 'v1.33 check 47: out of WAR!');
+  await call2('dbg_tp', 0, -11758); await sleep(200);
+  await key('KeyE', 250);
+  ok((await poll2('dbg_arcgate', v => v === 1, 3000)) === 1, 'v1.33 check 47: cabinet panel again');
+  await key('Space', 300);
+  ok((await poll2('dbg_warskpanel', v => v === 1, 4000)) === 1, 'v1.33 check 47: the entry panel offers the parked battle');
+  await key('Space', 300);   // RESUME SKIRMISH
+  ok((await poll2('dbg_warstate', v => v === 1, 6000)) === 1 && (await call2('dbg_warskirmish')) === 1,
+     'v1.33 check 47: the long battle resumed');
+  ok((await call2('dbg_warclans')) === 2 && (await call2('dbg_warminers', 0)) >= 1,
+     'v1.33 check 47: clans and the player BIT MINER survived the round trip',
+     'clans=' + (await call2('dbg_warclans')) + ' miners=' + (await call2('dbg_warminers', 0)));
+  if (clanTag47[0] >= 0)
+    ok((await call2('dbg_waruclan', clanTag47[0])) === clanTag47[1],
+       'v1.33 check 47: a bug kept its clan tag through the snapshot', 'unit ' + clanTag47[0] + ' clan ' + clanTag47[1]);
 
   console.log(`\nwartest: ${pass} passed, ${fail} failed`);
   await browser.close();

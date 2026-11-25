@@ -80,7 +80,7 @@ static void plat_render(int pi){
     // that much and a dark stage fills the strip under it, so the
     // controls live on the deck, not on the game. Only the local
     // player's full-width view — split co-op draws no stick HUD.
-    int plat_deck = (pi==G.my_id && mobile_ui() && !pad_mode() && G.touch_ctl==1 && vw2>=VW)? 84 : 0;
+    int plat_deck = (pi==G.my_id && mobile_ui() && !pad_mode() && vw2>=VW)? 84 : 0;   // v1.33: the deck is unconditional on touch (it was stick-scheme-only)
     G.camy = 180 + plat_deck;
     // sky, then two layers of server skyline drifting behind — the
     // sky wears the level's REGION (the vault borrows the Depths)

@@ -68,7 +68,7 @@ static void crt_start_race(int pi){
     }
     b->x = CRT_OX + S->crt_x[0]; b->y = CRT_OY + S->crt_y[0];
     b->bw_x = b->x; b->bw_y = b->y; b->aim = S->crt_h[0];
-    { char *q = S->note; q = sappend(q, "RACE "); q = sapp_int(q, S->crt_race + 1); q = sappend(q, "/4 - "); q = sappend(q, REGION_NAME[S->crt_track]); q = sappend(q, ". HOLD "); if (!(hint_dev()==DEV_TOUCH && !G.touch_ctl)){ q = sappend(q, lbla(H_FIRE)); q = sappend(q, " "); } q = sappend(q, "TO GO!"); *q = 0; S->note_t = 2.4f; }   // v1.30 (audit F8): DRAG reads "HOLD TO GO", never "HOLD TAP"
+    { char *q = S->note; q = sappend(q, "RACE "); q = sapp_int(q, S->crt_race + 1); q = sappend(q, "/4 - "); q = sappend(q, REGION_NAME[S->crt_track]); q = sappend(q, ". HOLD "); { q = sappend(q, lbla(H_FIRE)); q = sappend(q, " "); } q = sappend(q, "TO GO!"); *q = 0; S->note_t = 2.4f; }   // v1.30 (audit F8): DRAG reads "HOLD TO GO", never "HOLD TAP"
     if (S->crt_duo >= 0){ Buddy *gb = &G.bud[S->crt_duo];
         gb->x = CRT_OX + S->crt_x[1]; gb->y = CRT_OY + S->crt_y[1];
         gb->bw_x = gb->x; gb->bw_y = gb->y; gb->aim = S->crt_h[1]; }
@@ -80,7 +80,7 @@ static void crt_drive_kart(BwSim *S, int i, int keys, int go, float dt){
     float dxl = S->crt_x[i] - CRT_WX[bi], dyl = S->crt_y[i] - CRT_WY[bi];
     float hw1 = CRT_HW + 1.0f;
     int onroad = (dxl*dxl + dyl*dyl) <= hw1 * hw1;
-    float vmax = onroad? 168.0f : 62.0f;
+    float vmax = onroad? 155.0f : 57.0f;   // v1.33 calmer handling (Daniel: "everything's too fast"): top speed 168 -> 155 on-road (-7.7%), 62 -> 57 off-road (same ratio, grass penalty unchanged in proportion); boost still multiplies this, so boosted top falls by the same %
     if (S->crt_boost[i] > 0){ S->crt_boost[i] -= dt; vmax *= 1.38f; }
     float v = S->crt_v[i];
     // GO is the FIRE button held down (Nov 14, Daniel): the stick is
@@ -100,7 +100,7 @@ static void crt_drive_kart(BwSim *S, int i, int keys, int go, float dt){
     if (keys & K_LEFT) steer -= 1;
     if (keys & K_RIGHT) steer += 1;
     float sf = v / 55.0f; if (sf > 1) sf = 1; if (sf < -1) sf = -1;
-    S->crt_h[i] = crt_wrap(S->crt_h[i] + steer * 2.75f * sf * dt);
+    S->crt_h[i] = crt_wrap(S->crt_h[i] + steer * 2.34f * sf * dt);   // v1.33 calmer handling: heading rate 2.75 -> 2.34 (-15%) — the kart swings left/right less eagerly; acceleration deliberately untouched (it was not the twitch source)
     // DRIFT (Nov 14): hold a hard steer at speed and the rear steps
     // out — the kart slides wide while the charge builds; let go
     // after a real slide and the stored-up grip fires you forward.
@@ -108,7 +108,7 @@ static void crt_drive_kart(BwSim *S, int i, int keys, int go, float dt){
         S->crt_slidet[i] += dt;
         if (S->crt_slidet[i] > 0.28f){
             float lx = fsin(S->crt_h[i]), ly = -fcos(S->crt_h[i]);   // leftward unit
-            float mag = (v - 100.0f) * 0.38f * steer;
+            float mag = (v - 100.0f) * 0.32f * steer;   // v1.33 calmer handling: drift lateral slide 0.38 -> 0.32 (-16%), paired with the softer heading rate; drift speed threshold (118) and mini-boost on release unchanged
             S->crt_x[i] += lx * mag * dt;
             S->crt_y[i] += ly * mag * dt;
         }
@@ -345,7 +345,7 @@ static void crt_update(int pi, float dt, const BwIn *in){
         float turn = 3.3f * dt; if (dh > turn) dh = turn; if (dh < -turn) dh = -turn;
         S->crt_h[i] = crt_wrap(S->crt_h[i] + dh);
         float curve = ffabs(crt_wrap(fatan2(h2y, h2x) - fatan2(hy, hx)));
-        float tv = 158.0f * S->crt_skill[i] * (1.0f - (curve > 0.5f? 0.30f : curve * 0.30f));
+        float tv = 145.0f * S->crt_skill[i] * (1.0f - (curve > 0.5f? 0.30f : curve * 0.30f));   // v1.33: AI base pace 158 -> 145 (-8.2%), matching the player's top-speed cut — the AI does NOT share crt_drive_kart's vmax, so it is scaled here in parallel to keep the field exactly as competitive (same skill spread, rubber band and curve slowdown); AI turn cap (3.3) and accel (130) deliberately untouched: the AI's seek steering is not the player's twitch source, and softening it would only make rivals sloppier, not the player calmer
         float rubber = S->crt_prog[0] - S->crt_prog[i];
         float rbw = CRT_LEN * 0.178f;   // v1.23: the band stretches with the circuit
         tv *= (rubber > rbw)? 1.05f : (rubber < -rbw)? 0.95f : 1.0f;

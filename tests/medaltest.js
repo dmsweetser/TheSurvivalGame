@@ -95,14 +95,14 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   await call('dbg_adopt', 0);
   const blobA = await pollSave(1, 'bk=');
   ok(blobA.includes('pl= 0 '), 'A: slot 1 save carries the P1 line', blobA.slice(0, 60));
-  const MC = '230,271,321,421,0,0,0,0';       // t0 gold-exact, t1 silver (gold+1), t2 bronze (silver+1), t3 none (bronze+1)
+  const MC = '251,295,350,459,0,0,0,0';       // t0 gold-exact, t1 silver (gold+1), t2 bronze (silver+1), t3 none (bronze+1) — v1.33: boundaries moved with the re-derived medal table (AI pace 158 -> 145)
   const MR = '261,294,379,509,0,0,0,0,0,0,0,0,0,0,0,0'; // L1 gold-exact, L2 silver, L3 bronze, L4 none
   const crafted = blobA.split('\n').map(line =>
     line.startsWith('pl= 0 ') ? line + ' mc=' + MC + ' mr=' + MR : line).join('\n');
   ok(crafted.includes('mc=' + MC), 'A: crafted blob carries the mc= token');
   await page.evaluate(s => localStorage.setItem('tsg_save2', s), crafted);
   ok(await loadSlot(2, 1), 'A: crafted slot 2 loads into play');
-  ok((await call('dbg_crttbest', 0)) === 230, 'A: cart t0 best = 230ds (gold boundary)', await call('dbg_crttbest', 0));
+  ok((await call('dbg_crttbest', 0)) === 251, 'A: cart t0 best = 251ds (gold boundary)', await call('dbg_crttbest', 0));
   ok((await call('dbg_crtmedal', 0)) === 3, 'A: t0 at gold boundary -> GOLD', await call('dbg_crtmedal', 0));
   ok((await call('dbg_crtmedal', 1)) === 2, 'A: t1 at gold+1 -> SILVER', await call('dbg_crtmedal', 1));
   ok((await call('dbg_crtmedal', 2)) === 1, 'A: t2 at silver+1 -> BRONZE', await call('dbg_crtmedal', 2));
@@ -120,7 +120,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   ok((await call('dbg_crttrack')) === 0, 'B: race 1 is track 0');
   ok(await finishRaceAt(200), 'B: finish banked, standings up');
   const tb0 = await call('dbg_crttbest', 0);
-  ok(tb0 > 200 && tb0 <= 230, 'B: t0 best replaced by the faster real finish', tb0);
+  ok(tb0 > 200 && tb0 <= 251, 'B: t0 best replaced by the faster real finish', tb0);
   ok((await call('dbg_crtmedal', 0)) === 3, 'B: t0 medal still GOLD');
   const blobB = await pollSave(2, 'mc=');
   ok(blobB.includes('mc='), 'B: slot 2 blob persists the mc= token');
@@ -310,7 +310,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   ok((await poll('dbg_crtstate', v => v === 4 || v === 5, 12000)) >= 4, 'F: P3 finish banked, standings up');
   ok((await call('dbg_crtbest')) === 3, 'F: the finish really was P3', await call('dbg_crtbest'));
   const tbF = await call('dbg_crttbest', 0);
-  ok(tbF > 150 && tbF <= 230, 'F: the gold-tier time banked', tbF);
+  ok(tbF > 150 && tbF <= 251, 'F: the gold-tier time banked', tbF);
   ok((await call('dbg_crtmedal', 0)) === 1, 'F: P3 caps the gold time at BRONZE', await call('dbg_crtmedal', 0));
   await call('dbg_bwexit'); await sleep(400);
   // P4 with an even faster clock: the time improves, the medal cannot

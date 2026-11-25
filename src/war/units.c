@@ -21,8 +21,10 @@
 #define WAR_OY 40000.0f
 #define WAR_AW 1600.0f
 #define WAR_AH 1200.0f
-#define WAR_MAXU 80
-#define WAR_MAXS 28
+// WAR_MAXU / WAR_MAXS / WAR_FOG_W / WAR_FOG_H live up by BwSim in
+// banzai/story.c (they size the struct's arrays). v1.33: MAXU 80 ->
+// 128 and MAXS 28 -> 44 for the nine-clan skirmishes; the fog grid
+// grew to 120x90 so the biggest field (4800x3600) has cells to mark.
 #define WAR_MAXP 64
 #define WAR_BAR_H 46
 #define WAR_U_HARV 0
@@ -41,9 +43,8 @@
 #define WAR_S_HIVE 4
 #define WAR_S_ASM 5
 #define WAR_S_GATE 6
+#define WAR_S_MINER 7   // v1.33: the BIT MINER — a buildable trickle rig (player's, near the Core) and the clans' sustain alike
 // WAR_MAXT lives up by BwSim (it sizes the struct's terrain arrays)
-#define WAR_FOG_W 40
-#define WAR_FOG_H 30
 #define WAR_CARRY 30          // bits a harvester hauls per trip (v1.19: 25 -> 30 — richer fields)
 // v1.21 (Daniel: balanced economics): what the HIVE pays for its own
 // bugs, out of its own purse — set against your train costs (melee
@@ -56,11 +57,31 @@
 #define WAR_COST_SPIT 35
 #define WAR_COST_BHARV 40
 #define WAR_SUB_H 46          // the categorized bar's options strip, drawn above the bar (WAR_BAR_H itself is load-bearing — tap math is coupled to it)
-static const int WAR_SRAD[7] = { 34, 26, 14, 13, 30, 28, 13 };        // structure radii (gate last: a firewall-footprint segment)
-static const int WAR_SHP[7] = { 600, 300, 160, 120, 0, 450, 120 };     // structure hp (hive scales instead)
+// v1.33: the SKIRMISH MAP LADDER — five sizes, labelled by their
+// dimensions in the setup panel (Daniel: past 1600x1200, and say
+// how big). Index 0 is unused (war_size is 1..5). Node amounts
+// scale with area so the big fields stay worth fighting over, and
+// the XP size factor rides the same ladder (see war_win).
+static const int WAR_SIZE_AW[6] = { 0, 1200, 1600, 2400, 3200, 4800 };
+static const int WAR_SIZE_AH[6] = { 0, 900, 1200, 1800, 2400, 3600 };
+static const int WAR_SIZE_LINES[6] = { 0, 2, 3, 4, 5, 6 };
+static const int WAR_SIZE_BITS[6] = { 0, 250, 300, 350, 400, 500 };
+static const float WAR_SIZE_XPF[6] = { 0, 1.0f, 1.25f, 1.5f, 1.75f, 2.0f };
+// v1.33: the CLANS — a skirmish's bug side is 1..9 clans, each with
+// its own hive, purse and colours, fighting everyone (free-for-all).
+// Team 0 is always the player; clan c's team is c. The campaign's
+// swarm fights as the single implicit clan 1.
+static const char *WAR_CLAN_NAME[10] = { "", "CRIMSON", "AMBER", "VERDANT", "AZURE", "VIOLET", "IVORY", "EMBER", "TEAL", "MAGENTA" };
+static const u32 WAR_CLAN_COL[10] = { 0, COL(232,64,64), COL(245,166,35), COL(96,200,90), COL(70,140,240), COL(170,100,230), COL(235,230,215), COL(255,110,50), COL(50,200,190), COL(240,80,180) };
+static const int WAR_SRAD[8] = { 34, 26, 14, 13, 30, 28, 13, 20 };        // structure radii (gate: a firewall-footprint segment; miner last)
+static const int WAR_SHP[8] = { 600, 300, 160, 120, 0, 450, 120, 260 };     // structure hp (hive scales instead; the miner is a sturdy rig)
 static const int WAR_TRAIN_COST[8] = { 80, 50, 75, 0, 0, 90, 160, 45 };   // by UNIT type: harvester / melee / ranged / - / - / scout / siege / patcher (v1.19 addendum: the patcher is the cheapest body on the field — fragile and weaponless, priced just under the melee's 50)
 static const float WAR_TRAIN_TIME[8] = { 6.0f, 4.0f, 5.0f, 0, 0, 5.0f, 9.0f, 4.0f };
-static const int WAR_BUILD_COST[7] = { 0, 150, 100, 25, 0, 200, 35 }; // patch bay / zapper / firewall / - / assembly plant / gate
+static const int WAR_BUILD_COST[8] = { 0, 150, 100, 25, 0, 200, 35, 150 }; // patch bay / zapper / firewall / - / assembly plant / gate / bit miner
+// v1.33: the BIT MINER's numbers — it pays for itself in two and a
+// half minutes of trickle (1 bit a second), then sustains a long
+// battle forever. The clans raise their own on the same price.
+#define WAR_MINER_RATE 1.0f   // seconds per bit of trickle
 // canopy tints for WAR terrain trees, one per region (Meadows green,
 // Spaghetti olive, Legacy dry, Badlands scorched, Cache frost-pale,
 // RAM Flats neon, Cable Jungle deep green, the Depths ashen violet)
@@ -140,6 +161,21 @@ static int war_hives_alive(BwSim *S){
     int n=0; for (int i=0;i<WAR_MAXS;i++) if (S->war_shp[i]>0 && S->war_stype[i]==WAR_S_HIVE) n++;
     return n;
 }
+// v1.33: TEAMS. A unit's team is 0 for the player's side and its
+// clan (1..9) for a bug; a structure's likewise (the Core and your
+// buildings are team 0, a hive or clan miner is its clan). Two
+// combatants are hostile exactly when their teams differ — that
+// one rule is the whole free-for-all.
+static int war_u_team(BwSim *S, int i){ return war_u_side(S->war_utype[i])==0? 0 : (S->war_uclan[i]>=1? S->war_uclan[i] : 1); }
+static int war_s_team(BwSim *S, int s){ return S->war_sside[s]==0? 0 : (S->war_sclan[s]>=1? S->war_sclan[s] : 1); }
+static int war_count_clan(BwSim *S, int clan){
+    int n=0; for (int i=0;i<WAR_MAXU;i++) if (S->war_uhp[i]>0 && war_u_side(S->war_utype[i])==1 && war_u_team(S, i)==clan) n++;
+    return n;
+}
+static int war_clan_miner(BwSim *S, int clan){   // the clan's living BIT MINER, or -1
+    for (int s=0;s<WAR_MAXS;s++) if (S->war_shp[s]>0 && S->war_stype[s]==WAR_S_MINER && war_s_team(S, s)==clan) return s;
+    return -1;
+}
 static int war_find_hq(BwSim *S){
     for (int i=0;i<WAR_MAXS;i++) if (S->war_stype[i]==WAR_S_HQ && S->war_smaxhp[i]>0) return i;
     return -1;
@@ -182,5 +218,12 @@ static void war_clear_field(BwSim *S){
     // clearing. (war_size/war_diff are NOT reset: they are the
     // player's kept setup picks, not battle state.)
     S->war_skirmish=0; S->war_aw=WAR_AW; S->war_ah=WAR_AH;
-    S->war_gw=WAR_FOG_W; S->war_gh=WAR_FOG_H; S->war_lines=0;
+    S->war_gw=40; S->war_gh=30; S->war_lines=0;   // v1.33: the campaign grid is 40x30 EXPLICITLY now — WAR_FOG_W/H are the array maxima (120x90), not the campaign's dims
+    // v1.33: clan/retaliation/wall-drag state starts clean too.
+    // (war_clanpick is NOT reset either: it is a kept setup pick.)
+    S->war_clans=1;
+    for (int i=0;i<WAR_MAXU;i++){ S->war_uclan[i]=0; S->war_uaggro[i]=0; }
+    for (int i=0;i<WAR_MAXS;i++){ S->war_sclan[i]=0; S->war_smineracc[i]=0; }
+    for (int i=0;i<WAR_MAXP;i++) S->war_psrc[i]=0;
+    S->war_wdrag=0;
 }

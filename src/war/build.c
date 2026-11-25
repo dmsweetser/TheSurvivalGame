@@ -13,7 +13,8 @@ static int war_cat_items(int st, int cat, int acts[5], int costs[5], const char 
                                  acts[n]=9; costs[n]=WAR_TRAIN_COST[6]; names[n]="SIEGE TANK"; n++; }
     } else if (cat==1){   // BUILD
         if (st==WAR_S_HQ){ acts[n]=1; costs[n]=WAR_BUILD_COST[1]; names[n]="PATCH BAY"; n++;
-                           acts[n]=10; costs[n]=WAR_BUILD_COST[5]; names[n]="ASSEMBLY"; n++; }
+                           acts[n]=10; costs[n]=WAR_BUILD_COST[5]; names[n]="ASSEMBLY"; n++;
+                           acts[n]=14; costs[n]=WAR_BUILD_COST[7]; names[n]="BIT MINER"; n++; }   // v1.33: the trickle rig (Section A)
     } else {   // DEFENSE
         if (st==WAR_S_HQ){ acts[n]=2; costs[n]=WAR_BUILD_COST[2]; names[n]="ZAPPER"; n++;
                            acts[n]=3; costs[n]=WAR_BUILD_COST[3]; names[n]="FIREWALL"; n++;
@@ -89,7 +90,7 @@ static void war_bar_activate(int pi, int slot){
         war_note(S, nb);
         sfx(17); return;
     }
-    if (act==6){ S->war_place=-1; S->war_bcat=-1; sfx(6); return; }
+    if (act==6){ S->war_place=-1; S->war_bcat=-1; S->war_wdrag=0; sfx(6); return; }   // v1.33: the bar's CANCEL also drops a wall run's preview
     if (act==7){
         for (int i=0;i<WAR_MAXU;i++)
             if (S->war_uhp[i]>0 && S->war_usel[i] && S->war_utype[i]!=WAR_U_HARV){ S->war_ustate[i]=0; S->war_utarget[i]=0; S->war_urepair[i]=0; }
@@ -108,6 +109,7 @@ static void war_bar_activate(int pi, int slot){
         sfx(6); return;   // the category stays open: queue the next one
     }
     if (S->war_bits < cost){ sfx(16); war_note(S, "NOT ENOUGH BITS! SEND THE HARVESTER OUT."); return; }
+    if (act==14){ S->war_place = WAR_S_MINER; S->war_bcat=-1; sfx(6); { char nb[128]; char *q=nb; q=sappend(q, war_place_verb()); q=sappend(q, " TO PLACE THE BIT MINER - IT MUST SIT NEAR THE CORE. +1 BIT A SECOND, FOREVER."); *q=0; war_note(S, nb); } return; }   // v1.33
     if (act==10){ S->war_place = WAR_S_ASM; S->war_bcat=-1; sfx(6); { char nb[96]; char *q=nb; q=sappend(q, war_place_verb()); q=sappend(q, " TO PLACE THE ASSEMBLY PLANT."); *q=0; war_note(S, nb); } return; }
     S->war_place = act==11? WAR_S_GATE : act;   // acts 1..3 are the struct kinds 1..3; act 11 arms the gate
     S->war_bcat=-1;   // arming a placement hands the bar to [CANCEL]
@@ -183,11 +185,92 @@ static void war_try_place(int pi, float wx, float wy){
     if (kind==WAR_S_WALL || kind==WAR_S_GATE){ wx = war_snap24(wx, WAR_OX); wy = war_snap24(wy, WAR_OY); }   // wall-family segments align on the grid, so lines (and the doors in them) join up
     if (!war_place_space(S, kind, wx, wy)){ sfx(16); war_note(S, "NO ROOM THERE!"); return; }
     if (!war_in_property(S, kind, wx, wy)){ sfx(16); war_note(S, "TOO FAR FROM YOUR BASE - BUILD ON YOUR OWN LAND!"); return; }
+    if (kind==WAR_S_MINER){   // v1.33: the miner runs near the base it feeds — within 340u of the Core
+        int hq = war_find_hq(S);
+        if (hq<0){ sfx(16); war_note(S, "NO CORE TO FEED!"); return; }
+        float dx=wx-S->war_sx[hq], dy=wy-S->war_sy[hq];
+        if (dx*dx+dy*dy > 340.0f*340.0f){ sfx(16); war_note(S, "BIT MINERS MUST SIT NEAR THE CORE!"); return; }
+    }
     S->war_bits -= cost;
     int s = war_spawn_struct(S, kind, 0, wx, wy);
     S->war_place = -1; S->war_bcat=-1;
     for (int i=0;i<WAR_MAXU;i++) S->war_usel[i]=0;
     S->war_selstruct = s;
     sfx(19);
-    war_note(S, kind==1? "PATCH BAY ONLINE! IT TRAINS FIGHTERS." : kind==2? "ZAPPER TOWER ONLINE!" : kind==5? "ASSEMBLY PLANT ONLINE! IT BUILDS VEHICLES." : kind==6? "GATE UP! YOUR UNITS PASS - BUGS DON'T." : "FIREWALL UP!");
+    war_note(S, kind==1? "PATCH BAY ONLINE! IT TRAINS FIGHTERS." : kind==2? "ZAPPER TOWER ONLINE!" : kind==5? "ASSEMBLY PLANT ONLINE! IT BUILDS VEHICLES." : kind==6? "GATE UP! YOUR UNITS PASS - BUGS DON'T." : kind==7? "BIT MINER ONLINE! THE BITS TRICKLE IN." : "FIREWALL UP!");
+}
+// -------------------------------------------------------------------
+// v1.33 (Section G): DRAG-TO-BUILD WALLS. With FIREWALL armed, a
+// field drag (finger or mouse) no longer pans — it draws a RUN of
+// segments along the dominant axis on the 24u grid, previewed live
+// with its segment count and total cost. Releasing a run of 2+
+// leaves the preview standing for an explicit APPROVE / CANCEL
+// (tappable chips, Enter, or the pad's A / B); approving builds
+// every individually placeable segment in drag order until the
+// purse can't cover the next placeable one — ONE charge for the
+// run, never a charge for a segment that didn't build. A one-
+// segment drag (or a plain tap) places singly, exactly as before.
+// The pad's equivalent: A marks the start, the cursor draws the
+// run, A locks the preview, A again approves, B peels it away.
+// The preview is transient UI state — it is never snapshotted.
+// -------------------------------------------------------------------
+static int war_wall_run(BwSim *S, float *xs, float *ys, int maxn){   // the run's segment centres, in drag order; returns the count
+    float x0 = war_snap24(S->war_wdx0, WAR_OX), y0 = war_snap24(S->war_wdy0, WAR_OY);
+    float x1 = war_snap24(S->war_wdx1, WAR_OX), y1 = war_snap24(S->war_wdy1, WAR_OY);
+    float dx = x1-x0, dy = y1-y0;
+    float adx = dx<0? -dx : dx, ady = dy<0? -dy : dy;
+    int n = 0;
+    if (adx >= ady){   // horizontal run at y0
+        float step = dx>=0? 24.0f : -24.0f;
+        for (float x=x0; ; x+=step){
+            if (n<maxn){ xs[n]=x; ys[n]=y0; }
+            n++;
+            if ((step>0 && x>=x1) || (step<0 && x<=x1)) break;
+            if (n>200) break;   // a runaway run is a bug, not a wall: bounded, always
+        }
+    } else {   // vertical run at x0
+        float step = dy>=0? 24.0f : -24.0f;
+        for (float y=y0; ; y+=step){
+            if (n<maxn){ xs[n]=x0; ys[n]=y; }
+            n++;
+            if ((step>0 && y>=y1) || (step<0 && y<=y1)) break;
+            if (n>200) break;
+        }
+    }
+    return n;
+}
+static void war_wall_cancel(BwSim *S){
+    S->war_wdrag = 0;
+    war_note(S, "WALL RUN CANCELLED.");
+    sfx(6);
+}
+static void war_wall_commit(int pi){
+    BwSim *S = war_bs(pi);
+    float xs[200], ys[200];
+    int n = war_wall_run(S, xs, ys, 200);
+    int cost = WAR_BUILD_COST[WAR_S_WALL], built = 0, spent = 0, last = -1;
+    for (int k=0;k<n;k++){
+        if (!war_place_ok(S, WAR_S_WALL, xs[k], ys[k])) continue;   // an unplaceable segment is skipped, never charged
+        if (S->war_bits < cost) break;   // the purse ran dry mid-run: what stands, stands
+        int s = war_spawn_struct(S, WAR_S_WALL, 0, xs[k], ys[k]);
+        if (s<0) break;   // the field is full of buildings
+        S->war_bits -= cost; spent += cost; built++; last = s;
+    }
+    if (built==0){
+        war_note(S, S->war_bits < cost? "NOT ENOUGH BITS FOR THAT RUN!" : "NO ROOM FOR THAT RUN!");
+        sfx(16);
+        return;   // the preview stands — the commander can pan, rethink, or cancel it
+    }
+    S->war_wdrag = 0; S->war_place = -1; S->war_bcat = -1;
+    for (int i=0;i<WAR_MAXU;i++) S->war_usel[i]=0;
+    S->war_selstruct = last;
+    { char nb[64]; char *q=nb; q=sapp_int(q, built); q=sappend(q, built>1? " FIREWALLS UP! -" : " FIREWALL UP! -"); q=sapp_int(q, spent); q=sappend(q, " BITS."); *q=0; war_note(S, nb); }
+    sfx(19);
+}
+// the APPROVE / CANCEL chips (screen rects, shared by the renderer
+// and the tap handler): two 84x26 chips above the command bar's
+// right end, drawn only while a run awaits approval
+static void war_wall_chip_rects(int vx, int vy, int vw2, int vh2, int *ax, int *ay, int *cx, int *cy){
+    *ay = *cy = vy + vh2 - WAR_BAR_H - 34;
+    *ax = vx + vw2 - 186; *cx = vx + vw2 - 94;
 }

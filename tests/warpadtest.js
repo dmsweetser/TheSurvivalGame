@@ -287,8 +287,8 @@ async function realClick(page, fbx, fby) {
     await P.padTap(12);          // DUp wraps the selection to the SKIRMISH stop
     await P.padTap(0);           // A opens the setup panel
     ok((await poll(page, 'dbg_warstate', v => v === 4)) === 4, 'skirmish: setup panel opened by pad');
-    await P.padTap(13); await P.padTap(13);
-    await P.padTap(0);           // LAUNCH
+    await P.padTap(13); await P.padTap(13); await P.padTap(13);
+    await P.padTap(0);           // LAUNCH (row 3 since v1.33's CLANS row)
     ok((await poll(page, 'dbg_warstate', v => v === 1)) === 1 && (await call(page, 'dbg_warskirmish')) === 1,
        'skirmish: battle launched by pad');
     await sleep(600);

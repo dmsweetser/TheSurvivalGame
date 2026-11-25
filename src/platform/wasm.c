@@ -268,7 +268,7 @@ __attribute__((export_name("dbg_budy"))) int exp_dbg_budy(void){
 __attribute__((export_name("dbg_rollback"))) int exp_dbg_rollback(void){
     int id = G.my_id>=0? G.my_id : 0; return G.p[id].rollback; }
 __attribute__((export_name("dbg_touchctl"))) int exp_dbg_touchctl(int v){
-    if (v==0 || v==1) G.touch_ctl=v; return G.touch_ctl; }
+    (void)v; G.touch_ctl=1; return G.touch_ctl; }   // v1.33: the scheme is pinned — the export stays so STICK suites keep their setter, and a 0 is coerced exactly like an old save's
 __attribute__((export_name("dbg_beans"))) int exp_dbg_beans(int v){
     int id = G.my_id>=0? G.my_id : 0;
     if (v>=0) G.p[id].beans=v; return G.p[id].beans; }
@@ -572,7 +572,7 @@ __attribute__((export_name("dbg_warskirmish"))) int exp_dbg_warskirmish(void){ i
 __attribute__((export_name("dbg_warbits"))) int exp_dbg_warbits(void){ int id = G.my_id>=0? G.my_id : 0; return BWS[id].war_bits; }
 __attribute__((export_name("dbg_warconq"))) int exp_dbg_warconq(void){ int id = G.my_id>=0? G.my_id : 0; return G.bud[id].war_prog; }
 __attribute__((export_name("dbg_warhives"))) int exp_dbg_warhives(void){ int id = G.my_id>=0? G.my_id : 0; return war_hives_alive(&BWS[id]); }
-__attribute__((export_name("dbg_warhbits"))) int exp_dbg_warhbits(void){ int id = G.my_id>=0? G.my_id : 0; BwSim *S = &BWS[id]; for (int s=0;s<28;s++) if (S->war_shp[s]>0 && S->war_stype[s]==WAR_S_HIVE) return S->war_hbits[s]; return -1; }   // v1.21: the first living hive's purse (-1 = no hive)
+__attribute__((export_name("dbg_warhbits"))) int exp_dbg_warhbits(void){ int id = G.my_id>=0? G.my_id : 0; BwSim *S = &BWS[id]; for (int s=0;s<WAR_MAXS;s++) if (S->war_shp[s]>0 && S->war_stype[s]==WAR_S_HIVE) return S->war_hbits[s]; return -1; }   // v1.21: the first living hive's purse (-1 = no hive)
 __attribute__((export_name("dbg_warunits"))) int exp_dbg_warunits(int side, int type){ int id = G.my_id>=0? G.my_id : 0; BwSim *S = &BWS[id]; int n=0;
     for (int i=0;i<WAR_MAXU;i++){ if (S->war_uhp[i]<=0) continue; if (side>=0 && war_u_side(S->war_utype[i])!=side) continue; if (type>=0 && S->war_utype[i]!=type) continue; n++; } return n; }
 __attribute__((export_name("dbg_warstructs"))) int exp_dbg_warstructs(int type){ int id = G.my_id>=0? G.my_id : 0; BwSim *S = &BWS[id]; int n=0;
@@ -654,6 +654,28 @@ __attribute__((export_name("dbg_warrally"))) int exp_dbg_warrally(int s){ int id
     if (s<0 || s>=WAR_MAXS || S->war_shp[s]<=0 || S->war_rallyx[s]==0) return -1;
     return (int)(S->war_rallyx[s]-WAR_OX)*10000 + (int)(S->war_rallyy[s]-WAR_OY); }   // v1.17: a building's rally point, dbg_warunitxy packing, -1 = unset
 __attribute__((export_name("dbg_warterrain"))) int exp_dbg_warterrain(void){ int id = G.my_id>=0? G.my_id : 0; return BWS[id].war_tn; }
+// v1.33 skirmish hooks: the setup picks, the live clan count, per-unit
+// and per-struct clan tags, the retaliation latch, the wall-drag
+// state, miner counts per team, and unit HP (no HP export existed).
+__attribute__((export_name("dbg_warclans"))) int exp_dbg_warclans(void){ int id = G.my_id>=0? G.my_id : 0; return BWS[id].war_clans; }
+__attribute__((export_name("dbg_warsize"))) int exp_dbg_warsize(void){ int id = G.my_id>=0? G.my_id : 0; return BWS[id].war_size; }
+__attribute__((export_name("dbg_wardiff"))) int exp_dbg_wardiff(void){ int id = G.my_id>=0? G.my_id : 0; return BWS[id].war_diff; }
+__attribute__((export_name("dbg_warclanpick"))) int exp_dbg_warclanpick(void){ int id = G.my_id>=0? G.my_id : 0; return BWS[id].war_clanpick; }
+__attribute__((export_name("dbg_waruclan"))) int exp_dbg_waruclan(int i){ int id = G.my_id>=0? G.my_id : 0; BwSim *S = &BWS[id];
+    if (i<0 || i>=WAR_MAXU || S->war_uhp[i]<=0) return -1; return S->war_uclan[i]; }
+__attribute__((export_name("dbg_warsclan"))) int exp_dbg_warsclan(int s){ int id = G.my_id>=0? G.my_id : 0; BwSim *S = &BWS[id];
+    if (s<0 || s>=WAR_MAXS || S->war_shp[s]<=0) return -1; return S->war_sclan[s]; }
+__attribute__((export_name("dbg_waraggro"))) int exp_dbg_waraggro(int i){ int id = G.my_id>=0? G.my_id : 0; BwSim *S = &BWS[id];
+    if (i<0 || i>=WAR_MAXU || S->war_uhp[i]<=0) return 0; return S->war_uaggro[i]; }
+__attribute__((export_name("dbg_warwdrag"))) int exp_dbg_warwdrag(void){ int id = G.my_id>=0? G.my_id : 0; return BWS[id].war_wdrag; }
+__attribute__((export_name("dbg_warminers"))) int exp_dbg_warminers(int team){ int id = G.my_id>=0? G.my_id : 0; BwSim *S = &BWS[id]; int n=0;
+    for (int s=0;s<WAR_MAXS;s++) if (S->war_shp[s]>0 && S->war_stype[s]==WAR_S_MINER && S->war_sclan[s]==team) n++; return n; }
+__attribute__((export_name("dbg_warunithp"))) int exp_dbg_warunithp(int i){ int id = G.my_id>=0? G.my_id : 0; BwSim *S = &BWS[id];
+    if (i<0 || i>=WAR_MAXU) return -1; return (int)S->war_uhp[i]; }
+__attribute__((export_name("dbg_warutype"))) int exp_dbg_warutype(int i){ int id = G.my_id>=0? G.my_id : 0; BwSim *S = &BWS[id];
+    if (i<0 || i>=WAR_MAXU || S->war_uhp[i]<=0) return -1; return S->war_utype[i]; }
+__attribute__((export_name("dbg_warstype"))) int exp_dbg_warstype(int s){ int id = G.my_id>=0? G.my_id : 0; BwSim *S = &BWS[id];
+    if (s<0 || s>=WAR_MAXS || S->war_shp[s]<=0) return -1; return S->war_stype[s]; }
 __attribute__((export_name("dbg_warfeatn"))) int exp_dbg_warfeatn(void){ int id = G.my_id>=0? G.my_id : 0; BwSim *S = &BWS[id]; int n=0;
     for (int t=0;t<S->war_tn;t++) if (S->war_thp[t]>0) n++; return n; }   // debris still standing
 __attribute__((export_name("dbg_warfeat"))) int exp_dbg_warfeat(int t){ int id = G.my_id>=0? G.my_id : 0; BwSim *S = &BWS[id];
@@ -737,6 +759,17 @@ __attribute__((export_name("dbg_platsettime"))) int exp_dbg_platsettime(int ds){
 __attribute__((export_name("dbg_platflagx"))) int exp_dbg_platflagx(void){ int id = G.my_id>=0? G.my_id : 0; return (BWS[id].plat_w - 3) * 24 + 12; }
 __attribute__((export_name("dbg_platsel"))) int exp_dbg_platsel(void){ int id = G.my_id>=0? G.my_id : 0; return BWS[id].plat_sel; }
 __attribute__((export_name("dbg_platpick"))) int exp_dbg_platpick(void){ int id = G.my_id>=0? G.my_id : 0; return BWS[id].plat_pick; }
+// v1.33 test seams for runcontacttest (arrange/observe only, in the
+// dbg_tankpick / dbg_platsettime house style): how many live critters
+// of a kind a level holds, the first one's spot and state, a staging
+// setter for the hotfix power, and the live fireball count. Nothing
+// here deals damage, fires, or is ever saved.
+__attribute__((export_name("dbg_platen"))) int exp_dbg_platen(int kind){ int id = G.my_id>=0? G.my_id : 0; BwSim *S=&BWS[id]; int n=0; for (int i=0;i<S->plat_en_n;i++) if (S->plat_en[i].kind==kind) n++; return n; }
+__attribute__((export_name("dbg_platenx"))) int exp_dbg_platenx(int kind){ int id = G.my_id>=0? G.my_id : 0; BwSim *S=&BWS[id]; for (int i=0;i<S->plat_en_n;i++) if (S->plat_en[i].kind==kind) return (int)S->plat_en[i].x; return -1; }
+__attribute__((export_name("dbg_plateny"))) int exp_dbg_plateny(int kind){ int id = G.my_id>=0? G.my_id : 0; BwSim *S=&BWS[id]; for (int i=0;i<S->plat_en_n;i++) if (S->plat_en[i].kind==kind) return (int)S->plat_en[i].y; return -1; }
+__attribute__((export_name("dbg_platens"))) int exp_dbg_platens(int kind){ int id = G.my_id>=0? G.my_id : 0; BwSim *S=&BWS[id]; for (int i=0;i<S->plat_en_n;i++) if (S->plat_en[i].kind==kind) return S->plat_en[i].state; return -1; }
+__attribute__((export_name("dbg_platsetpow"))) int exp_dbg_platsetpow(int v){ int id = G.my_id>=0? G.my_id : 0; if (v>=0 && v<=2) BWS[id].plat_power=v; return BWS[id].plat_power; }
+__attribute__((export_name("dbg_platfire"))) int exp_dbg_platfire(void){ int id = G.my_id>=0? G.my_id : 0; BwSim *S=&BWS[id]; int n=0; for (int i=0;i<8;i++) if (S->plat_fa[i]) n++; return n; }
 __attribute__((export_name("dbg_tanklvl"))) int exp_dbg_tanklvl(void){ int id = G.my_id>=0? G.my_id : 0; return BWS[id].tank_lvl; }
 __attribute__((export_name("dbg_tanky"))) int exp_dbg_tanky(void){ int id = G.my_id>=0? G.my_id : 0; return (int)G.bud[id].y; }
 __attribute__((export_name("dbg_tankpass"))) int exp_dbg_tankpass(void){ int id = G.my_id>=0? G.my_id : 0; return BWS[id].tank_pass; }
@@ -800,6 +833,12 @@ __attribute__((export_name("dbg_morpowy"))) int exp_dbg_morpowy(void){ int id = 
 __attribute__((export_name("dbg_moramp"))) int exp_dbg_moramp(void){ int id = G.my_id>=0? G.my_id : 0; return (int)(BWS[id].mor_amp_t*10); }   // tenths of a second left
 __attribute__((export_name("dbg_morswings"))) int exp_dbg_morswings(void){ int id = G.my_id>=0? G.my_id : 0; return BWS[id].mor_swings; }   // v1.29: swings this cabinet session — the input regression's witness (the buddy's atk_cd never decays inside Banzai, so it latches; this counter only moves when the swing block runs)
 __attribute__((export_name("dbg_morspdb"))) int exp_dbg_morspdb(void){ int id = G.my_id>=0? G.my_id : 0; return (int)(BWS[id].mor_spd_t*10); }
+__attribute__((export_name("dbg_mordrops"))) int exp_dbg_mordrops(void){ int id = G.my_id>=0? G.my_id : 0; int n=0; for (int i=0;i<MOR_DROP_N;i++) n += BWS[id].mor_drop_on[i]? 1 : 0; return n; }   // v1.33: live kill drops on the road
+__attribute__((export_name("dbg_mordropspawned"))) int exp_dbg_mordropspawned(void){ int id = G.my_id>=0? G.my_id : 0; return BWS[id].mor_drop_spawned; }   // v1.33: drops spawned this cabinet session (the rate witness — live drops alone undercount, a foe downed inside the 30u pickup radius drops loot the runner collects on the next frame)
+__attribute__((export_name("dbg_mordropchance"))) int exp_dbg_mordropchance(void){ return (int)(mor_drop_chance*1000.0f + 0.5f); }   // v1.33: the drop chance, per mille
+__attribute__((export_name("dbg_mordropwx"))) int exp_dbg_mordropwx(void){ int id = G.my_id>=0? G.my_id : 0; Buddy *b=&G.bud[id]; float bd=1e18f; int bx=-1; for (int i=0;i<MOR_DROP_N;i++){ if (!BWS[id].mor_drop_on[i]) continue; float wx=mor_cx(BWS[id].mor_drop_s[i])+BWS[id].mor_drop_lat[i], wy=(float)MOR_Y0-BWS[id].mor_drop_s[i], dx=wx-b->x, dy=wy-b->y, d=dx*dx+dy*dy; if (d<bd){ bd=d; bx=(int)wx; } } return bx; }   // v1.33: the nearest live drop's world x (steering)
+__attribute__((export_name("dbg_mordropwy"))) int exp_dbg_mordropwy(void){ int id = G.my_id>=0? G.my_id : 0; Buddy *b=&G.bud[id]; float bd=1e18f; int by=-1; for (int i=0;i<MOR_DROP_N;i++){ if (!BWS[id].mor_drop_on[i]) continue; float wx=mor_cx(BWS[id].mor_drop_s[i])+BWS[id].mor_drop_lat[i], wy=(float)MOR_Y0-BWS[id].mor_drop_s[i], dx=wx-b->x, dy=wy-b->y, d=dx*dx+dy*dy; if (d<bd){ bd=d; by=(int)wy; } } return by; }   // v1.33: its world y
+__attribute__((export_name("dbg_mordropkind"))) int exp_dbg_mordropkind(void){ int id = G.my_id>=0? G.my_id : 0; Buddy *b=&G.bud[id]; float bd=1e18f; int bk=-1; for (int i=0;i<MOR_DROP_N;i++){ if (!BWS[id].mor_drop_on[i]) continue; float wx=mor_cx(BWS[id].mor_drop_s[i])+BWS[id].mor_drop_lat[i], wy=(float)MOR_Y0-BWS[id].mor_drop_s[i], dx=wx-b->x, dy=wy-b->y, d=dx*dx+dy*dy; if (d<bd){ bd=d; bk=BWS[id].mor_drop_kind[i]; } } return bk; }   // v1.33: its kind (0 health, 1 amp, 2 speed)
 __attribute__((export_name("dbg_tanklives"))) int exp_dbg_tanklives(void){ int id = G.my_id>=0? G.my_id : 0; return BWS[id].tank_lives; }
 __attribute__((export_name("dbg_tankquota"))) void exp_dbg_tankquota(void){ int id = G.my_id>=0? G.my_id : 0; BWS[id].tank_deliv = BWS[id].tank_quota; }
 __attribute__((export_name("dbg_craftmat"))) int exp_dbg_craftmat(void){ int id = G.my_id>=0? G.my_id : 0; Buddy *b=&G.bud[id]; return b->craft_wood + b->craft_stone*1000 + b->craft_fiber*1000000; }

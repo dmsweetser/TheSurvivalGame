@@ -9,7 +9,7 @@ static void draw_controls_panel(int vx, int vy, int vw2, int vh2, int ctx){
     const char *act[10]; const char *btn[10]; int n=0;
     static char mv[40], spr[8], pau[8], btnstore[10][24];
     if (hint_dev()==DEV_PAD) scpy(mv, "STICK / DPAD", 40);
-    else if (hint_dev()==DEV_TOUCH) scpy(mv, G.touch_ctl? "LEFT STICK" : "DRAG", 40);
+    else if (hint_dev()==DEV_TOUCH) scpy(mv, "LEFT STICK", 40);
     else move_key_str(mv);
     scpy(spr, hint_dev()==DEV_PAD? "LT" : key_name(G.bind[ACT_SPRINT]), 8);
     scpy(pau, lbla(H_PAUSE), 8);
@@ -53,6 +53,7 @@ static void draw_controls_panel(int vx, int vy, int vw2, int vh2, int ctx){
       case 3:
         CTL_ROW("RUN", mv);
         CTL_ROW("JUMP", lbl_fire());
+        CTL_ROW("THROW HOTFIXES", lbl_fire());   // v1.33: with the flower, the FIRE press throws too — on touch this names the deck's FIRE button, the only throw a phone has
         if (!mobile_ui()) CTL_ROW("STOMP (IN THE AIR)", "DOWN");
         CTL_ROW("LEAVE", back);
         break;

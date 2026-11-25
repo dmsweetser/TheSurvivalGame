@@ -337,6 +337,10 @@ typedef struct {
 // co-op one player can be in Banzai World in their half while the other
 // keeps playing the field. LAN play never enters (denied at the gate).
 #define WAR_MAXT 256   // WAR! terrain capacity (debris + barrier segments): v1.18 raised it from 72 — worst case was 68 debris + ~81 barrier segments = 149; v1.27 widened the scatter roll to 80 and kept the lines, so the cap rises to 256 rather than let a fat field truncate a barrier line (defined here, before BwSim; the WAR! block below points back at this)
+#define WAR_MAXU 128   // v1.33: WAR! unit capacity 80 -> 128 (nine clans field nine swarms now)
+#define WAR_MAXS 44    // v1.33: WAR! structure capacity 28 -> 44 (nine hives, nine clan miners, your base and its walls)
+#define WAR_FOG_W 120  // v1.33: the fog/A* grid's ARRAY width — the biggest skirmish field (4800x3600) in 40u cells. A battle's LIVE grid is war_gw x war_gh (the campaign's is 40x30); these are only the maxima the arrays are sized by
+#define WAR_FOG_H 90
 typedef struct {
     BwBattle bat;
     BWHack roam[BW_ROAMN];
@@ -537,6 +541,25 @@ typedef struct {
     // the barrier-line count when >0 (campaign leaves it 0 and
     // keeps its region rule).
     int war_skirmish, war_size, war_diff, war_setup_sel, war_setup_prevk;
+    // v1.33: CLANS — war_clanpick is the setup panel's kept pick
+    // (1..9, same keeping as war_size/war_diff); war_clans is the
+    // LIVE battle's clan count (1 for every campaign fight, and for
+    // a restored legacy skirmish the hive count it fields). Every
+    // unit/structure carries its team in war_uclan/war_sclan:
+    // 0 = the player's side, 1..9 = that clan.
+    int war_clanpick, war_clans;
+    int war_uclan[WAR_MAXU], war_sclan[WAR_MAXS];
+    // v1.33 (Section F): the retaliation latch — a bug combat unit's
+    // remembered attacker (a target ref, 0 = none). Transient like
+    // war_urepair: never snapshotted; a restored bug simply has no
+    // grudge until something hits it again.
+    int war_uaggro[WAR_MAXU];
+    float war_smineracc[WAR_MAXS];   // v1.33: a BIT MINER's fractional trickle accumulator (transient)
+    // v1.33 (Section G): the wall-run drag state — 0 none, 1 pointer
+    // dragging, 2 preview awaiting approval, 3 pad marking. The
+    // endpoints are world coords (start / current-or-locked end).
+    // Transient UI state, never snapshotted.
+    int war_wdrag; float war_wdx0, war_wdy0, war_wdx1, war_wdy1;
     // v1.29: the RESUME / NEW SKIRMISH panel raised by war_enter
     // when a saved skirmish is parked — the Mordor panel pattern
     // (selection, two-step discard confirm, an entry pick lock so
@@ -546,8 +569,8 @@ typedef struct {
     float war_aw, war_ah;
     int war_gw, war_gh, war_lines;
     char war_msg[72]; float war_msgt;
-    float war_ux[80], war_uy[80], war_uhp[80], war_uatk[80];
-    float war_utx[80], war_uty[80], war_uharv[80];
+    float war_ux[WAR_MAXU], war_uy[WAR_MAXU], war_uhp[WAR_MAXU], war_uatk[WAR_MAXU];
+    float war_utx[WAR_MAXU], war_uty[WAR_MAXU], war_uharv[WAR_MAXU];
     // v1.19 addendum: the PATCHER's repair state — TRANSIENT, like
     // an attack target: it is never written into the battle
     // snapshot, so a restored patcher simply idles (and its
@@ -557,28 +580,29 @@ typedef struct {
     // bits leave the purse), war_urepscan the autoseek re-scan
     // timer. war_repnoted latches the OUT OF BITS note to once per
     // emptying of the purse.
-    int war_urepair[80]; float war_urepacc[80], war_urepscan[80];
+    int war_urepair[WAR_MAXU]; float war_urepacc[WAR_MAXU], war_urepscan[WAR_MAXU];
     int war_repnoted;
-    int war_utype[80], war_umaxhp[80], war_ustate[80], war_utarget[80], war_ucarry[80], war_usel[80];
-    float war_sx[28], war_sy[28], war_shp[28], war_scd[28], war_qt[28];
-    int war_stype[28], war_sside[28], war_smaxhp[28];
-    int war_hbits[28];           // v1.21: each HIVE's own bit purse — the hive harvests the same nodes and pays for every bug it sends (rides the snapshot as the wh key)
+    int war_utype[WAR_MAXU], war_umaxhp[WAR_MAXU], war_ustate[WAR_MAXU], war_utarget[WAR_MAXU], war_ucarry[WAR_MAXU], war_usel[WAR_MAXU];
+    float war_sx[WAR_MAXS], war_sy[WAR_MAXS], war_shp[WAR_MAXS], war_scd[WAR_MAXS], war_qt[WAR_MAXS];
+    int war_stype[WAR_MAXS], war_sside[WAR_MAXS], war_smaxhp[WAR_MAXS];
+    int war_hbits[WAR_MAXS];           // v1.21: each HIVE's own bit purse — the hive harvests the same nodes and pays for every bug it sends (rides the snapshot as the wh key)
     // v1.21 cosmetic pass: purely visual state — hit-flash timers
     // and a small particle ring (0 poof / 1 harvest sparkle / 2
     // structure poof). Written by the hurt/harvest hooks, read ONLY
     // by the draw code, never saved, never fed back into the sim.
-    float war_uflash[80], war_sflash[28];
+    float war_uflash[WAR_MAXU], war_sflash[WAR_MAXS];
     float war_fx[24], war_fy[24], war_ft[24]; int war_fk[24];
     // v1.17 addendum 2: production is a QUEUE of up to 9 per building,
     // C&C-style — paid in full when queued, mixed types allowed, the
     // front item trains on war_qt and the rest roll out in order.
-    int war_queue[28][9]; int war_qlen[28];
+    int war_queue[WAR_MAXS][9]; int war_qlen[WAR_MAXS];
     // v1.17 addendum 3: rally points — where a producer's fresh units
     // walk to the moment they roll out. 0 = unset (arena coords are
     // ~40000+, so 0 is never a real point).
-    float war_rallyx[28], war_rallyy[28];
+    float war_rallyx[WAR_MAXS], war_rallyy[WAR_MAXS];
     float war_nx[16], war_ny[16]; int war_namt[16], war_nn;   // v1.19: 11 campaign nodes now, 13 on a LARGE skirmish field (was [10])
     float war_px[64], war_py[64]; int war_ptar[64], war_pdmg[64], war_pside[64]; float war_pt[64];
+    int war_psrc[64];   // v1.33: who fired each projectile (a target ref, 0 = nobody) — the victim's grudge needs a name (Section F)
     // WAR! round 2 (Nov 16 2026, Daniel's playtest): static terrain and
     // the fog of war. Terrain kinds: 0 tree, 1 rock, 2 broken terminal,
     // 3 cable spool, 4 rubble. Fog cells are 40u: 0 unexplored,
@@ -589,16 +613,16 @@ typedef struct {
     // the fading scorch mark a destroyed feature leaves behind.
     // v1.18: kind 5 is a BARRIER segment — indestructible (see WAR_THP).
     float war_thp[WAR_MAXT]; int war_tmaxhp[WAR_MAXT]; float war_tdeadt[WAR_MAXT];
-    unsigned char war_fog[40*30];
+    unsigned char war_fog[WAR_FOG_W*WAR_FOG_H];
     // v1.17 pathfinding: per-unit waypoint runs (turning points of a
     // grid A* path, LOS-shortcut). war_ptg is the target the path was
     // computed for; if the caller's target drifts >24u from it the
     // path is dropped. Stall bookkeeping lives here too: a unit that
     // tries to step but barely moves for 0.6s earns a path request.
-    float war_wpx[80][32], war_wpy[80][32];
-    unsigned char war_wpn[80], war_wpi[80];
-    float war_ptgx[80], war_ptgy[80];
-    float war_stallt[80], war_repath[80], war_stallx[80], war_stally[80];
+    float war_wpx[WAR_MAXU][32], war_wpy[WAR_MAXU][32];
+    unsigned char war_wpn[WAR_MAXU], war_wpi[WAR_MAXU];
+    float war_ptgx[WAR_MAXU], war_ptgy[WAR_MAXU];
+    float war_stallt[WAR_MAXU], war_repath[WAR_MAXU], war_stallx[WAR_MAXU], war_stally[WAR_MAXU];
     // MORDOR FUN RUN (bw_mode 9, v1.28): one run's SESSION scratch.
     // The run itself (distance, milestone, HP, clock, on/off) lives
     // on the Buddy (mu token) so it survives leaving; what lives
@@ -620,6 +644,19 @@ typedef struct {
     // are NEVER written to the save tokens.
     unsigned char mor_powtaken[8];
     float mor_amp_t, mor_spd_t;
+    // v1.33: kill drops — powerups a defeated foe leaves on the
+    // road where it fell (distance s, lateral offset, kind as the
+    // stations: 0 health / 1 amplification / 2 speed, on = live).
+    // Session-only like the stations and the buffs: cleared on
+    // cabinet entry and on a new run, cleared at/after the banked
+    // milestone on a faint, and NEVER written to the save tokens.
+    // Cap behaviour (mordor.c): when all 24 slots are live a new
+    // drop is SKIPPED — loot already on the road is never
+    // overwritten. mor_drop_spawned is the session's spawn total
+    // (the drop-rate test's witness; reset with the session).
+    float mor_drop_s[24], mor_drop_lat[24];
+    int mor_drop_kind[24], mor_drop_on[24];
+    int mor_drop_spawned;
 } BwSim;
 static BwSim BWS[MAXP];
 static int bw_defeated_has(BwSim *S, int key){ for (int i=0;i<S->defeated_n;i++) if (S->defeated[i]==key) return 1; return 0; }

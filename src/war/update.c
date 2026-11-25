@@ -40,6 +40,7 @@ static void war_update(int pi, float dt, const BwIn *in){
     for (int s=0;s<WAR_MAXS;s++) if (S->war_sflash[s]>0) S->war_sflash[s] -= dt;
     for (int i=0;i<24;i++) if (S->war_ft[i]>0) S->war_ft[i] -= dt;
     for (int t=0;t<S->war_tn;t++) if (S->war_tdeadt[t] > 0) S->war_tdeadt[t] -= dt;   // scorch marks fade
+    if (in->exit_ && S->war_wdrag==2){ war_wall_cancel(S); return; }   // v1.33: Esc with a wall run awaiting approval cancels the RUN, not the battle (Section G)
     if (in->exit_){   // Esc in a battle (v1.17): the pause menu — RESUME / RESTART / SAVE & QUIT — not an abandonment
         S->war_pause=1; S->war_pause_by=pi; S->war_pause_sel=0; sfx(6);   // feat 13: the pauser is recorded — the pause is theirs to drive. v1.31: the keyboard selection starts on RESUME
         return;
@@ -59,6 +60,34 @@ static void war_update(int pi, float dt, const BwIn *in){
         int sent = 0;
         for (int s=0;s<WAR_MAXS;s++)
             if (S->war_shp[s]>0 && S->war_stype[s]==WAR_S_HIVE){
+                // v1.33: SUSTAIN — a clan with no living BIT MINER
+                // raises one on a ring beside its hive when the
+                // purse can spare the price and still field a wave.
+                // The miner's trickle feeds this hive's purse for
+                // the rest of the battle (war_struct_update), so a
+                // long free-for-all cannot starve every clan dry.
+                if (war_clan_miner(S, war_s_team(S, s))<0 && S->war_hbits[s] >= WAR_BUILD_COST[WAR_S_MINER] + 60){
+                    for (int t=0;t<8;t++){
+                        float a = (float)t * 0.785f + (float)(s%3);
+                        float mx = S->war_sx[s] + fcos(a)*64.0f, my = S->war_sy[s] + fsin(a)*64.0f;
+                        if (mx < WAR_OX+36 || mx > WAR_OX+S->war_aw-36 || my < WAR_OY+36 || my > WAR_OY+S->war_ah-36) continue;
+                        int bad = 0;
+                        for (int o=0;o<WAR_MAXS && !bad;o++){
+                            if (S->war_shp[o]<=0) continue;
+                            float dx=mx-S->war_sx[o], dy=my-S->war_sy[o], rr=(float)(WAR_SRAD[WAR_S_MINER]+WAR_SRAD[S->war_stype[o]]+8);
+                            if (dx*dx+dy*dy < rr*rr) bad=1;
+                        }
+                        for (int t2=0;t2<S->war_tn && !bad;t2++){
+                            if (S->war_thp[t2]<=0) continue;
+                            float dx=mx-S->war_tx[t2], dy=my-S->war_ty[t2], rr=(float)(WAR_SRAD[WAR_S_MINER]+S->war_trad[t2]+4);
+                            if (dx*dx+dy*dy < rr*rr) bad=1;
+                        }
+                        if (bad) continue;
+                        int mi = war_spawn_struct(S, WAR_S_MINER, 1, mx, my);
+                        if (mi>=0){ S->war_sclan[mi] = war_s_team(S, s); S->war_hbits[s] -= WAR_BUILD_COST[WAR_S_MINER]; }
+                        break;
+                    }
+                }
                 while (war_hive_bharv(S, s) < 2 && S->war_hbits[s] >= WAR_COST_BHARV){
                     if (war_spawn_bharv(S, s) < 0) break;
                     S->war_hbits[s] -= WAR_COST_BHARV;

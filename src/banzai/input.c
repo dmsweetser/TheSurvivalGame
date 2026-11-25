@@ -3,14 +3,16 @@
 // Split from banzai.c lines 1422-1846 in the Nov 2026 fine-grained refactor; code unchanged.
 
 // --- Banzai World P1 input, unified across devices (Daniel, Nov 5) ----
-// Daniel's rule: pick a touch scheme once — STICK or DRAG — and it works
-// the same in every minigame. Before this fill existed as one place, the
-// touch FIRE button never produced a `sel` (no stick-throwing in
-// Entrances, no swinging in Buddy Craft), menu navigation ignored the
-// stick entirely, and DRAG steered nothing at all in Banzai World.
-// Both P1 call sites (solo/co-op frame and the net-client frame) pack
-// P1's BwIn through here, so every mode inherits the same scheme.
-static int bw_tf_prev, bw_drag_prev, bw_nav_dir; static float bw_nav_rep;
+// Daniel's rule: one touch scheme in every minigame — since v1.33
+// that scheme is the virtual JOYSTICK alone (the drag scheme was
+// removed whole at his word). Before this fill existed as one place,
+// the touch FIRE button never produced a `sel` (no stick-throwing in
+// Entrances, no swinging in Buddy Craft) and menu navigation ignored
+// the stick entirely. Both P1 call sites (solo/co-op frame and the
+// net-client frame) pack P1's BwIn through here, so every mode
+// inherits the same deck: stick steers, FIRE selects/swings, USE
+// interacts.
+static int bw_tf_prev, bw_nav_dir; static float bw_nav_rep;
 // The touch START chip (v1.26 Item 2, Daniel's ruling): on touch, the
 // BW Start menu (RESUME/CONTROLS/LEAVE) could never be OPENED — its
 // rows were already tappable, but only Start/P (keyboard) or a pad's
@@ -69,34 +71,16 @@ static void bw_fill_p1(BwIn *bin, float dt){
     if (dir && dir!=bw_nav_dir){ if (dir<0) bin->up=1; else bin->down=1; bw_nav_rep = 0.38f; }
     else if (dir){ bw_nav_rep -= dt; if (bw_nav_rep<=0){ if (dir<0) bin->up=1; else bin->down=1; bw_nav_rep = 0.09f; } }
     bw_nav_dir = dir;
-    // holding FIRE (or a DRAG hold) in the field-combat modes swings at
-    // the weapon's own pace; the single edge above is for menus/throws
-    if ((tf || (G.touch_ctl==0 && IN.touch_down)) && !S->bat.active && !S->craft_menu && !S->bw_menu
+    // holding FIRE in the field-combat modes swings at the weapon's
+    // own pace; the single edge above is for menus/throws
+    if (tf && !S->bat.active && !S->craft_menu && !S->bw_menu
         && (b->bw_mode==2 || b->bw_mode==4 || b->bw_mode==9) && b->atk_cd<=0) bin->sel = 1;
-    // DRAG in Banzai World: steer toward the finger, meadow-style. The
-    // buddy sits at his view's centre in the top-down modes; in the
-    // platformer, run toward the finger and jump when it rides high.
-    // (WAR!, mode 8, has no walking buddy to steer — its drags pan
-    // the camera inside war_update instead.)
-    if (G.touch_ctl==0 && IN.touch_down && !S->bat.active && b->bw_mode!=8){
-        int vx,vy,vw2,vh2; p1_view_rect(&vx,&vy,&vw2,&vh2);
-        if (vw2>=VW && !S->craft_menu){
-            int dx = IN.touch_x-(vx+vw2/2), dy = IN.touch_y-(vy+vh2/2);
-            if (b->bw_mode==3){
-                if (dx>16) bin->keys |= K_RIGHT; else if (dx<-16) bin->keys |= K_LEFT;
-                if (dy<-44){ if (!bw_drag_prev) bin->sel=1; bin->sel_held=1; }
-            } else {
-                if (dx>16) bin->keys |= K_RIGHT; else if (dx<-16) bin->keys |= K_LEFT;
-                if (dy>16) bin->keys |= K_DOWN; else if (dy<-16) bin->keys |= K_UP;
-                if (b->bw_mode!=5) bin->sel_held = 1;   // drag-steering a tank is not firing it
-            }
-        }
-        bw_drag_prev = 1;
-    } else bw_drag_prev = 0;
-    // in DRAG there is no USE button: a tap IS the interact button
-    // (doors, drawers, gathering, talking). The craft menu and the
-    // story log consume their own taps, so hands off while they're up.
-    if (G.touch_ctl==0 && IN.tapped && !S->bat.active && !S->craft_menu && !S->log_open && !S->bw_menu && b->bw_mode!=8) bin->interact = 1;
+    // v1.33: the DRAG legs that lived here are gone with the scheme —
+    // drag steering toward the finger (and its platformer drag-up
+    // jump), drag-hold auto-swing, and tap-as-interact. The joystick
+    // steers through IN.touch_keys (bin->keys above), FIRE swings
+    // (tf), and the USE button interacts (interact_pressed above) —
+    // every verb the drag legs provided, on the one remaining deck.
 }
 
 // THE REBUILDING (feat 14): Duster's pathfinding. Greedy steering
@@ -219,23 +203,13 @@ static void bw_update(int pi, float dt, const BwIn *in){
     if (S->log_open){
         if (in->up){ S->log_sel = (S->log_sel+3)%4; sfx(6); }
         if (in->down){ S->log_sel = (S->log_sel+1)%4; sfx(6); }
-        // v1.30 (audit H8): DRAG touch produces neither menu edges nor
-        // stick flicks, so the log could be opened (the WALL button)
-        // but never navigated or used. While it is open, a vertical
-        // drag steps the selection (fresh edges of the steer levels —
-        // the block returns before movement, so the buddy stays put)
-        // and a tap uses the selected item; the tap fold in bw_fill_p1
-        // deliberately skips the log, so the tap is read here. The gate
-        // names the DEVICE, not just the scheme: DRAG is the default
-        // scheme on desktop too, and a keyboard player's held arrows
-        // ride in->keys as levels — ungated, their edges double-stepped
-        // the selection beside in->up/down (storytest caught that).
-        if (pi==G.my_id && G.touch_ctl==0 && hint_dev()==DEV_TOUCH){
-            int kedges = in->keys & ~S->log_prevk;
-            if (kedges & K_UP){ S->log_sel = (S->log_sel+3)%4; sfx(6); }
-            if (kedges & K_DOWN){ S->log_sel = (S->log_sel+1)%4; sfx(6); }
-            if (IN.tapped) bw_use_item(pi, S->log_sel);
-        }
+        // the log's touch door (was v1.30 audit H8's DRAG block):
+        // navigation rides in->up/down — stick flicks feed those on
+        // touch exactly as the arrows do — and a tap uses the
+        // selected item, the same tap every other panel answers.
+        // (The old DRAG-only key-edge stepping is gone with the
+        // scheme; it double-stepped beside in->up/down anyway.)
+        if (pi==G.my_id && hint_dev()==DEV_TOUCH && IN.tapped) bw_use_item(pi, S->log_sel);
         S->log_prevk = in->keys;
         if (in->sel) bw_use_item(pi, S->log_sel);
         if (in->exit_ || in->wall) S->log_open = 0;

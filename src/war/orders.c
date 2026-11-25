@@ -16,11 +16,22 @@ static void war_select_unit(BwSim *S, int i, int all_of_type){
     } else S->war_usel[i]=1;
     sfx(6);
 }
-// the third tap of a streak: EVERY combat unit you own — melee,
-// ranged and both vehicles, map-wide. Harvesters stay out of it.
+// the third tap of a streak: every combat unit you own THAT YOU
+// CAN SEE — melee, ranged and both vehicles inside the same
+// on-screen window the double-tap uses (±360/±220 around the
+// camera). Harvesters stay out of it. v1.33 (Daniel): the third
+// click used to muster the whole MAP — on the big fields that
+// yanked armies in from three screens away, which is exactly the
+// surprise he reported. What you see is what you muster.
 static void war_select_all_combat(BwSim *S){
-    for (int j=0;j<WAR_MAXU;j++)
-        S->war_usel[j] = (S->war_uhp[j]>0 && war_u_side(S->war_utype[j])==0 && war_u_combat(S->war_utype[j]))? 1 : 0;
+    for (int j=0;j<WAR_MAXU;j++){
+        int on = 0;
+        if (S->war_uhp[j]>0 && war_u_side(S->war_utype[j])==0 && war_u_combat(S->war_utype[j])){
+            float dx=S->war_ux[j]-S->war_camx, dy=S->war_uy[j]-S->war_camy;
+            on = (dx>-360 && dx<360 && dy>-220 && dy<220);
+        }
+        S->war_usel[j] = on;
+    }
     S->war_selstruct = -1; S->war_bcat = -1;
     sfx(6);
 }
@@ -154,6 +165,11 @@ static void war_handle_tap(int pi, int sx, int sy){
     BwSim *S = war_bs(pi);   // feat 13: the tap acts on the shared battle, in the TAPPER's view
     if (S->war_pause){ war_pause_tap(pi, sx, sy); return; }   // v1.17: the pause menu is modal — the tap never reaches the field
     int vx, vy, vw2, vh2; pi_view_rect(pi, &vx, &vy, &vw2, &vh2);
+    if (S->war_wdrag==2){   // v1.33: a wall run awaits approval — its chips own their rects before anything else reads the tap
+        int ax, ay, cx, cy; war_wall_chip_rects(vx, vy, vw2, vh2, &ax, &ay, &cx, &cy);
+        if (sx>=ax && sx<ax+84 && sy>=ay && sy<ay+26){ war_wall_commit(pi); return; }
+        if (sx>=cx && sx<cx+84 && sy>=ay && sy<ay+26){ war_wall_cancel(S); return; }
+    }
     if (S->war_bcat>=0 && sy >= vy+vh2-WAR_BAR_H-WAR_SUB_H && sy < vy+vh2-WAR_BAR_H){
         // the options strip (addendum 1): it holds the row war_bar_list
         // describes. WAR_BAR_H is untouched — the world view never

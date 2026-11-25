@@ -54,13 +54,14 @@ function T(name, cond, extra) { if (cond) { pass++; } else { fail++; console.log
   T('LEAVE exits Banzai World', (await poll('dbg_bwmode', v => v === -1)) === -1, await call('dbg_bwmode'));
   T('menu closed after leaving', (await call('dbg_bwmenu')) === 0, await call('dbg_bwmenu'));
 
-  // DRAG scheme: the chip works there too (it is drawn outside the
-  // scheme-specific touch layer)
+  // the chip again after a scheme-setter call: since v1.33 there is
+  // one touch scheme (dbg_touchctl coerces any set to STICK), and
+  // the chip — drawn outside the scheme's touch layer — still works
   await call('dbg_touchctl', 0);
   await call('dbg_bwentm', 0);
-  T('back in Free Play (DRAG)', (await poll('dbg_bwmode', v => v === 0)) === 0, await call('dbg_bwmode'));
+  T('back in Free Play (scheme pinned to STICK)', (await poll('dbg_bwmode', v => v === 0)) === 0, await call('dbg_bwmode'));
   await tap(44, 20);
-  T('chip opens the menu in DRAG too', (await poll('dbg_bwmenu', v => v === 1)) === 1, await call('dbg_bwmenu'));
+  T('chip opens the menu with the scheme pinned too', (await poll('dbg_bwmenu', v => v === 1)) === 1, await call('dbg_bwmenu'));
   await tap(320, 210);
   T('LEAVE exits again', (await poll('dbg_bwmode', v => v === -1)) === -1, await call('dbg_bwmode'));
 

@@ -3,10 +3,14 @@
 // Split from buddies.c lines 624-705 in the Nov 2026 fine-grained refactor; code unchanged.
 
 // ---- touch controls: the shell forwards every finger to the core.
-// Scheme 0 (drag): the first finger steers + fires; a quick, still touch
-// is a tap (menus, store, entering the store). Scheme 1 (d-pad): during
-// play, on-screen controls — a d-pad bottom-left, FIRE / USE (interact)
-// / WPN (cycle weapon) bottom-right — while taps still drive the menus.
+// ONE scheme since v1.33 (Daniel: the drag scheme is gone entirely):
+// the virtual joystick — a floating stick bottom-left, FIRE / USE
+// (interact) / WPN (cycle weapon) / WALL buttons bottom-right —
+// while taps still drive the menus, panels and chips. (The old
+// scheme 0, drag-to-steer-and-fire, was removed whole: its steering
+// leg, its input folds and its Settings-era title toggle. The
+// touch_ctl field survives only as a save-token fossil, pinned to
+// 1 at load; nothing branches on it any more.)
 #define TP_DPAD_CX 66
 #define TP_DPAD_CY 288
 #define TP_FIRE_CX (VW-58)
@@ -19,13 +23,10 @@
 #define TP_WALL_CY 198
 // zones: 5 = FIRE, 6 = USE, 7 = WPN, 8 = joystick, 9 = WALL
 static int tp_zone_at(int x, int y){
-    // v1.31 (audit P1): the FIRE disc is a claimable button in DRAG
-    // only inside Tank Rescue, whose DRAG deck is drawn now (war/
-    // touch.c). Everywhere else DRAG keeps its rule — no FIRE zone;
-    // the finger steers, and steering fires (top-down modes) or does
-    // nothing (Tank, whose drag-steer never fired it).
-    int tank = (G.state==GS_PLAY && G.my_id>=0 && G.bud[G.my_id].in_bw && G.bud[G.my_id].bw_mode==5);
-    int dx=x-TP_FIRE_CX, dy=y-TP_FIRE_CY; if (dx*dx+dy*dy<38*38) return (tank || G.touch_ctl==1)? 5 : 0;
+    // the FIRE disc is a claimable button everywhere (v1.33: with
+    // the drag scheme gone there is no steering finger for it to
+    // fight — the v1.31 Tank-only carve-out is moot)
+    int dx=x-TP_FIRE_CX, dy=y-TP_FIRE_CY; if (dx*dx+dy*dy<38*38) return 5;
     dx=x-TP_ACT_CX; dy=y-TP_ACT_CY; if (dx*dx+dy*dy<26*26) return 6;
     dx=x-TP_WPN_CX; dy=y-TP_WPN_CY; if (dx*dx+dy*dy<22*22) return 7;
     dx=x-TP_WALL_CX; dy=y-TP_WALL_CY; if (dx*dx+dy*dy<26*26) return 9;
@@ -58,17 +59,14 @@ static void core_touch_point(int id, int x, int y, int phase){
                 // here means the touch stays a plain tap/drag, which
                 // is all WAR! ever reads.
                 int z = (G.my_id>=0 && G.bud[G.my_id].in_bw && G.bud[G.my_id].bw_mode==8)? 0 : tp_zone_at(x, y);
-                if (z==9){ IN.tp[i].zone=9; IN.tp_wall_edge=1; }        // WALL: both schemes
-                else if (z==7){ IN.tp[i].zone=7; IN.tp_wpn_edge=1; }   // WPN: both schemes
-                else if (G.touch_ctl==1){
-                    if (z==5 || z==6){                  // a button
-                        IN.tp[i].zone = z;
-                        if (z==6) IN.tp_act_edge=1;
-                    } else {                            // anywhere else: the joystick
-                        IN.tp[i].zone = 8; IN.tp[i].ax = x; IN.tp[i].ay = y;
-                    }
+                if (z==9){ IN.tp[i].zone=9; IN.tp_wall_edge=1; }        // WALL button
+                else if (z==7){ IN.tp[i].zone=7; IN.tp_wpn_edge=1; }   // WPN button
+                else if (z==5 || z==6){                  // a button (FIRE / USE)
+                    IN.tp[i].zone = z;
+                    if (z==6) IN.tp_act_edge=1;
+                } else {                            // anywhere else: the joystick
+                    IN.tp[i].zone = 8; IN.tp[i].ax = x; IN.tp[i].ay = y;
                 }
-                else if (z==5){ IN.tp[i].zone = 5; }   // v1.31: DRAG inside Tank Rescue — tp_zone_at returns 5 in DRAG only there, where the deck's FIRE button is real
             }
             return;
         }
@@ -128,8 +126,7 @@ static void disc_fill(int cx, int cy, int r, u32 c){
 }
 static int chip_at(Player *me, int tx, int ty);   // weapon chips (defined with the HUD)
 static void touch_update(float dt){
-    // weapon chips: a tap on the strip equips that weapon directly —
-    // the only way to switch on a touchscreen in drag mode
+    // weapon chips: a tap on the strip equips that weapon directly
     if (G.state==GS_PLAY && IN.tapped){
         Player *me=&G.p[G.my_id];
         int cw = chip_at(me, IN.tap_x, IN.tap_y);
@@ -141,16 +138,11 @@ static void touch_update(float dt){
     if (IN.tp_act_edge){ IN.interact_pressed=1; IN.tp_act_edge=0; }
     if (IN.tp_wpn_edge){ IN.weapon_cycle=1; IN.tp_wpn_edge=0; }
     if (IN.tp_wall_edge){ IN.wall_pressed=1; IN.tp_wall_edge=0; }
-    IN.touch_down=0;
+    IN.touch_down=0;   // v1.33: no steering finger exists any more — the field stays for the legacy set_touch export and the Source Room's drag-scroll reads raw points itself now
     for (int i=0;i<6;i++){
         if (!IN.tp[i].active) continue;
         IN.tp[i].age += dt;
-        if (G.touch_ctl==0){
-            // v1.31: zone 5 exists in DRAG only on Tank Rescue's FIRE
-            // button — that finger is ON a button, never steering
-            if (!IN.touch_down && IN.tp[i].zone!=9 && IN.tp[i].zone!=7 && IN.tp[i].zone!=5){ IN.touch_x=IN.tp[i].x; IN.touch_y=IN.tp[i].y; IN.touch_down=1; }
-            else if (G.state==GS_PLAY && IN.tp[i].zone==5){ IN.tp_held |= 32; IN.touch_keys |= K_FIRE; }
-        } else if (G.state==GS_PLAY && IN.tp[i].zone==5){
+        if (G.state==GS_PLAY && IN.tp[i].zone==5){
             IN.tp_held |= 32; IN.touch_keys |= K_FIRE;
         } else if (G.state==GS_PLAY && IN.tp[i].zone==8){
             // floating joystick (Minecraft-style): the base sits where the

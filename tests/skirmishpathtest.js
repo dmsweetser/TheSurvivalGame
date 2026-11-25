@@ -90,7 +90,7 @@ async function enterWarMap(page) {
     await sleep(500);   // map grace after backing out
     await padTap(0);    // A again: the selection is still on SKIRMISH
     ok((await poll(page, 'dbg_warstate', v => v === 4)) === 4, 'pad: A reopened the panel from the SKIRMISH stop');
-    await padTap(13); await padTap(13);   // DDown x2 -> LAUNCH row
+    await padTap(13); await padTap(13); await padTap(13);   // DDown x3 -> LAUNCH row (v1.33: CLANS joined the panel — LAUNCH is row 3 now, was 2)
     await padTap(0);    // A: LAUNCH
     ok((await poll(page, 'dbg_warstate', v => v === 1)) === 1, 'pad: LAUNCH started the battle');
     ok((await call(page, 'dbg_warskirmish')) === 1, 'pad: the battle is a skirmish');
@@ -115,7 +115,7 @@ async function enterWarMap(page) {
     await key(page, 'ArrowUp');     // 0 -> 8 (SKIRMISH, wrapping)
     await page.keyboard.press('Space');
     ok((await poll(page, 'dbg_warstate', v => v === 4)) === 4, 'kb: arrows land on the SKIRMISH stop, Space opens the panel');
-    await key(page, 'ArrowDown'); await key(page, 'ArrowDown');   // -> LAUNCH
+    await key(page, 'ArrowDown'); await key(page, 'ArrowDown'); await key(page, 'ArrowDown');   // -> LAUNCH (row 3 since v1.33's CLANS row)
     await page.keyboard.press('Space');
     ok((await poll(page, 'dbg_warstate', v => v === 1)) === 1, 'kb: LAUNCH started the battle');
     ok((await call(page, 'dbg_warskirmish')) === 1, 'kb: the battle is a skirmish');
@@ -134,7 +134,7 @@ async function enterWarMap(page) {
     const [bx, by] = gameXY(564, 306);   // the SKIRMISH button's centre, where it is drawn
     await page.mouse.click(bx, by);
     ok((await poll(page, 'dbg_warstate', v => v === 4)) === 4, 'mouse: a real click on the SKIRMISH button opened the panel');
-    const [lx, ly] = gameXY(320, 208);   // LAUNCH row centre
+    const [lx, ly] = gameXY(320, 217);   // LAUNCH row centre (panel grew a row in v1.33: centre 208 -> 217)
     await page.mouse.click(lx, ly);
     ok((await poll(page, 'dbg_warstate', v => v === 1)) === 1, 'mouse: LAUNCH click started the battle');
     ok((await call(page, 'dbg_warskirmish')) === 1, 'mouse: the battle is a skirmish');

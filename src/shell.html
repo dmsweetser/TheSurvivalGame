@@ -476,11 +476,11 @@ window.addEventListener('orientationchange', ()=> setTimeout(fit, 60));
 fit();
 if (window.matchMedia && matchMedia('(pointer: coarse)').matches){
   const hint = document.getElementById('hint');
-  if (hint) hint.textContent = 'THE SURVIVAL GAME — drag to move + shoot, tap to select + buy. At the Bug Bounty store, tap to enter, tap a row to buy. Co-op: a friend hosts from the app — you join from this browser.';
+  if (hint) hint.textContent = 'THE SURVIVAL GAME — stick to move, FIRE to shoot, tap to select + buy. At the Bug Bounty store, tap to enter, tap a row to buy. Co-op: a friend hosts from the app — you join from this browser.';
 }
 
 // ---------- touch (mobile): every finger is forwarded to the game core,
-// which owns both control schemes (drag, and the virtual d-pad) ----------
+// which owns the one control scheme (the virtual joystick deck) ----------
 const escbtn = document.getElementById('escbtn');
 function fb_pos(t){
   const r = cv.getBoundingClientRect();
@@ -817,5 +817,6 @@ async function boot(){
 }
 boot();
 </script>
+<script data-goatcounter="https://thesurvivalgame.goatcounter.com/count" async src="//gc.zgo.at/count.js"></script>
 </body>
 </html>

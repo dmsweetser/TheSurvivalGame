@@ -235,9 +235,10 @@ static void srct_ensure_cursor(int s){
     (void)doff;
 }
 // --- touch drag scroll (v1.27) -------------------------------------------
-// IN.touch_down carries the live finger (the drag scheme's mirror of
-// tp[]); stick-scheme touches in the store never set it, so fall back
-// to the first live zone-0 touch point. Returns whole rows scrolled
+// The terminal lives in GS_STORE, where touches are never claimed by
+// the play deck, so the first live zone-0 touch point IS the finger
+// (IN.touch_down, the old drag scheme's mirror, is never set since
+// v1.33 — the check stays harmless). Returns whole rows scrolled
 // this frame: positive = the view moves DOWN (finger swept up).
 static int srct_drag_pos(int *x, int *y){
     if (IN.touch_down){ *x=IN.touch_x; *y=IN.touch_y; return 1; }
@@ -785,7 +786,7 @@ static void srct_draw_browser(int s, int x, int y, int w, int h){
         // instead of a hard-coded SPACE.
         { char fb[96]; char *q=fb;
           if (hint_dev()==DEV_PAD) q=sappend(q, "D-PAD + A - OPEN");
-          else if (hint_dev()==DEV_TOUCH) q=sappend(q, "TAP - OPEN    DRAG - SCROLL");
+          else if (hint_dev()==DEV_TOUCH) q=sappend(q, "TAP - OPEN    SWIPE - SCROLL");
           else { q=sappend(q, "ARROWS + "); q=sappend(q, key_name(G.bind[ACT_FIRE])); q=sappend(q, " - OPEN    B - BUILD    R - RESET"); }
           *q=0; draw_text_center_fit(x+w/2, y+h-20, w-16, fb, 1, COL(140,170,150)); }
 }
@@ -951,7 +952,7 @@ static void srct_draw_build(int s, int x, int y, int w, int h){
           }
           drow += segs;
       } }
-    draw_text_center_fit(x+w/2, y+h-20, w-16, hint_dev()==DEV_PAD? "D-PAD - SCROLL LOG    BACK - BACK" : hint_dev()==DEV_TOUCH? "DRAG - SCROLL LOG    TAP - BACK" : "UP/DOWN - SCROLL LOG    ESC - BACK", 1, COL(140,170,150));
+    draw_text_center_fit(x+w/2, y+h-20, w-16, hint_dev()==DEV_PAD? "D-PAD - SCROLL LOG    BACK - BACK" : hint_dev()==DEV_TOUCH? "SWIPE - SCROLL LOG    TAP - BACK" : "UP/DOWN - SCROLL LOG    ESC - BACK", 1, COL(140,170,150));
 }
 static void srct_draw_tune(int s, int x, int y, int w, int h){
     const char *p = srct_file[s]>=0? src_path(srct_file[s]) : "";

@@ -66,7 +66,7 @@ static int load_records_and_check_save(void){
     if ((v=line_val(savebuf,"bind"))) { const char *q=v;
         for (int i=0;i<14;i++){ int pk=parse_int(q); if (pk>=0 && pk<PK_COUNT) G.bind[i]=pk;
             while (*q && *q!=',' && *q!='\n') q++; if (*q==',') q++; else break; } }
-    if ((v=line_val(savebuf,"touchctl"))) G.touch_ctl = parse_int(v)? 1:0;
+    if ((v=line_val(savebuf,"touchctl"))) G.touch_ctl = 1;   // v1.33: a stored DRAG (0) loads as STICK — the drag scheme is removed; the clamp lives here, at the one border every old save crosses, and the next do_save rewrites the token as 1 (the v1.32 whale-clamp pattern)
     if ((v=line_val(savebuf,"zen"))) G.zen = parse_int(v)? 1:0;
     if ((v=line_val(savebuf,"eddie"))) G.eddie = parse_int(v)? 1:0;
     if ((v=line_val(savebuf,"whale"))) G.whale_own = parse_int(v) & 32767;

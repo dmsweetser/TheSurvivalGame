@@ -283,7 +283,7 @@ function T(name, cond, extra) {
     'warstate=' + (await call('dbg_warstate')) + ' mode=' + (await call('dbg_bwmode')));
   await key('KeyS', 200, 300);
   T('skirmish panel opens on the S key', (await poll('dbg_warstate', v => v === 4, 5000)) === 4, await call('dbg_warstate'));
-  await key('ArrowDown', 130, 160); await key('ArrowDown', 130, 160);   // LAUNCH row
+  await key('ArrowDown', 130, 160); await key('ArrowDown', 130, 160); await key('ArrowDown', 130, 160);   // LAUNCH row (row 3 since v1.33)
   await key('Space', 300, 500);
   T('skirmish battle launches', (await poll('dbg_warstate', v => v === 1, 6000)) === 1, await call('dbg_warstate'));
   T('the battle has an army and a purse', (await call('dbg_warunits')) > 0 && (await call('dbg_warbits')) > 0,

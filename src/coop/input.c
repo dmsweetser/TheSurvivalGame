@@ -18,21 +18,12 @@ static void resolve_local_input(void){
     if (IN.keys & K_RIGHT) mx+=1;
     if (mx!=0 || my!=0) me->aim = fatan2(my, mx);
     client_aim = me->aim;
-    // touch (mobile web): hold/drag to run toward the finger, firing as
-    // you go. Finger right on top of the player = stand and shoot the
-    // way you face.
-    if (IN.touch_down){
-        float psx = (me->x - G.camx) + VW/2, psy = (me->y - G.camy) + VH/2;
-        float dx = IN.touch_x - psx, dy = IN.touch_y - psy;
-        float d2 = dx*dx + dy*dy;
-        me->cur_keys |= K_FIRE;
-        if (d2 > 20*20){
-            float d = fsqrt(d2), ax = dx/d, ay = dy/d;
-            me->aim = fatan2(dy, dx); client_aim = me->aim;
-            if (ax > 0.38f) me->cur_keys |= K_RIGHT; else if (ax < -0.38f) me->cur_keys |= K_LEFT;
-            if (ay > 0.38f) me->cur_keys |= K_DOWN;  else if (ay < -0.38f) me->cur_keys |= K_UP;
-        }
-    }
+    // v1.33: the drag scheme's steering consumer lived here — hold/
+    // drag to run toward the finger, firing as you go. It is GONE
+    // with the scheme: on touch, the joystick's direction bits ride
+    // IN.touch_keys into cur_keys above and the FIRE button is the
+    // trigger, exactly like a gamepad. (Desktop mouse keeps its
+    // taps; it never had a keyboard's job taken from it.)
     if (IN.weapon_key>=1 && IN.weapon_key<=5){
         int w=IN.weapon_key-1;
         if (me->owned[w]){ me->weapon=w; client_weapon=w; sfx(6); }

@@ -41,7 +41,7 @@ static const char *menu_item(int i){
     if (menu_pad_mode() && idx>=2) idx++;   // step over the hidden controls row
     if (MENU_SIMPLE){
         switch (idx){ case 0: return "START"; case 1: return "HOW TO PLAY";
-                      case 2: return mobile_ui()? (G.touch_ctl? "CONTROLS: STICK" : "CONTROLS: DRAG") : "SETTINGS";
+                      case 2: return "SETTINGS";   // v1.33: this row was the touch-scheme toggle on mobile (CONTROLS: DRAG/STICK) — the scheme is gone, so mobile gets SETTINGS like everyone else (no row count changes anywhere)
                       case 3: { char *q=dbuf; q=sappend(q, "DIFFICULTY: "); q=sappend(q, DIFF_NAME[G.difficulty&3]); *q=0; return dbuf; }
                       case 4: return G.zen? "ZEN MODE: ON" : "ZEN MODE: OFF";
                       default: return G.eddie? "EDDIE MODE: ON" : "EDDIE MODE: OFF"; }
@@ -80,8 +80,7 @@ static void menu_activate(int sel){
         else if (idx==3){ G.difficulty = (G.difficulty+1)&3; do_save(); sfx(6); }   // difficulty for the next run
         else if (idx==4){ G.zen ^= 1; do_save(); sfx(6); }              // zen for the next run
         else if (idx==5){ G.eddie ^= 1; do_save(); sfx(6); }            // eddie: puffball bugs (cosmetic)
-        else if (mobile_ui()){ G.touch_ctl ^= 1; do_save(); sfx(6); }   // toggle drag <-> stick
-        else { G.set_sel=0; G.set_capture=0; G.state=GS_SETTINGS; }
+        else { G.set_sel=0; G.set_capture=0; G.state=GS_SETTINGS; }   // v1.33: row 2 is SETTINGS on mobile too now (it was the scheme toggle)
         return;
     }
     switch (idx){

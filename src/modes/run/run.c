@@ -35,7 +35,7 @@ static void plat_bonk_tile(int pi, int tx, int ty){
         int roll = (int)(h%100);
         if (roll<55){ S->plat_bits += 5; S->plat_score += 250; scpy(S->note, "A BURST OF BITS! +5", 72); S->note_t=1.6f; }
         else if (roll<82){ plat_en_add(S, 5, tx*PL_TILE+12, ty*PL_TILE); scpy(S->note, "A PATCH SHROOM! IT FIXES WHAT AILS YOU.", 72); S->note_t=2.0f; }
-        else { plat_en_add(S, 6, tx*PL_TILE+12, ty*PL_TILE); { char *q=S->note; q=sappend(q, "A HOTFIX FLOWER! "); q=sappend(q, lbl_int()); q=sappend(q, " THROWS HOTFIXES."); *q=0; } S->note_t=2.0f; }
+        else { plat_en_add(S, 6, tx*PL_TILE+12, ty*PL_TILE); { char *q=S->note; q=sappend(q, "A HOTFIX FLOWER! "); q=sappend(q, lbl_fire()); q=sappend(q, " THROWS HOTFIXES."); *q=0; } S->note_t=2.0f; }
     } else if (t==2 && S->plat_power>=1){
         plat_settile(S, tx, ty, 0); S->plat_score += 50; sfx(4);
         splat(tx*PL_TILE+12, ty*PL_TILE+12, COL(150,100,60), 6, 90);
@@ -292,8 +292,18 @@ static void plat_update(int pi, float dt, const BwIn *in){
         }
     }
     if (S->plat_ground) S->plat_chain = 0;   // a stomp chain only lives while you stay airborne
-    // hotfix fireballs
-    if (in->interact && S->plat_power>=2 && b->atk_cd<=0){
+    // hotfix fireballs. v1.33 (Daniel: "no way to fire on
+    // mobile"): the throw used to read ONLY in->interact, but
+    // Run's touch deck draws no USE button (bw_draw_touch gives
+    // mode 3 the FIRE button alone) — the touch FIRE button
+    // arrives as in->sel through bw_fill_p1 (the same fold Tank
+    // Rescue's cannon reads), and Run spent sel on the jump
+    // alone, so a phone player could jump with the FIRE button
+    // but never throw. The throw now reads the FIRE press too,
+    // the Tank way: INTERACT still throws on its own exactly as
+    // before (keyboard/pad unchanged), and a FIRE press throws
+    // as it jumps.
+    if ((in->interact || in->sel) && S->plat_power>=2 && b->atk_cd<=0){
         b->atk_cd = 0.34f;
         for (int i=0;i<8;i++) if (!S->plat_fa[i]){
             S->plat_fa[i]=1; S->plat_ft[i]=2.2f;
@@ -332,14 +342,23 @@ static void plat_update(int pi, float dt, const BwIn *in){
             float ph = e->t - (int)(e->t/3.4f)*3.4f;
             float rise = ph<0.8f? ph/0.8f : ph<1.9f? 1.0f : ph<2.7f? (2.7f-ph)/0.8f : 0.0f;
             e->vy = rise;   // vy doubles as the rise fraction for the drawing
-            continue;
         }
-        if (e->kind==4){   // the fly drifts and bobs
+        else if (e->kind==4){   // the fly drifts and bobs
             e->x -= 22*dt;
             if (e->x < b->x - 700) e->kind=-1;
-            continue;
         }
-        // walkers (and the shell, and the power-ups) get gravity
+        // walkers (and the shell, and the power-ups) get gravity.
+        // v1.33 (Daniel: "the guys coming out of the tunnels don't
+        // hurt you, and the flying guys don't hurt you"): kinds 3
+        // and 4 used to end in `continue` above, which skipped the
+        // contact block below for them entirely — the piranha's
+        // bite gate (kind 3, vy>0.4) and the fly's hurt/stomp lines
+        // (kind 4) down there were dead code, so neither kind could
+        // ever touch the runner. They now skip ONLY this gravity /
+        // walk block (the piranha rides its pipe; the fly holds its
+        // altitude) and fall through to the shared contact test
+        // like every other kind.
+        if (e->kind!=3 && e->kind!=4){
         if (e->kind!=2 || e->state==1) e->x += e->vx*dt;
         e->vy += 1500*dt; if (e->vy>600) e->vy=600;
         {
@@ -364,6 +383,8 @@ static void plat_update(int pi, float dt, const BwIn *in){
                 }
             }
         }
+        }
+        if (e->kind<0) continue;   // the fly drifted out of the world above
         // contact with the runner
         if (S->plat_cleart>0) continue;
         float dx = b->x - e->x, dy = (b->y-11) - (e->y-8);
@@ -377,7 +398,7 @@ static void plat_update(int pi, float dt, const BwIn *in){
         if (e->kind==5 || e->kind==6){
             S->plat_power = e->kind==5? 1 : 2; e->kind=-1; S->plat_score += 200; sfx(19);
             if (S->plat_power==1){ scpy(S->note, "PATCHED UP! BRICKS BREAK NOW.", 72); }
-            else { char *q=S->note; q=sappend(q, "HOTFIX POWER! "); q=sappend(q, lbl_int()); q=sappend(q, " THROWS FIRE."); *q=0; }
+            else { char *q=S->note; q=sappend(q, "HOTFIX POWER! "); q=sappend(q, lbl_fire()); q=sappend(q, " THROWS FIRE."); *q=0; }
             S->note_t=2.0f;
             continue;
         }

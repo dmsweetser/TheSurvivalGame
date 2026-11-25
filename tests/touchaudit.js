@@ -11,8 +11,11 @@
 //          menu rows take taps (pick, tap again to craft, outside
 //          tap closes); FIRE throws a stick in Entrances; FIRE jumps
 //          in Super Buddy Run.
-//   DRAG:  the finger steers in Craft and the hold swings; a tap is
-//          the interact button; drag runs + jumps in the platformer.
+//   DRAG:  retired in v1.33 (the scheme was removed whole; Daniel:
+//          joystick only). Its two sections below were re-pointed to
+//          the joystick deck at equal strength: joystick steers in
+//          Craft while FIRE swings (two thumbs, the deck's way), and
+//          the joystick runs + jumps the platformer.
 //   THE BACKFIRE BEAN: key 6 far from home -> the ride plays
 //          (bean_t), you land on the plaza (0,70), the bean is spent;
 //          at home (inside the epicenter) the bean is spent as the
@@ -114,18 +117,24 @@ function T(name, cond, extra) {
     T('tapping outside closes the menu', (await call('dbg_craftmenu')) === 0, await call('dbg_craftmenu'));
   }
 
-  // ================= DRAG in BUDDY CRAFT =================
+  // ============ THE JOYSTICK in BUDDY CRAFT (was: DRAG) ============
+  // v1.33 re-point: one finger steered AND swung under DRAG; on the
+  // one remaining deck that is two thumbs — the joystick steers,
+  // FIRE swings — the same two verbs at the same strength.
   await call('dbg_touchctl', 0);
-  T('scheme is DRAG', (await call('dbg_touchctl', -1)) === 0);
+  T('scheme is pinned to STICK (v1.33: DRAG removed)', (await call('dbg_touchctl', -1)) === 1);
   { const x0 = await call('dbg_bwx');
     let swung = 0;
-    await finger(3, 430, 180, 0);   // finger right of the buddy (screen centre 320,180)
+    await finger(3, 250, 250, 0);   // joystick touchdown (the anchor)
+    await finger(3, 360, 250, 1);   // thumb slides right: steer right
+    await finger(2, 582, 278, 0);   // FIRE held with the other thumb
     const t0 = Date.now();
     while (Date.now() - t0 < 1600) { if ((await call('dbg_batkcd')) > 0) swung = 1; await sleep(90); }
     const x1 = await call('dbg_bwx');
-    await finger(3, 430, 180, 2);
-    T('DRAG: the finger steers the buddy right', x1 > x0 + 10, x0 + ' -> ' + x1);
-    T('DRAG: the hold swings while you steer', swung === 1); }
+    await finger(3, 360, 250, 2);
+    await finger(2, 582, 278, 2);
+    T('STICK: the joystick steers the buddy right', x1 > x0 + 10, x0 + ' -> ' + x1);
+    T('STICK: FIRE swings while you steer', swung === 1); }
 
   // ================= STICK in ENTRANCES: FIRE throws =================
   await call('dbg_bwexit'); await sleep(300);
@@ -154,11 +163,14 @@ function T(name, cond, extra) {
     while (Date.now() - t0 < 1600) { const y = await call('dbg_bwy'); if (y < ymin) ymin = y; await sleep(60); }
     await finger(2, 582, 278, 2);
     T('STICK: FIRE jumps in Super Buddy Run', ymin < y0 - 12, y0 + ' -> min ' + ymin); }
-  await call('dbg_touchctl', 0);
+  await call('dbg_touchctl', 0);   // coerced: the scheme is STICK
   { const x0 = await call('dbg_bwx');
-    await dragHold(450, 110, 800);   // right and HIGH: run + jump
+    await finger(3, 250, 250, 0);
+    await finger(3, 340, 170, 1);   // joystick up-right: run, and mode 3's K_UP fold jumps
+    await sleep(800);
     const x1 = await call('dbg_bwx');
-    T('DRAG: drag runs the platformer', x1 > x0 + 10, x0 + ' -> ' + x1); }
+    await finger(3, 340, 170, 2); await sleep(120);
+    T('STICK: the joystick runs the platformer (was: DRAG drag)', x1 > x0 + 10, x0 + ' -> ' + x1); }
 
   // ================= THE BACKFIRE BEAN =================
   await call('dbg_bwexit'); await sleep(300);

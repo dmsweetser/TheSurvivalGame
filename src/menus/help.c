@@ -97,19 +97,12 @@ static void render_help(void){
         scpy(l3, "B - ENTER AND LEAVE THE STORE. A PICKS, B BACKS OUT.", 96);
         scpy(l4, "TWO PADS PLUGGED IN? FLIP ON 2P CO-OP IN THE MENU.", 96);
         scpy(l6, "Y - BACKFIRE BEAN: SQUEEZE HIM, PBBBT - HOME IN A FLASH.", 96);
-    } else if (mobile_ui() && G.touch_ctl){
+    } else if (mobile_ui()){
         scpy(l0, "PUSH YOUR LEFT THUMB TO STEER WITH THE", 96);
         scpy(l1, "STICK. YOU FIRE THE WAY YOU FACE.", 96);
         scpy(l2, "HOLD FIRE TO SHOOT. WPN - OR A TAP ON A WEAPON", 96);
         scpy(l3, "CHIP - SWITCHES WEAPONS. WALL BUILDS A WALL.", 96);
         scpy(l4, "BY THE STORE, TAP USE TO GO IN - OR TAP IT.", 96);
-        scpy(l6, "TAP THE BEAN READOUT - PBBBT, STRAIGHT HOME.", 96);
-    } else if (mobile_ui()){
-        scpy(l0, "DRAG TO MOVE. YOU FACE THE WAY YOU DRAG,", 96);
-        scpy(l1, "AND YOU FIRE THE WAY YOU FACE AS YOU GO.", 96);
-        scpy(l2, "TAP WALL TO BUILD A WALL FROM 3 CARCASSES.", 96);
-        scpy(l3, "WPN SWITCHES WEAPONS - OR TAP A WEAPON CHIP.", 96);
-        scpy(l4, "IN THE SHOPS: TAP A ROW, TAP IT AGAIN TO BUY.", 96);
         scpy(l6, "TAP THE BEAN READOUT - PBBBT, STRAIGHT HOME.", 96);
     } else {
     move_key_str(mv);
@@ -119,7 +112,7 @@ static void render_help(void){
       q=sappend(q, " WEAPONS - "); q=sappend(q, key_name(G.bind[ACT_WALL])); q=sappend(q, " WALL - ");
       q=sappend(q, key_name(G.bind[ACT_SPRINT])); q=sappend(q, " SPRINT - "); q=sappend(q, key_name(G.bind[ACT_PAUSE])); q=sappend(q, " PAUSE (1P)"); }
     { char *q=l3; q=sappend(q, key_name(G.bind[ACT_INTERACT])); q=sappend(q, " - ENTER AND LEAVE THE STORE. REBIND KEYS IN SETTINGS."); }
-    scpy(l4, "ON MOBILE: DRAG TO MOVE + SHOOT. TAP SELECTS + BUYS.", 96);
+    scpy(l4, "ON MOBILE: STICK TO MOVE, FIRE TO SHOOT. TAP SELECTS + BUYS.", 96);
     scpy(l6, "6 - BACKFIRE BEAN: SQUEEZE HIM, PBBBT - HOME IN A FLASH.", 96);
     }
     const char *lines[] = {

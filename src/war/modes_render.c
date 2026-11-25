@@ -202,7 +202,7 @@ static void bw_render_modes(int pi){
           draw_text_center(x+w/2, y+h-14, b2, 1, COL(150,170,190)); }
     }
     if (pi==G.my_id && mobile_ui() && !pad_mode() && !S->log_open){
-        const char *hint = G.touch_ctl? "STICK MOVE - TALK TALKS - PICK FOR BATTLES" : "DRAG TO MOVE - TAP TO TALK";
+        const char *hint = "STICK MOVE - USE TALKS - PICK FOR BATTLES";
         int hw2 = text_w(hint, 1);
         rect_fill(vx + vw2/2 - hw2/2 - 6, vy + vh2-22, hw2+12, 14, COL(20,26,20));
         draw_text_center(vx + vw2/2, vy + vh2-19, hint, 1, COL(240,248,240));

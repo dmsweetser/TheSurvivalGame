@@ -180,7 +180,7 @@ static void war_render_bar(int pi, int vx, int vy, int vw2, int vh2){
         if (S->war_place>=0) draw_text(ix, by+17, hint_dev()==DEV_PAD? "A PLACES IT WHERE THE CURSOR SITS" : (hint_dev()==DEV_TOUCH? "TAP GROUND TO PLACE IT" : "CLICK THE GROUND TO PLACE IT"), 1, COL(255,220,150));
         else if (S->war_selstruct>=0 && war_struct_alive(S, S->war_selstruct)){
             int s = S->war_selstruct;
-            static const char *SN[7] = { "COMPILER CORE", "PATCH BAY", "ZAPPER TOWER", "FIREWALL", "BUG HIVE", "ASSEMBLY PLANT", "GATE" };
+            static const char *SN[8] = { "COMPILER CORE", "PATCH BAY", "ZAPPER TOWER", "FIREWALL", "BUG HIVE", "ASSEMBLY PLANT", "GATE", "BIT MINER" };
             char buf[56]; char *q=buf; q=sappend(q, SN[S->war_stype[s]]); q=sappend(q, "  ");
             q=sapp_int(q, (int)S->war_shp[s]); q=sappend(q, "/"); q=sapp_int(q, S->war_smaxhp[s]);
             if (S->war_qlen[s]>0){ q=sappend(q, "  TRAINING x"); q=sapp_int(q, S->war_qlen[s]); }
@@ -278,6 +278,21 @@ static void war_draw_struct(BwSim *S, int s){
         if (S->war_qlen[s]>0) disc_fill(sx+18, sy-20, 2, ((int)(G.anim_t*3.0f)&1)? COL(255,190,80) : COL(150,100,40));
         else disc_fill(sx+18, sy-20, 2, COL(70,58,40));
         draw_text_center(sx, sy+26, "ASSEMBLY", 1, COL(220,228,240));
+    } else if (type==WAR_S_MINER){
+        // v1.33: the BIT MINER — a little rig with a working drill:
+        // a crate base, a mast, the bit churning into the ground,
+        // and gold motes rising off it as the trickle accrues. A
+        // clan's miner wears its clan's colour on the mast banner.
+        u32 trim = S->war_sside[s]==0? COL(255,205,40) : WAR_CLAN_COL[war_s_team(S, s)>=1 && war_s_team(S, s)<=9? war_s_team(S, s) : 1];
+        rect_fill(sx-18, sy+2, 36, 14, COL(96,84,58)); rect_line(sx-18, sy+2, 36, 14, COL(150,132,84));
+        rect_fill(sx-2, sy-20, 4, 22, COL(120,110,88)); rect_line(sx-2, sy-20, 4, 22, COL(170,160,130));
+        rect_fill(sx, sy-20, 10, 6, trim);   // the banner
+        int churn = (int)(fsin(G.anim_t*10.0f + (float)s*1.7f)*2.0f);
+        tri_fill(sx-4, sy+2, sx+4, sy+2, sx, sy+12+churn, COL(200,205,220));   // the drill bit, working
+        disc_fill(sx-8, sy-4, 4, COL(70,64,50)); disc_fill(sx-8, sy-4, 2, COL(255,205,40));
+        int mote = (int)(G.anim_t*14.0f + (float)s*5.0f) % 12;   // a rising gold mote, the trickle made visible
+        disc_fill(sx+10, sy-2-mote, 1, COL(255,220,90));
+        draw_text_center(sx, sy+26, "BIT MINER", 1, S->war_sside[s]==0? COL(255,230,150) : trim);
     } else {   // the HIVE
         int strain = REGION_BUG[S->war_region]>=0? REGION_BUG[S->war_region] : 0;
         u32 hc = col_shade(BUG_COL[strain], 0.8f);
@@ -291,7 +306,15 @@ static void war_draw_struct(BwSim *S, int s){
         int pr = 6 + (int)(fsin(G.anim_t*3.0f + (float)s)*1.5f);
         disc_fill(sx, sy-2, pr, BUG_BELLY[strain]);
         disc_fill(sx-9, sy-8, 3, COL(24,16,30)); disc_fill(sx+9, sy-8, 3, COL(24,16,30));
-        draw_text_center(sx, sy+32, "BUG HIVE", 1, COL(255,190,170));
+        if (S->war_clans>1){   // v1.33: the clan's ring and name — in a free-for-all every hive flies its own colours
+            int cl = war_s_team(S, s);
+            if (cl>=1 && cl<=9){
+                circle_out(sx, sy, 36, WAR_CLAN_COL[cl]);
+                circle_out(sx, sy, 38, WAR_CLAN_COL[cl]);
+                char hb[40]; char *q=hb; q=sappend(q, WAR_CLAN_NAME[cl]); q=sappend(q, " HIVE"); *q=0;
+                draw_text_center(sx, sy+32, hb, 1, WAR_CLAN_COL[cl]);
+            } else draw_text_center(sx, sy+32, "BUG HIVE", 1, COL(255,190,170));
+        } else draw_text_center(sx, sy+32, "BUG HIVE", 1, COL(255,190,170));
     }
     if (S->war_sflash[s] > 0)   // v1.21 cosmetic: the hit flash
         war_blend_disc(sx, sy, rad+3, COL(255,236,220), (int)(115.0f * (S->war_sflash[s]/0.12f)));
@@ -379,6 +402,10 @@ static void war_draw_unit(BwSim *S, Buddy *b, int i){
         }
         disc_fill(sx-3, sy-3, 2, COL(255,250,240)); disc_fill(sx+3, sy-3, 2, COL(255,250,240));
         disc_fill(sx-3, sy-3, 1, COL(16,12,20)); disc_fill(sx+3, sy-3, 1, COL(16,12,20));
+        if (S->war_clans>1){   // v1.33: the clan mark — a coloured stud on the back, so a free-for-all reads at a glance: same strain, different war
+            int cl = war_u_team(S, i);
+            if (cl>=1 && cl<=9) disc_fill(sx, sy+1, 3, WAR_CLAN_COL[cl]);
+        }
     }
     if (S->war_uflash[i] > 0)   // v1.21 cosmetic: the hit flash
         war_blend_disc(sx, sy-2, veh? 17:11, COL(255,236,220), (int)(115.0f * (S->war_uflash[i]/0.12f)));
@@ -475,6 +502,7 @@ static int war_view_pi = -1;   // feat 13: the player whose VIEW war_render is d
 static void war_render_ghost(int pi, int vx, int vy, int vw2, int vh2){
     BwSim *S = &BWS[pi];
     if (S->war_place<0) return;
+    if (S->war_wdrag==2) return;   // v1.33: a locked wall run draws its own preview (below) — the single ghost would double it
     if (war_view_pi==G.my_id){   // the touch points belong to the local player — only their own view ghosts them (feat 13: the viewer, not the battle owner)
         for (int i=0;i<6;i++){
             if (!IN.tp[i].active || IN.tp[i].y >= vy+vh2-WAR_BAR_H) continue;
@@ -619,6 +647,37 @@ static void war_render(int pi){
         war_draw_unit(S, b, i);
     }
     war_render_ghost(pi, vx, vy, vw2, vh2);
+    if (S->war_wdrag>0){   // v1.33 (Section G): the wall run's live preview — every segment ghosted (green where it would build, red where it wouldn't), the count and the total cost riding the run's far end, and the APPROVE / CANCEL chips while it awaits a verdict
+        float xs[200], ys[200];
+        int n = war_wall_run(S, xs, ys, 200);
+        int okc = 0;
+        for (int k=0;k<n;k++){
+            int okp = war_place_ok(S, WAR_S_WALL, xs[k], ys[k]);
+            if (okp) okc++;
+            int sx2 = SX(xs[k]), sy2 = SY(ys[k]);
+            war_blend_disc(sx2, sy2, 13, okp? COL(120,255,120) : COL(255,90,80), 80);
+            rect_line(sx2-13, sy2-7, 26, 14, okp? COL(140,255,140) : COL(255,110,90));
+        }
+        if (n>0){
+            // pass #4 clarity fix: the label quotes what APPROVE
+            // will actually do — the PLACEABLE segments and their
+            // cost (red segments neither build nor charge; the old
+            // label counted the whole run and overpromised)
+            char buf[56]; char *q=buf; q=sapp_int(q, okc); q=sappend(q, okc!=1? " WALLS - " : " WALL - "); q=sapp_int(q, okc*WAR_BUILD_COST[WAR_S_WALL]); q=sappend(q, " BITS"); *q=0;
+            int lx = SX(xs[n-1]), ly = SY(ys[n-1]) - 26;
+            int tw = text_w(buf, 1);
+            rect_fill(lx-tw/2-5, ly-3, tw+10, 15, COL(16,14,24)); rect_line(lx-tw/2-5, ly-3, tw+10, 15, COL(198,164,84));
+            draw_text_center(lx, ly, buf, 1, okc==n? COL(200,255,200) : COL(255,220,160));
+            if (S->war_wdrag==2){
+                int ax, ay, cx, cy; war_wall_chip_rects(vx, vy, vw2, vh2, &ax, &ay, &cx, &cy);
+                rect_fill(ax, ay, 84, 26, COL(40,90,44)); rect_line(ax, ay, 84, 26, COL(140,255,140));
+                draw_text_center(ax+42, ay+8, "APPROVE", 1, COL(230,255,230));
+                rect_fill(cx, cy, 84, 26, COL(96,44,40)); rect_line(cx, cy, 84, 26, COL(255,140,120));
+                draw_text_center(cx+42, cy+8, "CANCEL", 1, COL(255,230,220));
+                draw_text_center(vx+vw2/2, ay-16, hint_dev()==DEV_PAD? "A - APPROVE - B - CANCEL" : "ENTER - APPROVE - ESC - CANCEL", 1, COL(255,240,200));
+            }
+        }
+    }
     if (S->war_curon && S->war_state==1 && !S->war_barcap){   // the pad cursor rides above the fog, like the selected units do (v1.16). v1.20: while the command bar has captured pad control, the field cursor hides — the highlight is the pointer now. feat 13: no pi gate — war_render only ever runs for a local view (the owner's own, or a guest's by exchange), and the loaded view's curon is the VIEWER's cursor
         int csx = SX(S->war_curx), csy = SY(S->war_cury);
         int cr = 10 + (int)(fsin(G.anim_t*5.0f)*1.5f);

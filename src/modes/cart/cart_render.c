@@ -43,6 +43,15 @@ static void crt_draw_driver(int cx, int seat_y, int w, int species, u32 coat){
     }
     if (species != 5 && w >= 12)   // a sunlit crest on the head (v1.27 polish)
         disc_fill(hx - hr/3, hy - hr/3, hr/4 > 1? hr/4 : 1, col_shade(coat, 1.30f));
+    if (species != 4 && species != 5 && w >= 18){   // v1.33 cosmetic pass: a wobbly aerial on the driver's
+                                                    // head, tipped with a gold ball that catches the light —
+                                                    // phase rides the head's own x so no two drivers bob alike
+        int ax2 = hx + hr/2, ay2 = hy - hr - hr/4;
+        int wob = (int)(fsin(G.anim_t * 9.0f + (float)(cx % 37)) * 2.0f);
+        line_thick(ax2, ay2 + hr/2, ax2 + wob, ay2 - hr/3, 1, COL(40, 38, 48));
+        disc_fill(ax2 + wob, ay2 - hr/3 - 1, 2, COL(250, 200, 50));
+        pset(ax2 + wob - 1, ay2 - hr/3 - 2, COL(255, 246, 200));
+    }
     if (w >= 15){   // the famous glasses, oversized as is traditional
         int gr = hr * 2 / 5; if (gr < 2) gr = 2;
         circle_out(hx - hr/2, hy, gr, COL(20,18,26));
@@ -68,6 +77,26 @@ static void crt_render_view(int sim_pi, int viewer_pi){
         rect_fill(vx, vy, vw2, vh2, COL(18, 42, 24));
         for (int ty2 = 0; ty2 < 12; ty2++) for (int tx2 = 0; tx2 < 20; tx2++)
             if ((tx2 + ty2) & 1) rect_fill(KTX(tx2*32), KTY(ty2*32), KTS(32) + 1, KTS(32) + 1, COL(22, 52, 28));
+        // v1.33 cosmetic pass — WAITING ROOM dressing (all behind the
+        // existing text, whose positions are untouched): a chequer
+        // strip across the very top, a gold double frame, two soft
+        // spotlights falling on the kart, and a chasing bulb string
+        // under the title line.
+        for (int bx2 = 0; bx2 < vw2; bx2 += 16){
+            rect_fill(vx + bx2, vy, 8, 5, COL(238, 240, 242)); rect_fill(vx + bx2 + 8, vy + 5, 8, 5, COL(238, 240, 242));
+            rect_fill(vx + bx2 + 8, vy, 8, 5, COL(14, 14, 20)); rect_fill(vx + bx2, vy + 5, 8, 5, COL(14, 14, 20));
+        }
+        rect_line(vx + 4, vy + 14, vw2 - 8, vh2 - 18, COL(146, 116, 44));
+        rect_line(vx + 7, vy + 17, vw2 - 14, vh2 - 24, col_shade(COL(250, 200, 50), 0.55f));
+        tri_fill(vx + vw2/5, vy + 14, vx + vw2/2 - KTS(70), vy + vh2/2 + KTS(30), vx + vw2/2 + KTS(10), vy + vh2/2 + KTS(30), COL(24, 56, 31));
+        tri_fill(vx + vw2*4/5, vy + 14, vx + vw2/2 - KTS(10), vy + vh2/2 + KTS(30), vx + vw2/2 + KTS(70), vy + vh2/2 + KTS(30), COL(24, 56, 31));
+        { static const u32 BULB2[4] = { COL(255,205,60), COL(255,110,140), COL(120,220,255), COL(150,255,150) };
+          int nb2 = vw2 / 46; if (nb2 > 14) nb2 = 14; if (nb2 < 3) nb2 = 3;
+          for (int ib = 0; ib <= nb2; ib++){
+              int bxp = vx + 30 + (vw2 - 60) * ib / nb2;
+              disc_fill(bxp, vy + 52, 2, BULB2[((int)(G.anim_t * 5.0f) + ib) & 3]);
+              pset(bxp - 1, vy + 51, COL(255, 255, 255));
+          } }
         draw_text_center(vx + vw2/2, vy + 26, "SUPER BUDDY CART", vw2 >= 620? 3 : 2, COL(250, 200, 50));
         draw_text_center(vx + vw2/2, vy + 62, "THE WAITING ROOM", 2, COL(255, 255, 255));
         { char buf[80]; char *q = buf;
@@ -75,6 +104,19 @@ static void crt_render_view(int sim_pi, int viewer_pi){
           draw_text_center(vx + vw2/2, vy + 84, buf, 1, COL(250, 200, 50)); }
         // your kart, big and proud, wearing your pick
         { int cx = vx + vw2/2, cy = vy + vh2/2 - 6;
+          // v1.33: the kart sits on a showroom podium — a glowing gold
+          // ring and a soft pool of light, with four sparkles winking
+          // around it (positions clear of the colour name below)
+          ellipse_fill(cx, cy + KTS(52), KTS(104), KTS(24), COL(26, 62, 34));
+          ellipse_fill(cx, cy + KTS(52), KTS(92), KTS(20), COL(32, 74, 40));
+          { static const int SPK[4][2] = { {-96, -52}, {96, -58}, {-104, 8}, {104, 2} };
+            for (int sp = 0; sp < 4; sp++){
+                int tw = ((int)(G.anim_t * 3.0f) + sp) & 3;
+                if (tw == 0) continue;
+                int sxp = cx + KTS(SPK[sp][0]), syp = cy + KTS(SPK[sp][1]);
+                rect_fill(sxp - 1, syp - 3, 2, 7, COL(255, 240, 170));
+                rect_fill(sxp - 3, syp - 1, 7, 2, COL(255, 240, 170));
+            } }
           disc_fill(cx - KTS(48), cy - KTS(35), KTS(17), COL(16, 14, 24));
           disc_fill(cx + KTS(48), cy - KTS(35), KTS(17), COL(16, 14, 24));
           disc_fill(cx - KTS(48), cy + KTS(35), KTS(17), COL(16, 14, 24));
@@ -88,7 +130,7 @@ static void crt_render_view(int sim_pi, int viewer_pi){
           tri_fill(cx - KTS(92), cy - KTS(16), cx - KTS(92), cy + KTS(16), cx - KTS(70), cy, COL(255, 255, 255));
           tri_fill(cx + KTS(92), cy - KTS(16), cx + KTS(92), cy + KTS(16), cx + KTS(70), cy, COL(255, 255, 255));
           draw_text_center(cx, cy + KTS(64), COLNAME[mycol], 2, COL(255, 255, 255)); }
-        { char b[96]; char *q=b; q=sappend(q, "IN THE RACE: HOLD "); if (!(hint_dev()==DEV_TOUCH && !G.touch_ctl)){ q=sappend(q, lbla(H_FIRE)); q=sappend(q, " "); } q=sappend(q, "TO GO, "); q=sappend(q, lbl_steer()); *q=0;   // v1.30 (audit F8)
+        { char b[96]; char *q=b; q=sappend(q, "IN THE RACE: HOLD "); { q=sappend(q, lbla(H_FIRE)); q=sappend(q, " "); } q=sappend(q, "TO GO, "); q=sappend(q, lbl_steer()); *q=0;   // v1.30 (audit F8)
           draw_text_center(vx + vw2/2, vy + 98, b, 1, COL(170, 200, 190)); }
         if (vh2 >= 300){ // MEDAL TIMES (feat 3): your medals on this cup's four tracks (full-height views only — the split room is already a squeeze)
             char buf[128]; char *q = buf;
@@ -130,6 +172,20 @@ static void crt_render_view(int sim_pi, int viewer_pi){
         rect_fill(vx, vy, vw2, vh2, col_shade(REGION_GB[S->crt_track], 0.35f));
         for (int ty2 = 0; ty2 < 12; ty2++) for (int tx2 = 0; tx2 < 20; tx2++)
             if ((tx2 + ty2) & 1) rect_fill(KTX(tx2*32), KTY(ty2*32), KTS(32) + 1, KTS(32) + 1, col_shade(REGION_GB[S->crt_track], 0.45f));
+        // v1.33 cosmetic pass — STANDINGS dressing: gold frame, and
+        // star sparkles twinkling either side of the title (the title
+        // and every row keep their exact positions)
+        rect_line(vx + 4, vy + 4, vw2 - 8, vh2 - 8, COL(146, 116, 44));
+        rect_line(vx + 7, vy + 7, vw2 - 14, vh2 - 14, col_shade(COL(250, 200, 50), 0.55f));
+        for (int sp = 0; sp < 6; sp++){
+            int tw = ((int)(G.anim_t * 3.0f) + sp * 2) & 3;
+            if (tw == 0) continue;
+            int sxp = vx + vw2/2 + (sp < 3? -1 : 1) * (118 + (sp % 3) * 26);
+            int syp = vy + 22 + (sp % 3) * 9;
+            if (sxp < vx + 12 || sxp > vx + vw2 - 12) continue;
+            rect_fill(sxp - 1, syp - 3, 2, 7, COL(255, 240, 170));
+            rect_fill(sxp - 3, syp - 1, 7, 2, COL(255, 240, 170));
+        }
         draw_text_center(vx + vw2/2, vy + 24, fin? "FINAL STANDINGS" : "STANDINGS", 3, COL(250, 200, 50));
         { char buf[80]; char *q = buf;
           q = sappend(q, S->crt_cup? "FAR CUP" : "HOME CUP");
@@ -139,6 +195,16 @@ static void crt_render_view(int sim_pi, int viewer_pi){
         for (int r = 0; r < 6; r++){
             int k = ord[r], ry = vy + 92 + r * 30;
             if (k == vk) rect_fill(vx + vw2/2 - 170, ry - 5, 340, 24, COL(52, 46, 22));
+            // v1.33: a hairline under each row, and — on wide views —
+            // a podium medallion (gold / silver / bronze) at the row's
+            // left, clear of both the highlight bar and the text
+            rect_fill(vx + vw2/2 - 170, ry + 21, 340, 1, col_shade(REGION_GB[S->crt_track], 0.62f));
+            if (vw2 >= 560 && r < 3){
+                static const u32 MED[3] = { COL(250, 200, 50), COL(214, 220, 228), COL(206, 132, 74) };
+                disc_fill(vx + vw2/2 - 192, ry + 7, 8, MED[r]);
+                disc_fill(vx + vw2/2 - 192, ry + 7, 5, col_shade(MED[r], 0.72f));
+                pset(vx + vw2/2 - 194, ry + 5, COL(255, 255, 255));
+            }
             char buf[80]; char *q = buf;
             q = sappend(q, "P"); q = sapp_int(q, r + 1); q = sappend(q, "  ");
             q = sappend(q, BUD_ELF[S->crt_nameidx[k] % BUD_NAMES_N]);
@@ -231,6 +297,21 @@ static void crt_render_view(int sim_pi, int viewer_pi){
       disc_fill(vx + vw2 - 90, vy + 44, 37, col_mix(skyH, dark? COL(200, 204, 225) : COL(255, 236, 150), 0.55f));
       disc_fill(vx + vw2 - 90, vy + 44, 31, dark? COL(200, 204, 225) : COL(255, 246, 196));
       disc_fill(vx + vw2 - 90, vy + 44, 20, dark? COL(226, 230, 242) : COL(255, 236, 150));
+      // v1.33: a warm glow band hugging the horizon, and — in
+      // daylight — three lazy birds crossing the sky, wings rocking
+      // (positions ride G.anim_t and the steering slide, never the road)
+      rect_fill(vx, horizon - 3, vw2, 3, col_mix(skyH, COL(255, 244, 210), dark? 0.10f : 0.35f));
+      if (!dark){
+          int bslide = (int)(kh * 90.0f);
+          for (int bd = 0; bd < 3; bd++){
+              int bx3 = (bd * 211 + 40 - bslide - (int)(G.anim_t * (7.0f + bd * 2.0f))) % (vw2 + 120);
+              if (bx3 < 0) bx3 += vw2 + 120;
+              int bx4 = vx + bx3 - 60, by4 = vy + 20 + bd * 13;
+              int flap = (int)(fsin(G.anim_t * 6.0f + bd * 2.2f) * 3.0f);
+              line_thick(bx4 - 6, by4 + flap, bx4, by4, 1, COL(52, 56, 72));
+              line_thick(bx4, by4, bx4 + 6, by4 + flap, 1, COL(52, 56, 72));
+          }
+      }
       { int slide = (int)(kh * 260.0f);
         u32 cloudc = tod_sky(dark? COL(126, 122, 158) : COL(248, 251, 255));
         for (int ci = 0; ci < 4; ci++){
@@ -311,6 +392,23 @@ static void crt_render_view(int sim_pi, int viewer_pi){
             tri_fill(rsx[j], rsy[j], erx[j + 1], ery[j + 1], rsx[j + 1], rsy[j + 1], COL(232, 236, 238));
             tri_fill(elx[j], ely[j], lsx[j], lsy[j], lsx[j + 1], lsy[j + 1], COL(232, 236, 238));
             tri_fill(elx[j], ely[j], lsx[j + 1], lsy[j + 1], elx[j + 1], ely[j + 1], COL(232, 236, 238));
+            // v1.33: twin tyre-darkened wheel tracks worn into the
+            // asphalt along the racing line — pure shading interpolated
+            // across the road quads already projected above (fractions
+            // of the edge-to-edge span), so the road reads as driven-on;
+            // no geometry, no physics, nothing here is ever read back
+            if (rf[j] < 300.0f){
+                static const float TRK[2][2] = { { 0.30f, 0.40f }, { 0.60f, 0.70f } };
+                u32 trkc = par? COL(52, 52, 60) : COL(47, 47, 54);
+                for (int tk2 = 0; tk2 < 2; tk2++){
+                    int ax3 = lsx[j] + (int)((rsx[j] - lsx[j]) * TRK[tk2][0]), ay3 = lsy[j] + (int)((rsy[j] - lsy[j]) * TRK[tk2][0]);
+                    int bx3 = lsx[j] + (int)((rsx[j] - lsx[j]) * TRK[tk2][1]), by3 = lsy[j] + (int)((rsy[j] - lsy[j]) * TRK[tk2][1]);
+                    int cx3 = lsx[j+1] + (int)((rsx[j+1] - lsx[j+1]) * TRK[tk2][1]), cy3 = lsy[j+1] + (int)((rsy[j+1] - lsy[j+1]) * TRK[tk2][1]);
+                    int dx3 = lsx[j+1] + (int)((rsx[j+1] - lsx[j+1]) * TRK[tk2][0]), dy3 = lsy[j+1] + (int)((rsy[j+1] - lsy[j+1]) * TRK[tk2][0]);
+                    tri_fill(ax3, ay3, bx3, by3, cx3, cy3, trkc);
+                    tri_fill(ax3, ay3, cx3, cy3, dx3, dy3, trkc);
+                }
+            }
             if (((startseg + j) % 3) == 0 && rf[j] < 340.0f){
                 // the centre dashes: painted speed, rushing at you
                 float cxj = (rsx[j] + lsx[j]) * 0.5f, cyj = (rsy[j] + lsy[j]) * 0.5f;
@@ -355,6 +453,22 @@ static void crt_render_view(int sim_pi, int viewer_pi){
                         static const u32 FLW[3] = { COL(250, 214, 90), COL(248, 244, 238), COL(240, 150, 180) };
                         disc_fill(px + 1, py - th2 - 1, th2/3 > 1? th2/3 : 1, FLW[(hv >> 9) % 3u]);
                     }
+                }
+                // v1.33: sponsor boards every twelve segments,
+                // alternating sides — a region-coloured board on two
+                // posts with a white hoarding stripe, keyed off the
+                // absolute segment like the posts/tufts above it, so
+                // a board stands in the same spot every lap
+                if ((segi % 12) == 0){
+                    int sd = (segi / 12) & 1;
+                    int px = sd? arx[j] : alx[j], py = sd? ary[j] : aly[j];
+                    int bw4 = ph * 2; if (bw4 < 6) bw4 = 6; if (bw4 > 44) bw4 = 44;
+                    int bh4 = ph; if (bh4 < 4) bh4 = 4; if (bh4 > 20) bh4 = 20;
+                    rect_fill(px - bw4/4, py - bh4/2, 2, bh4/2, COL(52, 54, 64));
+                    rect_fill(px + bw4/4, py - bh4/2, 2, bh4/2, COL(52, 54, 64));
+                    rect_fill(px - bw4/2, py - bh4, bw4, bh4, col_shade(REGION_GA[rg], 0.92f));
+                    rect_fill(px - bw4/2, py - bh4, bw4, bh4/3 + 1, COL(245, 245, 245));
+                    rect_fill(px - bw4/2, py - bh4 + bh4/3 + 1, bw4, 1, col_shade(REGION_GA[rg], 0.60f));
                 }
             }
         }
@@ -593,6 +707,15 @@ static void crt_render_view(int sim_pi, int viewer_pi){
             tri_fill(sx - kw/4, base, sx + kw/4, base, sx, base + kh2/2 + 2, COL(255, 160, 60));
         rect_fill(sx - kw/2, base - kh2/2, kw/4 + 1, kh2/2, COL(16, 14, 24));
         rect_fill(sx + kw/2 - kw/4, base - kh2/2, kw/4 + 1, kh2/2, COL(16, 14, 24));
+        if (kw >= 10){   // v1.33: a rear spoiler wing on two struts, in
+                         // the kart's own colour darkened — drawn before
+                         // the body so the struts tuck behind it, and the
+                         // driver (drawn later) sits in front of the wing
+            rect_fill(sx - kw/4, base - kh2 - kh2/6, 2, kh2/6 + 2, COL(16, 14, 24));
+            rect_fill(sx + kw/4 - 2, base - kh2 - kh2/6, 2, kh2/6 + 2, COL(16, 14, 24));
+            rect_fill(sx - kw/2 + 1, base - kh2 - kh2/6 - 2, kw - 2, 3, col_shade(KCOL[S->crt_kcol[i]], 0.62f));
+            rect_fill(sx - kw/2 + 1, base - kh2 - kh2/6 - 2, kw - 2, 1, col_shade(KCOL[S->crt_kcol[i]], 1.25f));
+        }
         rect_fill(sx - kw/2, base - kh2, kw, kh2 * 3/4, KCOL[S->crt_kcol[i]]);
         if (kw >= 8) rect_fill(sx - kw/10, base - kh2, kw/5, kh2 * 3/4, col_shade(KCOL[S->crt_kcol[i]], 1.22f));   // centre racing stripe (v1.27)
         rect_line(sx - kw/2, base - kh2, kw, kh2 * 3/4, COL(16, 14, 24));
@@ -631,6 +754,28 @@ static void crt_render_view(int sim_pi, int viewer_pi){
       }
       rect_fill(cxp - ow/2, base - oh/3, ow/5, oh/3, COL(16, 14, 24));
       rect_fill(cxp + ow/2 - ow/5, base - oh/3, ow/5, oh/3, COL(16, 14, 24));
+      // v1.33: tyre sidewall stripes on your wheels, so they read as
+      // rubber at a glance
+      rect_fill(cxp - ow/2 + 2, base - oh/3 + oh/12, ow/5 - 4, 2, COL(74, 76, 84));
+      rect_fill(cxp + ow/2 - ow/5 + 2, base - oh/3 + oh/12, ow/5 - 4, 2, COL(74, 76, 84));
+      // v1.33: speed streaks past your kart when you're truly moving
+      // (drawn before the body, so they slip behind it; length and
+      // offset ride the race clock — no state, no geometry)
+      if (S->crt_v[vk] > 118.0f){
+          int sl = (int)((S->crt_v[vk] - 118.0f) * 0.35f); if (sl > 26) sl = 26;
+          for (int st2 = 0; st2 < 3; st2++){
+              int sy2 = base - oh + 8 + st2 * (oh/4);
+              int off = (int)(S->crt_t * 300.0f + st2 * 37.0f) % 30;
+              rect_fill(cxp - ow/2 - 12 - off, sy2, sl, 2, COL(226, 232, 236));
+              rect_fill(cxp + ow/2 + 12 + off - sl, sy2 + 4, sl, 2, COL(226, 232, 236));
+          }
+      }
+      // v1.33: your spoiler wing, struts tucked behind the body,
+      // the wing itself in your colour darkened with a lit top edge
+      rect_fill(cxp - ow/4, base - oh - 7, 4, 9, COL(16, 14, 24));
+      rect_fill(cxp + ow/4 - 4, base - oh - 7, 4, 9, COL(16, 14, 24));
+      rect_fill(cxp - ow/2 + ow/12, base - oh - 11, ow * 5/6, 5, col_shade(KCOL[S->crt_kcol[vk]], 0.62f));
+      rect_fill(cxp - ow/2 + ow/12, base - oh - 11, ow * 5/6, 2, col_shade(KCOL[S->crt_kcol[vk]], 1.25f));
       rect_fill(cxp - ow/2 + ow/10, base - oh, ow * 4/5, oh * 3/4, KCOL[S->crt_kcol[vk]]);
       rect_fill(cxp - ow/12, base - oh, ow/6, oh * 3/4, col_shade(KCOL[S->crt_kcol[vk]], 1.22f));   // centre racing stripe (v1.27)
       rect_line(cxp - ow/2 + ow/10, base - oh, ow * 4/5, oh * 3/4, COL(16, 14, 24));
@@ -668,6 +813,7 @@ static void crt_render_view(int sim_pi, int viewer_pi){
     }
     // HUD band
     rect_fill(vx, vy, vw2, 24, COL(10, 12, 16));
+    rect_fill(vx, vy + 24, vw2, 2, COL(146, 116, 44));   // v1.33: a gold rule under the HUD band, tying it to the waiting-room / standings frames (band text positions untouched — the v1.32 band-collision fix stands)
     { char buf[96]; char *q = buf;
       int lap = (int)(S->crt_prog[vk] / CRT_LEN) + 1; if (lap < 1) lap = 1; if (lap > 3) lap = 3;
       int tds = (int)(S->crt_t * 10.0f); int sec = (tds / 10) % 60;
@@ -689,11 +835,31 @@ static void crt_render_view(int sim_pi, int viewer_pi){
     if (S->crt_state == 0){
         int n = (int)(S->crt_count + 0.999f); if (n < 1) n = 1; if (n > 3) n = 3;
         char nb[2] = { (char)('0' + n), 0 };
+        // v1.33: a start-lights gantry above the countdown number —
+        // a dark pill holding three lamps that light in step with the
+        // count (3 = first lamp … 1 = all three), all in the empty
+        // sky band above the number, whose position is untouched
+        rect_fill(vx + vw2/2 - 34, vy + vh2/2 - 104, 68, 24, COL(12, 14, 22));
+        rect_line(vx + vw2/2 - 34, vy + vh2/2 - 104, 68, 24, COL(120, 124, 134));
+        for (int lp = 0; lp < 3; lp++){
+            int lit = lp <= 3 - n;   // lamps fill left-to-right as the count falls: "3" lights one, "1" lights all three
+            u32 lc = lit? (lp == 2? COL(255, 176, 60) : COL(240, 70, 60)) : COL(52, 54, 64);
+            disc_fill(vx + vw2/2 - 20 + lp * 20, vy + vh2/2 - 92, 7, lc);
+            if (lit) pset(vx + vw2/2 - 22 + lp * 20, vy + vh2/2 - 94, COL(255, 255, 255));
+        }
         draw_text_center(vx + vw2/2, vy + vh2/2 - 66, nb, 8, COL(255, 220, 90));
         draw_text_center(vx + vw2/2, vy + vh2/2 + 22, "GET READY...", 2, COL(255, 255, 255));
-        { char b[96]; char *q=b; q=sappend(q, "HOLD "); if (!(hint_dev()==DEV_TOUCH && !G.touch_ctl)){ q=sappend(q, lbla(H_FIRE)); q=sappend(q, " "); } q=sappend(q, "TO GO - "); q=sappend(q, lbl_steer()); *q=0;   // v1.30 (audit F8)
+        { char b[96]; char *q=b; q=sappend(q, "HOLD "); { q=sappend(q, lbla(H_FIRE)); q=sappend(q, " "); } q=sappend(q, "TO GO - "); q=sappend(q, lbl_steer()); *q=0;   // v1.30 (audit F8)
           draw_text_center(vx + vw2/2, vy + vh2/2 + 52, b, 1, COL(200, 230, 200)); }
     } else if (S->crt_state == 1 && S->crt_t < 0.9f){
+        // v1.33: the gantry goes green for GO! — same pill, same spot
+        // as the countdown lamps, all three lamps lit green
+        rect_fill(vx + vw2/2 - 34, vy + vh2/2 - 104, 68, 24, COL(12, 14, 22));
+        rect_line(vx + vw2/2 - 34, vy + vh2/2 - 104, 68, 24, COL(120, 124, 134));
+        for (int lp = 0; lp < 3; lp++){
+            disc_fill(vx + vw2/2 - 20 + lp * 20, vy + vh2/2 - 92, 7, COL(90, 230, 110));
+            pset(vx + vw2/2 - 22 + lp * 20, vy + vh2/2 - 94, COL(255, 255, 255));
+        }
         draw_text_center(vx + vw2/2, vy + vh2/2 - 40, "GO!", 6, COL(120, 255, 120));
     } else if (S->crt_state == 2){
         { float el = 3.4f - S->crt_fint; if (el < 0) el = 0;   // confetti over the finish
@@ -706,6 +872,16 @@ static void crt_render_view(int sim_pi, int viewer_pi){
           } }
         rect_fill(vx + vw2/2 - 130, vy + vh2/2 - 44, 260, 84, COL(12, 14, 22));
         rect_line(vx + vw2/2 - 130, vy + vh2/2 - 44, 260, 84, COL(250, 200, 50));
+        // v1.33: the finish panel gets the house double frame — an
+        // inner gold hairline — plus a twinkling star at each top
+        // corner (panel size and every text line inside are untouched)
+        rect_line(vx + vw2/2 - 126, vy + vh2/2 - 40, 252, 76, col_shade(COL(250, 200, 50), 0.55f));
+        for (int sp = 0; sp < 2; sp++){
+            if ((((int)(G.anim_t * 3.0f) + sp * 2) & 3) == 0) continue;
+            int sxp = vx + vw2/2 + (sp? 118 : -118), syp = vy + vh2/2 - 36;
+            rect_fill(sxp - 1, syp - 3, 2, 7, COL(255, 240, 170));
+            rect_fill(sxp - 3, syp - 1, 7, 2, COL(255, 240, 170));
+        }
         { char buf[64]; char *q = buf;
           q = sappend(q, "FINISH!  P"); q = sapp_int(q, S->crt_hfin[vk]); *q = 0;
           draw_text_center(vx + vw2/2, vy + vh2/2 - 32, buf, 3, COL(255, 240, 200)); }

@@ -174,6 +174,7 @@ static void war_pad_update(int pi, const float *ax, u32 pe, u32 held, float dt){
     if (S->war_cury < WAR_OY) S->war_cury = WAR_OY;
     if (S->war_cury > WAR_OY+S->war_ah) S->war_cury = WAR_OY+S->war_ah;
     S->war_camx = S->war_curx; S->war_camy = S->war_cury;
+    if (S->war_wdrag==3){ S->war_wdx1 = S->war_curx; S->war_wdy1 = S->war_cury; }   // v1.33: while a pad wall run is being marked, its far end rides the cursor
     // LB / RB walk the selected structure's command bar
     if (S->war_selstruct>=0 && (pe & ((1u<<ACT_WPREV)|(1u<<ACT_WNEXT)))){
         int acts[5], costs[5]; const char *names[5];
@@ -191,7 +192,8 @@ static void war_pad_update(int pi, const float *ax, u32 pe, u32 held, float dt){
     if (pe & (1u<<ACT_INTERACT)){
         S->war_demoarm = -1;   // v1.21: B disarms a pending DEMOLISH
         int ca[5], cc[5]; const char *cn[5];
-        if (S->war_place>=0){ S->war_place = -1; S->war_bcat = -1; sfx(6); }
+        if (S->war_wdrag==2 || S->war_wdrag==3){ war_wall_cancel(S); }   // v1.33: B drops a wall run's preview/mark before it cancels the placement itself
+        else if (S->war_place>=0){ S->war_place = -1; S->war_bcat = -1; S->war_wdrag = 0; sfx(6); }
         else if (S->war_bcat>=0 && war_bar_cats(S, ca, cc, cn)>1){ S->war_bcat = -1; S->war_barhl = -1; sfx(6); }
         else if (S->war_barhl>=0){ S->war_barhl = -1; }
         else { for (int i=0;i<WAR_MAXU;i++) S->war_usel[i]=0; S->war_selstruct = -1; S->war_bcat = -1; sfx(6); }
@@ -201,6 +203,21 @@ static void war_pad_update(int pi, const float *ax, u32 pe, u32 held, float dt){
     // door a real tap uses (same grace gate, same streak ladder)
     if ((pe & (1u<<ACT_FIRE)) && S->war_grace<=0){
         if (S->war_barhl>=0){ int hl = S->war_barhl; S->war_barhl = -1; war_bar_activate(pi, hl); }
+        else if (S->war_place==WAR_S_WALL && S->war_wdrag==2){ war_wall_commit(pi); }   // v1.33: A on a locked wall preview APPROVES the run (Section G)
+        else if (S->war_place==WAR_S_WALL && S->war_wdrag==3){
+            float xs[2], ys[2];
+            if (war_wall_run(S, xs, ys, 2)>=2){ S->war_wdrag=2; sfx(6); }   // v1.33: A again LOCKS the preview — the next A approves it, B peels it
+            else {   // a one-segment mark is just a placement: fall through to the tap below with the mark dropped
+                S->war_wdrag=0;
+                int csx = vx + vw2/2 + (int)(S->war_curx - S->war_camx);
+                int csy = vy + vh2/2 + (int)(S->war_cury - S->war_camy - WAR_BAR_H*0.5f);
+                war_handle_tap(pi, csx, csy);
+            }
+        }
+        else if (S->war_place==WAR_S_WALL && S->war_wdrag==0){
+            S->war_wdx0 = S->war_wdx1 = S->war_curx; S->war_wdy0 = S->war_wdy1 = S->war_cury;   // v1.33: A MARKS the wall run's start; the cursor draws it from here
+            S->war_wdrag=3; sfx(6);
+        }
         else {
             int csx = vx + vw2/2 + (int)(S->war_curx - S->war_camx);
             int csy = vy + vh2/2 + (int)(S->war_cury - S->war_camy - WAR_BAR_H*0.5f);
@@ -266,6 +283,7 @@ static void war_command_input(int pi, float dt, const BwIn *in){
         if (S->war_barcap){ S->war_barcap=0; S->war_barhl=-1; S->war_barhl_row=0; }   // v1.20: ...and it ends a bar capture the same way
         if (S->war_grace<=0){ IN.tapped=0; war_handle_tap(pi, IN.tap_x, IN.tap_y); }
     }
+    if (pi==G.my_id && S->war_wdrag==2 && IN.enter_pressed){ IN.enter_pressed=0; war_wall_commit(pi); }   // v1.33: Enter approves a wall run awaiting its verdict (Section G)
     // feat 13: the old P2 centre-tap (in->interact taps at the
     // camera centre) is GONE — pad 2 has a real cursor now, and B
     // on that pad is the pad path's peel verb; a centre-tap on the

@@ -120,8 +120,14 @@ static const int CRT_M[7] = { 168, 188, 217, 246, 275, 304, 347 };
 // LIVE TUNING (v1.26 Item 3): mutable — data/livedata.c holds a tentative
 // declaration and the registry points here; literals are stock defaults.
 static int crt_medal[8][3] = {
-    { 230, 250, 290 }, { 270, 290, 340 }, { 290, 320, 370 }, { 330, 360, 420 },
-    { 620, 680, 790 }, { 700, 760, 880 }, { 770, 840, 970 }, { 830, 900, 1040 },
+    // v1.33 re-derivation: the calmer-handling pass cut the AI pace
+    // constant 158 -> 145 (x0.918 speed), so the slowest-rival anchor
+    // pace this table derives from now runs x1.0897 in time. Every
+    // tier is scaled by that ratio (rounded) so gold stays exactly
+    // 0.92x the anchor, as designed — an unscaled table would have
+    // silently tightened every medal by ~9%.
+    { 251, 272, 316 }, { 294, 316, 371 }, { 316, 349, 403 }, { 360, 392, 458 },
+    { 676, 741, 861 }, { 763, 828, 959 }, { 839, 915, 1057 }, { 905, 981, 1133 },
 };
 static const char *CRT_SHORT[8] = { "MEADOWS", "SPAGHETTI", "LEGACY", "BADLANDS", "FROZEN", "NEON RAM", "JUNGLE", "DEPTHS" };
 // TROPHY CASE (v1.25 feat 4): how many of this buddy's tracks hold
