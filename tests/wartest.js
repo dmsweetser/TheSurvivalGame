@@ -94,7 +94,23 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   const call = async (fn, ...args) => page.evaluate(([t, f, a]) => t[f](...a), [T, fn, args]);
   const key = async (k, ms = 150) => { await page.keyboard.down(k); await sleep(170); await page.keyboard.up(k); await sleep(ms); };
   const hold = async (k, ms = 200) => { await page.keyboard.down(k); await sleep(ms); await page.keyboard.up(k); await sleep(150); };
-  const tap = async (x, y) => { await page.evaluate(([tx, ty]) => window.__TSG.evt_tap(tx, ty), [x, y]); await sleep(250); };
+  // tap(x, y, holdMs): with holdMs > 0 the tap is HUMAN-TIMED — a
+  // real touch_point down, a rest of holdMs on the glass, then up.
+  // evt_tap's down+up land inside a single frame, so the game never
+  // sees the touch as an active pointer; v1.33's wall-run APPROVE
+  // shipped broken for real fingers behind exactly that blind spot
+  // (Daniel, Nov 25, 2026). Human timing is the honest path for any
+  // verdict a resting finger delivers.
+  const tap = async (x, y, holdMs = 0) => {
+    if (holdMs > 0){
+      await page.evaluate(([tx, ty]) => window.__TSG.touch_point(11, tx, ty, 0), [x, y]);
+      await sleep(holdMs);
+      await page.evaluate(([tx, ty]) => window.__TSG.touch_point(11, tx, ty, 2), [x, y]);
+    } else {
+      await page.evaluate(([tx, ty]) => window.__TSG.evt_tap(tx, ty), [x, y]);
+    }
+    await sleep(250);
+  };
   // the fake pad: axes are (LX, LY, RX, RY) in -1..1 (+Y down);
   // buttons use the standard mapping (0 A, 1 B, 4 LB, 5 RB). A press
   // is HELD across many frames — this VM drops instant presses.
@@ -2188,7 +2204,10 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   // clans hurt each other (free-for-all). 44: retaliation — a bug
   // latches onto its first attacker and hunts it. 45: triple-click
   // musters only the viewport. 46: drag-built walls — preview, one
-  // APPROVE, one charge; CANCEL builds nothing. 47: the fat battle
+  // APPROVE, one charge; CANCEL builds nothing (extended in v1.34
+  // with HUMAN-TIMING verdicts — touch and mouse — plus a rested-tap
+  // single placement, after Daniel's real fingers found the
+  // single-frame evt_tap blind spot). 47: the fat battle
   // (clans + miner) survives the snapshot round trip.
   // Panel geometry (640x360): rows at centres 103 (MAP SIZE), 141
   // (ENEMY), 179 (CLANS), 217 (LAUNCH); a value row's left third
@@ -2444,6 +2463,114 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
   ok((await poll2('dbg_warwdrag', v => v === 0, 5000)) === 0, 'v1.33 check 46: CANCEL stood the run down');
   ok((await call2('dbg_warstructs', 3)) === walls46b && (await call2('dbg_warbits')) === bits46b,
      'v1.33 check 46: the cancelled run built nothing and charged nothing');
+
+  // v1.34 (Daniel's bug, Nov 25): every verdict above went through
+  // evt_tap, whose down+up land inside ONE frame — war_drag_pan
+  // never saw the chip touch as an active pointer. A human finger
+  // rests ~5-10 frames, and on the v1.33 build that resting touch
+  // was hijacked by the wall branch: war_wdrag flipped 2->1, the
+  // run's endpoints were clobbered with the chip's world position,
+  // and the release was eaten as a one-segment placement there —
+  // refused ("NO ROOM THERE!" / "TOO FAR FROM YOUR BASE..."), the
+  // preview gone, war_wall_commit never reached. These acts repeat
+  // the verdicts with HUMAN-TIMING taps (down, ~150ms rest, up) and
+  // with a real mouse press (the shell forwards mouse through the
+  // same touch_point channel, id 4242). The miner is still down, so
+  // the purse stays isolated for the charge assertions.
+  const armFirewall = async () => {
+    if ((await call2('dbg_warplace')) !== -1){ await tap(48, 337);   // the bar is [CANCEL] while placing
+      await poll2('dbg_warplace', v => v === -1, 3000); }
+    await call2('dbg_warcam', hqx, hqy); await sleep(300);
+    // every step verifies and re-taps (check 47's lesson: a unit
+    // crossing the Core at tap time can eat the select tap whole)
+    for (let k = 0; k < 3 && (await call2('dbg_warselstruct')) !== 0; k++) await tap(320, 157);
+    ok((await call2('dbg_warselstruct')) === 0, 'v1.34 check 46: the Core is selected (human-timing acts)');
+    for (let k = 0; k < 3 && (await call2('dbg_warbcat')) !== 2; k++) await tap(228, 337);   // bar slot 2: DEFENSE
+    ok((await call2('dbg_warbcat')) === 2, 'v1.34 check 46: DEFENSE opened (human-timing acts)');
+    for (let k = 0; k < 3 && (await call2('dbg_warplace')) !== 3; k++) await tap(138, 291);   // strip slot 1: FIREWALL
+    ok((await call2('dbg_warplace')) === 3, 'v1.34 check 46: FIREWALL armed (human-timing acts)');
+  };
+  // human-timing APPROVE: the run must commit, exact charge. A
+  // field whose line is mostly obstructed can commit a PARTIAL run
+  // (the approve path proven, the count short) — that spends the
+  // arm, so re-arm fully and walk on to a fuller line.
+  let builtH = 0, spentH = 0;
+  for (const [fx, fy] of [[hqx + 150, hqy + 120], [hqx - 24, hqy + 200], [hqx + 60, hqy + 37], [hqx + 150, hqy + 37]]){
+    await call2('dbg_warcam', fx, fy); await sleep(300);
+    const w0 = await call2('dbg_warstructs', 3), b0 = await call2('dbg_warbits');
+    ok((await dragRun()) === 2, 'v1.34 check 46: the drag previews (human-timing APPROVE act)',
+       'wdrag=' + (await call2('dbg_warwdrag')) + ' at field ' + fx + ',' + fy);
+    await tap(496, 293, 150);   // the APPROVE chip, HUMAN timing
+    await sleep(600);
+    const w1 = await call2('dbg_warstructs', 3), b1 = await call2('dbg_warbits');
+    if (w1 - w0 >= 2){ builtH = w1 - w0; spentH = b0 - b1;
+      ok((await call2('dbg_warwdrag')) === 0, 'v1.34 check 46: human-timing APPROVE committed the run');
+      break;
+    }
+    if (w1 > w0){ await armFirewall(); continue; }   // partial line: committed, arm spent
+    await tap(588, 293);   // CANCEL the unbuildable preview, try the next field
+    await poll2('dbg_warwdrag', v => v === 0, 4000);
+    await tap(228, 337); await tap(138, 291);   // re-arm FIREWALL (Core still selected, arm kept)
+    await poll2('dbg_warplace', v => v === 3, 4000);
+  }
+  ok(builtH >= 2 && spentH === builtH * 25,
+     'v1.34 check 46: the human-timing APPROVE built, charged exactly 25 bits per standing segment, once',
+     'built=' + builtH + ' spent=' + spentH);
+  // mouse APPROVE: a real mouse press, held like a human click,
+  // rides the same channel and must commit the same way (same
+  // partial-line walk as the touch act above)
+  await armFirewall();
+  await call2('dbg_waraddbits', 200);
+  let builtM = 0, spentM = 0;
+  const cvBox = await page.locator('#cv').boundingBox();
+  const mouseTap = async (gx, gy, holdMs) => {
+    await page.mouse.move(cvBox.x + gx / 640 * cvBox.width, cvBox.y + gy / 360 * cvBox.height);
+    await page.mouse.down(); await sleep(holdMs); await page.mouse.up(); await sleep(250);
+  };
+  for (const [fx, fy] of [[hqx - 24, hqy + 200], [hqx + 60, hqy + 37], [hqx + 220, hqy + 80], [hqx - 120, hqy + 60], [hqx + 150, hqy + 120], [hqx + 150, hqy + 37]]){
+    await call2('dbg_warcam', fx, fy); await sleep(300);
+    const w0 = await call2('dbg_warstructs', 3), b0 = await call2('dbg_warbits');
+    ok((await dragRun()) === 2, 'v1.34 check 46: the drag previews (mouse APPROVE act)',
+       'wdrag=' + (await call2('dbg_warwdrag')) + ' at field ' + fx + ',' + fy);
+    await mouseTap(496, 293, 150);   // the APPROVE chip, real mouse, human timing
+    await sleep(600);
+    const w1 = await call2('dbg_warstructs', 3), b1 = await call2('dbg_warbits');
+    if (w1 - w0 >= 2){ builtM = w1 - w0; spentM = b0 - b1;
+      ok((await call2('dbg_warwdrag')) === 0, 'v1.34 check 46: mouse APPROVE committed the run');
+      break;
+    }
+    if (w1 > w0){ await armFirewall(); continue; }   // partial line: committed, arm spent
+    await tap(588, 293);   // CANCEL the unbuildable preview, try the next field
+    await poll2('dbg_warwdrag', v => v === 0, 4000);
+    await tap(228, 337); await tap(138, 291);   // re-arm FIREWALL (Core still selected, arm kept)
+    await poll2('dbg_warplace', v => v === 3, 4000);
+  }
+  ok(builtM >= 2 && spentM === builtM * 25,
+     'v1.34 check 46: the mouse APPROVE built, charged exactly 25 bits per standing segment, once',
+     'built=' + builtM + ' spent=' + spentM);
+  // human-timing CANCEL: nothing built, nothing charged, preview down
+  await armFirewall();
+  await call2('dbg_warcam', hqx + 150, hqy + 37); await sleep(300);
+  const wC = await call2('dbg_warstructs', 3), bC = await call2('dbg_warbits');
+  ok((await dragRun()) === 2, 'v1.34 check 46: the drag previews (human-timing CANCEL act)');
+  await tap(588, 293, 150);   // the CANCEL chip, HUMAN timing
+  ok((await poll2('dbg_warwdrag', v => v === 0, 5000)) === 0, 'v1.34 check 46: human-timing CANCEL stood the run down');
+  ok((await call2('dbg_warstructs', 3)) === wC && (await call2('dbg_warbits')) === bC,
+     'v1.34 check 46: the human-cancelled run built nothing and charged nothing');
+  // human-timing single placement: FIREWALL is still armed (a wall
+  // run's cancel keeps the arm) — a plain rested tap on clear ground
+  // places exactly one wall for exactly 25 bits, the designed
+  // eat-the-tap path, unchanged by the fix
+  await call2('dbg_warcam', hqx, hqy); await sleep(300);
+  let placedS = 0;
+  for (const [px, py] of [[320, 60], [392, 84], [248, 84], [320, 252], [400, 220], [240, 220]]){
+    const w0 = await call2('dbg_warstructs', 3), b0 = await call2('dbg_warbits');
+    await tap(px, py, 150);
+    await sleep(400);
+    const w1 = await call2('dbg_warstructs', 3), b1 = await call2('dbg_warbits');
+    if (w1 === w0 + 1 && b1 === b0 - 25){ placedS = 1; break; }
+  }
+  ok(placedS === 1, 'v1.34 check 46: a human-timing tap placed exactly one wall for 25 bits');
 
   // check 47: this battle — two clans, a player miner, clan tags —
   // survives SAVE & QUIT and RESUME. Check 46 killed the miner for

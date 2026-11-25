@@ -23,6 +23,15 @@ static int war_drag_pan(int pi){
     int vx, vy, vw2, vh2; pi_view_rect(pi, &vx, &vy, &vw2, &vh2);
     if (IN.tp[found].y0 >= vy+vh2-WAR_BAR_H){ S->war_drag_id=-1; return 0; }   // drags off the bar don't pan
     if (S->war_place==WAR_S_WALL){
+        // v1.34 (Daniel): a wall run's preview stands (war_wdrag==2)
+        // — its APPROVE / CANCEL chips own the field's taps now
+        // (war_handle_tap). A real tap rests on a chip for several
+        // frames; if this branch engaged, it would flip the run back
+        // to a drag, clobber its endpoints with the chip's world
+        // position, and eat the release as a one-segment placement
+        // there — refused, and the preview lost with it. While a
+        // verdict is pending, no drag engages at all.
+        if (S->war_wdrag==2) return 0;
         // v1.33 (Section G): with FIREWALL armed, a field drag draws
         // the wall RUN instead of panning the camera — and it owns
         // the field (return 1) so the key/stick pan stays out of it
