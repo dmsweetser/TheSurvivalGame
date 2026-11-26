@@ -839,6 +839,10 @@ __attribute__((export_name("dbg_scrsetangle"))) void exp_dbg_scrsetangle(int a){
 __attribute__((export_name("dbg_scrsetpower"))) void exp_dbg_scrsetpower(int p){ if (scr_dbg_on()){ BwSim *S=scr_dbg_sim(); S->scr_pow[S->scr_turn]=(float)p; } }
 __attribute__((export_name("dbg_scrgivebits"))) void exp_dbg_scrgivebits(int side, int n){ if (scr_dbg_on()) scr_dbg_sim()->scr_bits[side? 1:0]+=n; }
 __attribute__((export_name("dbg_scrhurt"))) void exp_dbg_scrhurt(int idx, int hp){ BwSim *S=scr_dbg_sim(); if (scr_dbg_on() && idx>=0 && idx<S->scr_nu) S->scr_u[idx].hp=hp; }
+__attribute__((export_name("dbg_scrshield"))) int exp_dbg_scrshield(int idx){ BwSim *S=scr_dbg_sim(); return (scr_dbg_on() && idx>=0 && idx<S->scr_nu)? S->scr_u[idx].sh : -1; }
+__attribute__((export_name("dbg_scrsetshield"))) void exp_dbg_scrsetshield(int idx, int n){ BwSim *S=scr_dbg_sim(); if (scr_dbg_on() && idx>=0 && idx<S->scr_nu) S->scr_u[idx].sh=n; }
+__attribute__((export_name("dbg_scrdig"))) void exp_dbg_scrdig(int x){ if (scr_dbg_on()) scr_dbg_dig(x); }
+__attribute__((export_name("dbg_scrregen"))) void exp_dbg_scrregen(void){ if (scr_dbg_on()) scr_dbg_regen(); }
 __attribute__((export_name("dbg_moren"))) int exp_dbg_moren(void){ int id = G.my_id>=0? G.my_id : 0; return BWS[id].mor_en_n; }
 __attribute__((export_name("dbg_morkills"))) int exp_dbg_morkills(void){ int id = G.my_id>=0? G.my_id : 0; return BWS[id].mor_kills; }
 __attribute__((export_name("dbg_morx"))) int exp_dbg_morx(void){ int id = G.my_id>=0? G.my_id : 0; return (int)G.bud[id].x; }
@@ -944,6 +948,7 @@ __attribute__((export_name("dbg_srctop"))) int exp_dbg_srctop(void){ return srct
 __attribute__((export_name("dbg_srccur"))) int exp_dbg_srccur(void){ return srcterm_dbg_cursor(); }
 __attribute__((export_name("dbg_srcbrowse"))) int exp_dbg_srcbrowse(void){ return srcterm_dbg_browse(); }
 __attribute__((export_name("dbg_srccanedit"))) int exp_dbg_srccanedit(void){ int id = G.my_id>=0? G.my_id : 0; return srcterm_dbg_canedit(id); }
+__attribute__((export_name("dbg_srctscale"))) int exp_dbg_srctscale(void){ return srcterm_dbg_scale(); }
 __attribute__((export_name("dbg_givetrophy"))) int exp_dbg_givetrophy(int n){ dbg_pin_trophies(n); int id = G.my_id>=0? G.my_id : 0; return trophy_earned_count(&G.p[id]); }
 // LIVE TUNING (v1.26 Item 3): the entry name rides in dbg_scratch;
 // values cross as milli-units (x1000) so ints and floats share a seam

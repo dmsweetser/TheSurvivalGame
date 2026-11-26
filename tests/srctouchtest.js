@@ -90,7 +90,7 @@ function browserRows(files) {
   const bsel = Math.floor(browse1 / 10000), bscroll = browse1 % 10000;
   const fileIdx = rows[bsel];
   T('the dragged-to row is a file', fileIdx >= 0, 'bsel=' + bsel + ' row=' + fileIdx);
-  const ry = 44 + (bsel - bscroll) * 17 + 6;
+  const ry = 98 + (bsel - bscroll) * 34;   // v1.36 metrics: rows at panel y 4 + body 78 + vi*34, tapped mid-glyph
   await ftap(320, ry);
   T('tap opens the editor', (await poll('dbg_srcterm', v => v === 2)) === 2, await call('dbg_srcterm'));
   T('the tapped file is the open file', (await call('dbg_srcfile')) === fileIdx, await call('dbg_srcfile'));
@@ -98,28 +98,29 @@ function browserRows(files) {
   T('soft keyboard bridge is live (text_mode 5)', (await page.evaluate(() => window.__TSG.text_mode())) === 5, await page.evaluate(() => window.__TSG.text_mode()));
   T('the bridge field holds focus', (await page.evaluate(() => document.activeElement && document.activeElement.id)) === 'kb', await page.evaluate(() => document.activeElement && document.activeElement.id));
 
-  // tap-to-position: fb (100,60) is display row 1, display col 2 of
-  // the text at panel (70,4) + text origin (10,40); the expected
-  // cursor is derived from the file's own bytes
+  // tap-to-position: fb (120,130) is display row 1, display col 2
+  // of the text at panel (70,4) + text origin (10,78) — v1.36's
+  // scale-2 cells are 16 wide, 32 tall; the expected cursor is
+  // derived from the file's own bytes
   const fbuf = fs.readFileSync(path.join(__dirname, '..', 'src', files[fileIdx]));
   const flines = [[]];
   for (const b of fbuf) { if (b === 10) flines.push([]); else flines[flines.length - 1].push(b); }
   let expLine = 0, expCol = 0;
   { let d = 0;
     for (let l = 0; l < flines.length; l++) {
-      const segs = flines[l].length === 0 ? 1 : Math.ceil(flines[l].length / 60);
-      if (1 < d + segs) { expLine = l; expCol = Math.min((1 - d) * 60 + 2, flines[l].length); break; }
+      const segs = flines[l].length === 0 ? 1 : Math.ceil(flines[l].length / 30);
+      if (1 < d + segs) { expLine = l; expCol = Math.min((1 - d) * 30 + 2, flines[l].length); break; }
       d += segs;
     } }
-  await ftap(100, 60);
+  await ftap(120, 130);
   T('tap positions the cursor through the wrap mapping', (await call('dbg_srccur')) === expLine * 100000 + expCol, (await call('dbg_srccur')) + ' vs ' + (expLine * 100000 + expCol));
 
   // type through the bridge — the space must survive (mode 5)
   await page.keyboard.type('ZZ TOP', { delay: 50 });
   await sleep(400);
   // the footer's NEW LINE zone, then its SAVE zone
-  await ftap(257, 341);   // [ NEW LINE ] — panel quarters at (70,330): zone 1 centre
-  await ftap(132, 341);   // [ SAVE ]
+  await ftap(257, 331);   // [ NEW LINE ] — panel quarters at (70,310): zone 1 centre (v1.36: the footer band grew with the font)
+  await ftap(132, 331);   // [ SAVE ]
   T('footer SAVE registers one edited file', (await poll('dbg_srcmod', v => v === 1)) === 1, await call('dbg_srcmod'));
   const saved = await page.evaluate(k => localStorage.getItem(k), 'tsgmod:' + files[fileIdx]);
   T('the typed edit persisted, space included', !!saved && saved.includes('ZZ TOP'), saved ? saved.slice(0, 80) : saved);
@@ -129,20 +130,20 @@ function browserRows(files) {
   const top0 = await call('dbg_srctop');
   await fdrag(320, 200, 320, 80);
   T('drag scrolls the editor', (await call('dbg_srctop')) > top0, top0 + ' -> ' + (await call('dbg_srctop')));
-  await ftap(507, 341);   // [ BACK ]
+  await ftap(507, 331);   // [ BACK ]
   T('footer BACK returns to the browser', (await poll('dbg_srcterm', v => v === 1)) === 1, await call('dbg_srcterm'));
 
   // the prompt is tappable too: dirty the file, BACK into the prompt,
-  // tap SAVE AND CLOSE (the prompt box is centred: rows at y 169+)
+  // tap SAVE AND CLOSE (the prompt box is centred: row 0 at y 145+)
   const browse2 = await call('dbg_srcbrowse');
   const bsel2 = Math.floor(browse2 / 10000), bscroll2 = browse2 % 10000;
-  await ftap(320, 44 + (bsel2 - bscroll2) * 17 + 6);
+  await ftap(320, 98 + (bsel2 - bscroll2) * 34);
   T('editor reopens for the prompt check', (await poll('dbg_srcterm', v => v === 2)) === 2, await call('dbg_srcterm'));
   await page.keyboard.type('Q', { delay: 50 });
   await sleep(300);
-  await ftap(507, 341);   // [ BACK ] with unsaved edits -> the prompt
+  await ftap(507, 331);   // [ BACK ] with unsaved edits -> the prompt
   T('BACK on a dirty file asks first (prompt view)', (await poll('dbg_srcterm', v => v === 3)) === 3, await call('dbg_srcterm'));
-  await ftap(320, 176);   // SAVE AND CLOSE FILE (preselected row)
+  await ftap(320, 161);   // SAVE AND CLOSE FILE (preselected row)
   T('prompt tap saves and closes to the browser', (await poll('dbg_srcterm', v => v === 1)) === 1, await call('dbg_srcterm'));
   const saved2 = await page.evaluate(k => localStorage.getItem(k), 'tsgmod:' + files[fileIdx]);
   // the Q was typed at offset 0 of the reopened editor, so the new

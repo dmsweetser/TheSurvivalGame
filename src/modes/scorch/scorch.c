@@ -28,19 +28,21 @@
 #define SCR_W 640
 #define SCR_GRAV 260.0f
 enum { SP_AIM=0, SP_FLY=1, SP_SETTLE=2, SP_SHOP=3, SP_BANNER=4, SP_END=5 };
-enum { SW_CAR=0, SW_TRA=1, SW_BIG=2, SW_DIRT=3, SW_HON=4, SW_CLU=5, SW_BEAN=6 };
-static const int SCR_PRICE[7] = { 0, 5, 40, 30, 70, 90, 150 };
-static const int SCR_RAD[7]   = { 26, 4, 42, 30, 10, 16, 0 };   // the Bean's radius is rolled per shot
-static const int SCR_DMG[7]   = { 70, 0, 125, 0, 0, 45, 0 };    // Cluster = per submunition; Honey damages by pool ticks, Dirt not at all
-static const char *SCR_WNAME[7]  = { "CARCASS", "TRACER CARCASS", "BIG CARCASS", "DIRT CLOD", "HONEY POT", "CLUSTER CARCASS", "BACKFIRE BEAN" };
+enum { SW_CAR=0, SW_TRA=1, SW_BIG=2, SW_DIRT=3, SW_HON=4, SW_CLU=5, SW_BEAN=6, SW_FW=7 };
+static const int SCR_PRICE[8] = { 0, 5, 40, 30, 70, 90, 150, 80 };
+static const int SCR_RAD[8]   = { 26, 4, 42, 30, 10, 16, 0, 0 };   // the Bean's radius is rolled per shot; the FIREWALL is not a shell at all
+static const int SCR_DMG[8]   = { 70, 0, 125, 0, 0, 45, 0, 0 };    // Cluster = per submunition; Honey damages by pool ticks, Dirt not at all
+#define SCR_FW_STR 100   // the FIREWALL's strength (v1.36): blast points the dome eats before the unit's hp feels a thing
+static const char *SCR_WNAME[8]  = { "CARCASS", "TRACER CARCASS", "BIG CARCASS", "DIRT CLOD", "HONEY POT", "CLUSTER CARCASS", "BACKFIRE BEAN", "FIREWALL" };
 static const char *SCR_WSHORT[7] = { "CARCASS", "TRACER", "BIG", "DIRT", "HONEY", "CLUSTER", "BEAN" };
-static const char *SCR_WDESC[7]  = { "THE CLASSIC LOB. FREE, FOREVER.",
+static const char *SCR_WDESC[8]  = { "THE CLASSIC LOB. FREE, FOREVER.",
                                      "A SCOUT SHOT - NO DAMAGE, ALL TRUTH.",
                                      "A WHOPPER. BIG CRATER, BIG HURT.",
                                      "ADDS DIRT. BUILD A WALL, FILL A GRAVE.",
                                      "LEAVES A BURNING POOL. HURTS PER TURN.",
                                      "SPLITS INTO THREE AT THE TOP.",
-                                     "THE FUNKY ONE. RANDOM YIELD. MIND THE DUD." };
+                                     "THE FUNKY ONE. RANDOM YIELD. MIND THE DUD.",
+                                     "A DOME THAT EATS BLASTS. BLOCKS BLASTS, NOT FALLS." };
 static const int SCR_XP[3] = { 30, 50, 80 };
 static const char *SCR_DNAME[3] = { "EASY", "NORMAL", "HARD" };
 
@@ -58,7 +60,7 @@ static void scr_chip_rect(int vx, int vy, int vw2, int vh2, int i, int *x, int *
     *x = vx + 8 + i*cw; *w = cw-3; *y = vy + vh2 - 46 - 24; *h = 20;
 }
 static void scr_shop_rect(int vx, int vy, int vw2, int vh2, int *x, int *y, int *w, int *h){
-    *w = vw2<420? vw2-16 : 404; *h = 254;
+    *w = vw2<420? vw2-16 : 404; *h = 276;   // h grew 254 -> 276 in v1.36: the eighth row is the FIREWALL
     *x = vx + (vw2-*w)/2; *y = vy + (vh2-*h)/2; if (*y<vy+4) *y = vy+4;
 }
 static void scr_shop_row_rect(int vx, int vy, int vw2, int vh2, int r, int *x, int *y, int *w, int *h){
@@ -166,6 +168,7 @@ static void scr_start_round(int pi){
     S->scr_exit_arm = 0;
 }
 
+static void scr_shop_begin(int pi);   // below (the shop section)
 static void scr_enter(int pi){
     BwSim *S = &BWS[pi]; Buddy *b = &G.bud[pi];
     int req = S->scr_req;   // consumed from the cabinet panel by bw_enter_mode
@@ -174,13 +177,23 @@ static void scr_enter(int pi){
     S->scr_matches++;
     S->scr_seed = (int)hash2(b->bw_seed, S->scr_matches*131+7, 0x5C09u);
     S->scr_round = 1; S->scr_wins[0]=0; S->scr_wins[1]=0;
-    S->scr_bits[0]=50; S->scr_bits[1]=50;   // the starting purse (the spec's "small": one Big Carcass and change)
+    S->scr_bits[0]=100; S->scr_bits[1]=100;   // the starting purse (v1.36, Daniel: 100 a side — a Firewall and change, or a Honey Pot and a Dirt Clod; never the Bean outright)
     for (int s=0;s<2;s++){ for (int w=0;w<7;w++) S->scr_inv[s][w]=0; S->scr_weap[s]=0; S->scr_aim[s]=45.0f; S->scr_pow[s]=62.0f; }
-    S->scr_shots=0; S->scr_lastmiss=0; S->scr_xp_paid=0; S->scr_xp_amt=0; S->scr_fxn=0;
+    for (int i=0;i<4;i++) S->scr_u[i].sh = 0;   // v1.36: shields live and die with the match — a new match starts bare (scr_gen_field never touches sh, so a bought dome survives every round change)
+    S->scr_ui[0]=0; S->scr_ui[1]=0;
+    S->scr_shots=0; S->scr_lastmiss=0; S->scr_xp_paid=0; S->scr_xp_amt=0; S->scr_fxn=0; S->scr_exit_arm=0;
     for (int i=0;i<40;i++) S->scr_fxl[i]=0;
     for (int i=0;i<6;i++){ S->scr_tp_was[i]=0; S->scr_tp_act[i]=0; }
-    scr_start_round(pi);
-    sfx(19);
+    // v1.36 (Daniel): the shop opens BEFORE round 1. Round 1's own
+    // hills are generated now so the panel stands over the field the
+    // match will open on (scr_start_round re-rolls the identical
+    // deterministic field when the shop closes), the battery shops
+    // silently inside scr_shop_begin, and scr_preshop tells
+    // scr_shop_done to start round 1 instead of advancing it.
+    scr_gen_field(pi, 1);
+    S->scr_preshop = 1;
+    scr_shop_begin(pi);
+    S->scr_phase_t = 1.0f;   // the launch gate (v1.36 fix): NOT a timer — a latch. scr_update keeps the pre-round shop's input closed until the press that launched the cabinet is fully released, however long that takes. A timed hold raced real fingers and test harnesses alike: an up/down/select edge landing inside the window was eaten whole, and the shop desynced from the hand working it.
 }
 
 // ---- firing and flight ---------------------------------------------
@@ -284,8 +297,9 @@ static void scr_explode(int pi, float x, float y, int w){
             else if (d < r*1.9f) f = 0.4f*(1.0f - (d-r)/(r*0.9f));
             int dd = (int)(dmg*f);
             if (dd>0){
+                if (u->side != side) S->scr_bits[side] += 10;   // the hit bounty, per enemy unit hurt — a shielded hit still pays (the dome ate it, not the aim)
+                if (u->sh>0){ int ab = u->sh<dd? u->sh : dd; u->sh -= ab; dd -= ab; }   // v1.36: the FIREWALL eats blast damage before hp; only the overflow lands
                 u->hp -= dd;
-                if (u->side != side) S->scr_bits[side] += 10;   // the hit bounty, per enemy unit hurt
             }
         }
     }
@@ -354,7 +368,9 @@ static void scr_honey_tick(int pi){
             int cx = (int)u->x;
             if (cx < S->scr_pool_x0[k] || cx > S->scr_pool_x1[k]) continue;
             if (u->y < S->scr_h[cx]-26.0f) continue;   // buried deep under the pool: the honey never reaches it
-            u->hp -= 18;
+            int hd = 18;   // v1.36: honey burn is weapon damage, so the FIREWALL eats it too — falls are the dome's only blind spot
+            if (u->sh>0){ int ab = u->sh<hd? u->sh : hd; u->sh -= ab; hd -= ab; }
+            u->hp -= hd;
             scr_fx_burst(S, u->x, u->y-14, 4, COL(255,176,66), 45.0f);
             if (u->hp<=0){
                 u->alive = 0;
@@ -448,6 +464,7 @@ static void scr_settle_step(int pi, float dt){
 
 static void scr_round_end(int pi){
     BwSim *S = &BWS[pi];
+    S->scr_preshop = 0;   // v1.36: any shop past here is a between-rounds shop, never the pre-round one
     int winner = scr_side_alive(S,0)>0? 0 : (scr_side_alive(S,1)>0? 1 : -1);
     S->scr_lastwin = winner;
     if (winner>=0){ S->scr_wins[winner]++; S->scr_bits[winner] += 100; }   // the round purse
@@ -474,11 +491,18 @@ static void scr_match_end(int pi){
 
 // ---- the between-rounds shop -----------------------------------------
 static void scr_ai_shop(BwSim *S){
-    // The battery shops first, instantly and simply (the spec's
-    // order): Big Carcasses while it can afford them, a Cluster if
-    // it is rich, Tracers for pocket change.
+    // The battery shops first, instantly. v1.36: the FIREWALL
+    // joined its list, over its current gunner — HARD shields
+    // before anything else (whenever it can afford a dome that is
+    // not already full), NORMAL restocks a Big Carcass first and
+    // shields with what is left, EASY never shields. Then the
+    // v1.35 order: Big Carcasses, a Cluster if rich, Tracers for
+    // pocket change.
     int side = 1;
+    ScrUnit *gu = &S->scr_u[scr_unit_of(S, 1)];
+    if (S->scr_diff==2 && gu->sh<SCR_FW_STR && S->scr_bits[side]>=SCR_PRICE[SW_FW]){ S->scr_bits[side]-=SCR_PRICE[SW_FW]; gu->sh=SCR_FW_STR; }
     while (S->scr_bits[side]>=40 && S->scr_inv[side][SW_BIG]<2){ S->scr_bits[side]-=40; S->scr_inv[side][SW_BIG]++; }
+    if (S->scr_diff==1 && gu->sh<SCR_FW_STR && S->scr_bits[side]>=SCR_PRICE[SW_FW]){ S->scr_bits[side]-=SCR_PRICE[SW_FW]; gu->sh=SCR_FW_STR; }
     if (S->scr_bits[side]>=90 && S->scr_inv[side][SW_CLU]==0){ S->scr_bits[side]-=90; S->scr_inv[side][SW_CLU]++; }
     while (S->scr_bits[side]>=5 && S->scr_inv[side][SW_TRA]<3){ S->scr_bits[side]-=5; S->scr_inv[side][SW_TRA]++; }
 }
@@ -492,26 +516,36 @@ static void scr_shop_begin(int pi){
 static void scr_shop_done(int pi){
     BwSim *S = &BWS[pi];
     if (S->scr_2p && S->scr_shop_side==0){ S->scr_shop_side = 1; S->scr_shop_sel = 0; sfx(6); return; }
+    if (S->scr_preshop){ S->scr_preshop = 0; scr_start_round(pi); return; }   // v1.36: the pre-round shop hands over to round 1 as it stands — no round advance
     S->scr_round++;
     scr_start_round(pi);
 }
 static void scr_shop_input(int pi, const BwIn *in){
     BwSim *S = &BWS[pi];
     int side = S->scr_shop_side;
-    if (in->up){ S->scr_shop_sel = (S->scr_shop_sel+6)%7; sfx(6); }
-    if (in->down){ S->scr_shop_sel = (S->scr_shop_sel+1)%7; sfx(6); }
+    if (in->up){ S->scr_shop_sel = (S->scr_shop_sel+7)%8; sfx(6); }
+    if (in->down){ S->scr_shop_sel = (S->scr_shop_sel+1)%8; sfx(6); }
     int act = -1;
     if (in->sel || in->interact) act = S->scr_shop_sel;
     if (act<0 && pi==G.my_id && IN.tapped){
         int vx,vy,vw2,vh2; pi_view_rect(pi, &vx,&vy,&vw2,&vh2);
         int tx = IN.tap_x, ty = IN.tap_y; IN.tapped = 0;
-        for (int r=0;r<7;r++){
+        for (int r=0;r<8;r++){
             int x,y,w,h; scr_shop_row_rect(vx,vy,vw2,vh2, r, &x,&y,&w,&h);
             if (tx>=x && tx<x+w && ty>=y && ty<y+h){ act = r; S->scr_shop_sel = r; break; }
         }
     }
     if (act<0) return;
-    if (act==6){ sfx(11); scr_shop_done(pi); return; }
+    if (act==7){ sfx(11); scr_shop_done(pi); return; }
+    if (act==6){
+        // FIREWALL (v1.36): not a stock item — a recharge for the
+        // shopping side's gunner. Buying at any strength restores
+        // the full 100 for the same 80; there are no partial top-ups.
+        ScrUnit *gu = &S->scr_u[scr_unit_of(S, side)];
+        if (S->scr_bits[side]>=SCR_PRICE[SW_FW]){ S->scr_bits[side]-=SCR_PRICE[SW_FW]; gu->sh=SCR_FW_STR; sfx(11); }
+        else sfx(16);
+        return;
+    }
     int w = act+1, price = SCR_PRICE[w];
     if (S->scr_bits[side]>=price){ S->scr_bits[side]-=price; S->scr_inv[side][w]++; sfx(11); }
     else sfx(16);
@@ -692,7 +726,24 @@ static void scr_update(int pi, float dt, const BwIn *in){
         return;
       case SP_FLY: scr_fly_step(pi, dt); return;
       case SP_SETTLE: scr_settle_step(pi, dt); return;
-      case SP_SHOP: scr_shop_input(pi, in); return;
+      case SP_SHOP:
+        // v1.36: the panel press that launched the cabinet is still
+        // lifting when the pre-round shop opens — gate the shop's
+        // input until that press is fully released (keys up, no
+        // select held, no tap pending), or its tail buys a Tracer
+        // nobody chose (the v1.34 lesson, at the door). The gate is
+        // a release latch, never a timer: a timed hold eats whole
+        // input edges that land inside it, and the first fix's
+        // 0.3 s window did exactly that to the suite's opening
+        // ArrowDown — the shop sat one row off for the whole run.
+        if (S->scr_preshop && S->scr_phase_t>0){
+            int held = in->sel || in->interact || in->up || in->down || in->sel_held;
+            if (pi==G.my_id && IN.tapped) held = 1;
+            if (pi==G.my_id) IN.tapped = 0;
+            if (!held) S->scr_phase_t = 0;   // the launching hand is off: the shop is live
+            if (S->scr_phase_t>0) return;
+        }
+        scr_shop_input(pi, in); return;
       case SP_END:
         if (in->sel || in->interact){ bw_exit(pi, 0); return; }
         if (pi==G.my_id && IN.tapped){ IN.tapped=0; bw_exit(pi, 0); return; }
@@ -716,4 +767,24 @@ static BwSim *scr_dbg_sim(void){
 static int scr_dbg_on(void){
     int id = G.my_id>=0? G.my_id : 0;
     return (G.bud[id].in_bw && G.bud[id].bw_mode==10)? 1 : 0;
+}
+// Test staging (the wasm dbg_scrdig export): carve a pit under a
+// field column, so the next settle drops whoever stands there —
+// the fall-damage path, exercised on demand.
+static void scr_dbg_dig(int x){
+    BwSim *S = scr_dbg_sim();
+    if (x<0) x=0; if (x>639) x=639;
+    scr_carve(S, (float)x, S->scr_h[x], 30);
+}
+// Test staging (the wasm dbg_scrregen export): restore the round's
+// generated field — units back on their spawn pads at full HP,
+// pools cleared; turn, wind, purses, stocks and shields untouched.
+// The ballistic proofs each start from the field the round actually
+// generated, not from whatever the previous proof's live fire left
+// of the launch hill: the self-shot proofs dig the player's own
+// column toward the world floor by design, and from the bottom of
+// that pit no honest arc reaches the far hill at all.
+static void scr_dbg_regen(void){
+    int id = G.my_id>=0? G.my_id : 0;
+    scr_gen_field(id, BWS[id].scr_round);
 }

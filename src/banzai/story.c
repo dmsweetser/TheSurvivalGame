@@ -321,7 +321,7 @@ typedef struct { int cell; float x, y, wt, dir; int lvl; float alert; } BWHack; 
 typedef struct { float x, y, vx, vy; int kind, state; float t; } PlatEn;   // SUPER BUDDY RUN critters: 0 crawl, 1 shell-bug, 2 shell, 3 piranha, 4 fly, 5 shroom, 6 flower
 typedef struct { float x, y, aim, ft, lo, hi; int kind, hp, dir; } TankEn;   // TANK RESCUE foes: 0 turret, 1 patrol tank, 2 prison hut, 3 repair pickup, 4 fortress core, 5 blockade gun. Patrol dir: +-1 runs on x, +-2 on y (sign = way), lo/hi bound that axis
 typedef struct { float x, y, hp, maxhp, atk_t, hit_t; int kind, chunk, slot; } MorEn;   // MORDOR FUN RUN foes (v1.28): 0 goblin, 1 wolf, 2 spider, 3 orc. chunk/slot name the deterministic spawn they came from, so a kill can be written into the session's dead-bitmap.
-typedef struct { float x, y; int hp, side, kind, alive; } ScrUnit;   // CRISPY DIRT units (v1.35): kind 0 catapult, 1 crawler, 2 spitter. x is fixed for life; y is the unit's base on the heightfield (it falls, never walks).
+typedef struct { float x, y; int hp, side, kind, alive, sh; } ScrUnit;   // CRISPY DIRT units (v1.35): kind 0 catapult, 1 crawler, 2 spitter. x is fixed for life; y is the unit's base on the heightfield (it falls, never walks). sh is the FIREWALL shield's strength (v1.36): it eats blast damage before hp, ignores falls, and carries across a match's rounds.
 // MORDOR FUN RUN (v1.28): the MOOSE SCALE constants (MOR_MOOSE_PX
 // and friends) live in data/design.c with the Buddy's mor_* fields —
 // the save loader (save/start.c) is included before this file and
@@ -686,6 +686,7 @@ typedef struct {
     float scr_fall_from[4], scr_fall_v[4];
     int scr_pool_x0[4], scr_pool_x1[4], scr_pool_left[4], scr_pool_side[4];   // honey pools: column span, ticks left, owner's side
     int scr_shop_sel, scr_shop_side;
+    int scr_preshop;                   // v1.36: the shop visit on the table is the PRE-FIRST-ROUND one — its DONE starts round 1 instead of advancing it
     int scr_lastwin;                   // the round's winner (0/1, -1 = mutual wipeout), for the banner
     float scr_exit_arm; int scr_xp_paid, scr_xp_amt;
     int scr_tp_was[6], scr_tp_act[6];  // touch/mouse point bookkeeping: was-active, and what the press claimed (0 none, 1 FIRE, 2 angle-, 3 angle+, 4 power-, 5 power+, 6 angle drag, 7 power drag)

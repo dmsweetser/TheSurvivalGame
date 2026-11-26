@@ -54,13 +54,30 @@ static void srct_note_set(int s, const char *t){ scpy(srct_note[s], t, 128); }
 static int srct_can_edit(int pi){
     return pi==G.my_id && (dev_local()==DEV_KB || mobile_ui());
 }
+// v1.36 (Daniel): the terminal's text went one scale step up —
+// scale 2, double the v1.35 scale 1 ("make font bugger"). EVERY
+// layout number in this file derives from these constants, in the
+// draw and the input alike, so a view can never draw one grid and
+// hit-test another (the v1.33 WAR! panel overflow at scale 2 is
+// the cautionary tale this answers). The panel itself did not
+// move: STORE_X/Y/W/H are the mall's, shared with every station.
+#define SRCT_SC 2                  // the terminal's text scale
+#define SRCT_CW (8*SRCT_SC)        // 16: one character's advance
+#define SRCT_GH (16*SRCT_SC)       // 32: one glyph cell's height
+#define SRCT_LROW (SRCT_GH+2)      // 34: browser / tune list row step (the editor's step is SRCT_GH itself)
+#define SRCT_HDRY 40               // a view header's y offset in the panel (under the 32px title band)
+#define SRCT_BODY 78               // the first body row / text line's y offset
+#define SRCT_FOOT 38               // the footer / note line sits this far above the panel's bottom edge
+
 // the panel geometry, one derivation for input and drawing alike
 static int srct_panel_w(void){ return G.ui_compact? 308 : STORE_W; }
 static int srct_panel_x(void){ int w = srct_panel_w(); return G.ui_compact? G.view_x0 + (G.view_w - w)/2 : STORE_X; }
-static int srct_panel_cols(void){ return (srct_panel_w()-20)/8; }
-// editor text rows on screen: the touch footer (buttons + a status
-// row) eats the bottom of the panel on mobile, so fewer rows fit
-static int srct_editor_lines(void){ return mobile_ui()? (STORE_H-40-52)/16 : (STORE_H-40-24)/16; }
+static int srct_panel_cols(void){ return (srct_panel_w()-20)/SRCT_CW; }
+// editor text rows on screen: the note line (desktop) and the
+// touch footer (buttons + a status row) eat the bottom of the
+// panel, so the text must end above them — desktop keeps clear of
+// the note at h-74, mobile of the status row at h-86
+static int srct_editor_lines(void){ return mobile_ui()? (STORE_H-168)/SRCT_GH : (STORE_H-154)/SRCT_GH; }
 
 // where the frame may close the panel outright: only the browser
 // view. Inner views own Esc/Interact (the editor's Esc is "back",
@@ -258,7 +275,7 @@ static int srct_drag_rows(int s, int row_h){
 }
 static void srct_insert(int s, char c){
     if (srct_elen[s]+1 > srct_edit_limit(srct_file[s])){
-        srct_note_set(s, "FILE SIZE CAP REACHED - CANNOT GROW THIS FILE FURTHER");
+        srct_note_set(s, "FILE AT ITS SIZE CAP");
         sfx(16); return;
     }
     for (int i=srct_elen[s]; i>srct_cur[s]; i--) src_edit_buf[s][i]=src_edit_buf[s][i-1];
@@ -402,7 +419,7 @@ static void srct_reset_stock(int s){
     src_differs_clear();
     plat_srcbuild_clear();
     if (srct_file[s]>=0) srct_load_editor(s, srct_file[s]);
-    srct_note_set(s, "STOCK RESTORED - ALL EDITS AND TUNING CLEARED");
+    srct_note_set(s, "STOCK RESTORED - ALL CLEARED");
     sfx(11);
 }
 static void srct_tune_open(int s){
@@ -410,7 +427,7 @@ static void srct_tune_open(int s){
     for (int i=0;i<srct_tn[s];i++) srct_pend[s][i][0]=0;
     srct_tsel[s]=0; srct_tscroll[s]=0;
     srct_view[s]=SRV_TUNE;
-    if (srct_dirty[s]) srct_note_set(s, "UNSAVED EDITS: TUNING APPLIES TO THE SAVED TEXT");
+    if (srct_dirty[s]) srct_note_set(s, "TUNING USES THE SAVED TEXT");
     else srct_note[s][0]=0;
 }
 static void srct_tune_apply(int s){
@@ -470,6 +487,9 @@ static int srcterm_dbg_browse(void){
     return srct_bsel[s]*10000 + srct_bscroll[s];
 }
 static int srcterm_dbg_canedit(int pi){ return srct_can_edit(pi); }
+// v1.36: the terminal's text scale, readable from tests — the
+// larger-font check asserts on this rather than on pixels.
+static int srcterm_dbg_scale(void){ return SRCT_SC; }
 
 // --- input ---------------------------------------------------------------
 static void srct_browser_input(int pi, int s, int up, int down, int activate){
@@ -478,12 +498,13 @@ static void srct_browser_input(int pi, int s, int up, int down, int activate){
     if (down){ do { srct_bsel[s] = (srct_bsel[s]+1)%n; } while (srct_rows[s][srct_bsel[s]]==-1); sfx(6); }
     if (pi==G.my_id && raw_edge(PK_PGUP)){ for (int k=0;k<10;k++){ int p=(srct_bsel[s]+n-1)%n; if (srct_rows[s][p]!=-1) srct_bsel[s]=p; } }
     if (pi==G.my_id && raw_edge(PK_PGDN)){ for (int k=0;k<10;k++){ int p=(srct_bsel[s]+1)%n; if (srct_rows[s][p]!=-1) srct_bsel[s]=p; } }
-    // v1.27: swipe/drag scrolls the list (17px rows); the selection
-    // rides along so it never leaves the window the draw will show
+    // v1.27: swipe/drag scrolls the list (one SRCT_LROW per row);
+    // the selection rides along so it never leaves the window the
+    // draw will show
     if (pi==G.my_id && mobile_ui()){
-        int drows = srct_drag_rows(s, 17);
+        int drows = srct_drag_rows(s, SRCT_LROW);
         if (drows){
-            int vis = (STORE_H-40-22)/17;
+            int vis = (STORE_H-SRCT_BODY-46)/SRCT_LROW;
             srct_bscroll[s] += drows;
             if (srct_bscroll[s] > n-vis) srct_bscroll[s] = n-vis;
             if (srct_bscroll[s]<0) srct_bscroll[s]=0;
@@ -504,12 +525,12 @@ static void srct_browser_input(int pi, int s, int up, int down, int activate){
         int w = G.ui_compact? 308 : STORE_W;
         int x = G.ui_compact? G.view_x0 + (G.view_w - w)/2 : STORE_X;
         if (IN.tap_x<x-6 || IN.tap_x>x+w+6 || IN.tap_y<STORE_Y-6 || IN.tap_y>STORE_Y+STORE_H+6){ G.tap_close_store=1; return; }
-        int vis = (STORE_H-40-22)/17;
+        int vis = (STORE_H-SRCT_BODY-46)/SRCT_LROW;
         for (int vi=0; vi<vis; vi++){
             int ri = srct_bscroll[s]+vi;
             if (ri>=n) break;
-            int ry = STORE_Y+40 + vi*17;
-            if (IN.tap_y>=ry-2 && IN.tap_y<=ry+15 && srct_rows[s][ri]!=-1){
+            int ry = STORE_Y+SRCT_BODY + vi*SRCT_LROW;
+            if (IN.tap_y>=ry-2 && IN.tap_y<=ry+SRCT_GH && srct_rows[s][ri]!=-1){
                 if (ri==srct_bsel[s]) activate=1; else { srct_bsel[s]=ri; sfx(6); }
                 break;
             }
@@ -533,18 +554,19 @@ static void srct_editor_input(int pi, int s, int up, int down, int activate){
     (void)up; (void)down; (void)activate;
     if (IN.esc_pressed || raw_edge(PK_ESC)){ srct_editor_back(s); return; }
     int cur0 = srct_cur[s];
-    // v1.27 touch: drag scrolls by DISPLAY rows (16px), a tap on the
-    // text positions the cursor through the wrap mapping, and the
-    // footer zones [ SAVE ] [ NEW LINE ] [ TUNE ] [ BACK ] run the
-    // exact Ctrl+S / Enter / Ctrl+T / Esc actions — so saving never
-    // depends on soft-keyboard quirks. A drag is not a tap (tapped
-    // only fires for quick, still touches), so the two never fight.
+    // v1.27 touch: drag scrolls by DISPLAY rows (one SRCT_GH
+    // each), a tap on the text positions the cursor through the
+    // wrap mapping, and the footer zones [ SAVE ] [ NEW LINE ]
+    // [ TUNE ] [ BACK ] run the exact Ctrl+S / Enter / Ctrl+T /
+    // Esc actions — so saving never depends on soft-keyboard
+    // quirks. A drag is not a tap (tapped only fires for quick,
+    // still touches), so the two never fight.
     if (pi==G.my_id && mobile_ui()){
-        int drows = srct_drag_rows(s, 16);
+        int drows = srct_drag_rows(s, SRCT_GH);
         if (drows){ srct_top[s]+=drows; if (srct_top[s]<0) srct_top[s]=0; }
         if (IN.tapped){
             int x = srct_panel_x(), y = STORE_Y, w = srct_panel_w(), h = STORE_H;
-            int fy = y+h-26;
+            int fy = y+h-46;
             if (IN.tap_y>=fy && IN.tap_y<y+h && IN.tap_x>=x && IN.tap_x<x+w){
                 int zone = (IN.tap_x-x)*4/w; if (zone>3) zone=3;
                 if (zone==0){ if (srct_can_edit(pi)) srct_save_editor(s); }
@@ -556,10 +578,10 @@ static void srct_editor_input(int pi, int s, int up, int down, int activate){
                 else srct_editor_back(s);
                 return;
             }
-            if (srct_can_edit(pi) && IN.tap_x>=x+10 && IN.tap_x<x+w-6 && IN.tap_y>=y+40 && IN.tap_y<y+40+srct_editor_lines()*16){
+            if (srct_can_edit(pi) && IN.tap_x>=x+10 && IN.tap_x<x+w-6 && IN.tap_y>=y+SRCT_BODY && IN.tap_y<y+SRCT_BODY+srct_editor_lines()*SRCT_GH){
                 int cols = srct_panel_cols();
-                int drow = srct_top[s] + (IN.tap_y-(y+40))/16;
-                int dcol = (IN.tap_x-(x+10))/8; if (dcol<0) dcol=0; if (dcol>cols) dcol=cols;
+                int drow = srct_top[s] + (IN.tap_y-(y+SRCT_BODY))/SRCT_GH;
+                int dcol = (IN.tap_x-(x+10))/SRCT_CW; if (dcol<0) dcol=0; if (dcol>cols) dcol=cols;
                 srct_cur[s] = srct_display_to_offset(s, cols, drow, dcol);
                 srct_repkey[s]=-1;
             }
@@ -622,12 +644,12 @@ static void srct_prompt_input(int pi, int s, int up, int down, int activate){
     // selected row activates it (the box math mirrors the draw)
     if (pi==G.my_id && IN.tapped){
         int w = srct_panel_w(), x = srct_panel_x(), y = STORE_Y, h = STORE_H;
-        int bw = (w-16<340)? w-16 : 340, bh = 110;
+        int bw = (w-16<380)? w-16 : 380, bh = 178;   // the box math mirrors srct_draw_prompt exactly (v1.36 metrics)
         int bx = x + (w-bw)/2, by = y + (h-bh)/2;
-        int base = srct_prompt[s]==0? by+44 : by+58;
+        int base = srct_prompt[s]==0? by+54 : by+92;
         for (int i=0;i<rows;i++){
-            int ry = base + i*20;
-            if (IN.tap_x>=bx+8 && IN.tap_x<bx+bw-8 && IN.tap_y>=ry-2 && IN.tap_y<=ry+17){
+            int ry = base + i*40;
+            if (IN.tap_x>=bx+8 && IN.tap_x<bx+bw-8 && IN.tap_y>=ry-3 && IN.tap_y<=ry+33){
                 if (i==srct_psel[s]) activate=1; else { srct_psel[s]=i; sfx(6); }
                 break;
             }
@@ -652,9 +674,9 @@ static void srct_build_input(int pi, int s, int up, int down, int activate){
     if (pi==G.my_id && IN.tapped){ srct_swallow[s]=1; srct_view[s]=SRV_BROWSE; return; }
     if (up && srct_build_scroll[s]>0) srct_build_scroll[s]--;
     if (down) srct_build_scroll[s]++;
-    // v1.27: drag scrolls the (wrapped) log, 16px display rows
+    // v1.27: drag scrolls the (wrapped) log, one SRCT_GH display row at a time
     if (pi==G.my_id && mobile_ui()){
-        int drows = srct_drag_rows(s, 16);
+        int drows = srct_drag_rows(s, SRCT_GH);
         if (drows){ srct_build_scroll[s]+=drows; if (srct_build_scroll[s]<0) srct_build_scroll[s]=0; }
     }
 }
@@ -663,12 +685,13 @@ static void srct_tune_input(int pi, int s, int up, int down, int activate){
     if (IN.esc_pressed || raw_edge(PK_ESC)){ srct_swallow[s]=1; srct_view[s]=SRV_EDIT; return; }
     if (up){ srct_tsel[s] = (srct_tsel[s]+rows-1)%rows; sfx(6); }
     if (down){ srct_tsel[s] = (srct_tsel[s]+1)%rows; sfx(6); }
-    // v1.27 touch: drag scrolls the list (17px rows, selection rides
-    // along), taps select-then-activate like the browser's
+    // v1.27 touch: drag scrolls the list (one SRCT_LROW per row,
+    // selection rides along), taps select-then-activate like the
+    // browser's
     if (pi==G.my_id && mobile_ui()){
-        int drows = srct_drag_rows(s, 17);
+        int drows = srct_drag_rows(s, SRCT_LROW);
         if (drows){
-            int vis = (STORE_H-40-38)/17;
+            int vis = (STORE_H-SRCT_BODY-80)/SRCT_LROW;
             srct_tscroll[s] += drows;
             if (srct_tscroll[s] > rows-vis) srct_tscroll[s] = rows-vis;
             if (srct_tscroll[s]<0) srct_tscroll[s]=0;
@@ -677,13 +700,13 @@ static void srct_tune_input(int pi, int s, int up, int down, int activate){
         }
         if (IN.tapped){
             int x = srct_panel_x(), y = STORE_Y, w = srct_panel_w(), h = STORE_H;
-            int vis = (h-40-38)/17;
+            int vis = (h-SRCT_BODY-80)/SRCT_LROW;
             if (IN.tap_x>=x && IN.tap_x<x+w){
                 for (int vi=0; vi<vis; vi++){
                     int ri = srct_tscroll[s]+vi;
                     if (ri>=rows) break;
-                    int ry = y+40 + vi*17;
-                    if (IN.tap_y>=ry-2 && IN.tap_y<=ry+15){
+                    int ry = y+SRCT_BODY + vi*SRCT_LROW;
+                    if (IN.tap_y>=ry-2 && IN.tap_y<=ry+SRCT_GH){
                         if (ri==srct_tsel[s]) activate=1; else { srct_tsel[s]=ri; sfx(6); }
                         break;
                     }
@@ -719,7 +742,7 @@ static void srcterm_input(int pi, int up, int down, int activate){
 static void srct_draw_note(int s, int x, int y, int w){
     // v1.27: notes run long ("FILE SIZE CAP REACHED - ...") — fit-draw
     // so nothing ever spills past the panel at compact width
-    if (srct_note[s][0]) draw_text_center_fit(x+w/2, y, w-16, srct_note[s], 1, COL(255,214,130));
+    if (srct_note[s][0]) draw_text_center_fit(x+w/2, y, w-16, srct_note[s], SRCT_SC, COL(255,214,130));
 }
 static void srct_draw_browser(int s, int x, int y, int w, int h){
     { char b[128]; char *q=b;
@@ -728,8 +751,8 @@ static void srct_draw_browser(int s, int x, int y, int w, int h){
       if (ec>0){ q=sappend(q, " - MODDED ("); q=sapp_int(q, ec); q=sappend(q, ")"); }
       int ov = livedata_overrides();
       if (ov>0){ q=sappend(q, " - LIVE TUNING: "); q=sapp_int(q, ov); q=sappend(q, " OVERRIDES"); }
-      *q=0; draw_text_center_fit(x+w/2, y+20, w-16, b, 1, COL(190,240,205)); }
-    int vis = (h-40-22)/17;
+      *q=0; draw_text_center_fit(x+w/2, y+SRCT_HDRY, w-16, b, SRCT_SC, COL(190,240,205)); }
+    int vis = (h-SRCT_BODY-46)/SRCT_LROW;
     if (srct_bsel[s] < srct_bscroll[s]) srct_bscroll[s] = srct_bsel[s];
     if (srct_bsel[s] > srct_bscroll[s]+vis-1) srct_bscroll[s] = srct_bsel[s]-vis+1;
     if (srct_bscroll[s] > srct_nrows[s]-vis) srct_bscroll[s] = srct_nrows[s]-vis;
@@ -737,16 +760,17 @@ static void srct_draw_browser(int s, int x, int y, int w, int h){
     for (int vi=0; vi<vis; vi++){
         int ri = srct_bscroll[s]+vi;
         if (ri>=srct_nrows[s]) break;
-        int ry = y+40 + vi*17;
+        int ry = y+SRCT_BODY + vi*SRCT_LROW;
         int row = srct_rows[s][ri];
         if (row==-1){
-            draw_text(x+14, ry+2, srct_rowhdr[s][ri], 1, COL(120,180,140));
-            rect_fill(x+14+text_w(srct_rowhdr[s][ri],1)+6, ry+8, w-40-text_w(srct_rowhdr[s][ri],1), 1, COL(50,80,60));
+            draw_text(x+14, ry+1, srct_rowhdr[s][ri], SRCT_SC, COL(120,180,140));
+            int lw = w-40-text_w(srct_rowhdr[s][ri],SRCT_SC); if (lw<0) lw=0;   // v1.36: a long folder name at scale 2 must not hand rect_fill a negative width
+            rect_fill(x+14+text_w(srct_rowhdr[s][ri],SRCT_SC)+6, ry+17, lw, 1, COL(50,80,60));
             continue;
         }
         if (ri==srct_bsel[s]){
-            rect_fill(x+8, ry-1, w-16, 16, COL(26,54,36));
-            rect_fill(x+8, ry-1, 3, 16, COL(120,255,170));
+            rect_fill(x+8, ry-1, w-16, SRCT_GH, COL(26,54,36));
+            rect_fill(x+8, ry-1, 3, SRCT_GH, COL(120,255,170));
         }
         if (row>=0){
             const char *p = src_path(row);
@@ -756,28 +780,28 @@ static void srct_draw_browser(int s, int x, int y, int w, int h){
             // tags leave behind, so a long name + LIVE + TEXT!=LIVE
             // can never run past the panel edge at compact width
             int reserve = 0;
-            if (src_file_edited(row)) reserve += 12;
-            if (src_file_differs(p)) reserve += 34 + 88;
-            else if (livedata_file_has(p)) reserve += 34;
+            if (src_file_edited(row)) reserve += SRCT_CW + 8;
+            if (src_file_differs(p)) reserve += text_w("LIVE",SRCT_SC) + 6 + text_w("TEXT!=LIVE",SRCT_SC);
+            else if (livedata_file_has(p)) reserve += text_w("LIVE",SRCT_SC);
             char db[96]; int dn=0;
             while (base[dn] && dn<94){ db[dn]=base[dn]; dn++; }
             db[dn]=0;
             int maxbw = w - 36 - reserve;
-            if (text_w(db,1) > maxbw){
-                while (dn>0 && (dn+2)*8 > maxbw) db[--dn]=0;
+            if (text_w(db,SRCT_SC) > maxbw){
+                while (dn>0 && (dn+2)*SRCT_CW > maxbw) db[--dn]=0;
                 if (dn>0){ db[dn]='.'; db[dn+1]='.'; db[dn+2]=0; }
             }
-            draw_text(x+22, ry+2, db, 1, COL(215,240,220));
-            int ex = x+22 + text_w(db,1) + 6;
-            if (src_file_edited(row)){ draw_text(ex, ry+2, "*", 1, COL(255,214,130)); ex += 12; }
-            if (livedata_file_has(p)) draw_text(ex, ry+2, "LIVE", 1, COL(120,255,170));
-            if (src_file_differs(p)) draw_text(ex+34, ry+2, "TEXT!=LIVE", 1, COL(255,150,120));
+            draw_text(x+22, ry+1, db, SRCT_SC, COL(215,240,220));
+            int ex = x+22 + text_w(db,SRCT_SC) + 6;
+            if (src_file_edited(row)){ draw_text(ex, ry+1, "*", SRCT_SC, COL(255,214,130)); ex += SRCT_CW + 8; }
+            if (livedata_file_has(p)) draw_text(ex, ry+1, "LIVE", SRCT_SC, COL(120,255,170));
+            if (src_file_differs(p)) draw_text(ex+text_w("LIVE",SRCT_SC)+6, ry+1, "TEXT!=LIVE", SRCT_SC, COL(255,150,120));
         } else {
             const char *lbl = row==SRCT_ROW_BUILD? "[ BUILD ]" : row==SRCT_ROW_RESET? "[ RESET STOCK ]" : "[ CLOSE ]";
-            draw_text(x+22, ry+2, lbl, 1, COL(255,226,150));
+            draw_text(x+22, ry+1, lbl, SRCT_SC, COL(255,226,150));
         }
     }
-    srct_draw_note(s, x, y+h-20, w);
+    srct_draw_note(s, x, y+h-SRCT_FOOT, w);
     if (!srct_note[s][0])
         // v1.30 (audit F2/F14): the pad footer used to promise "B - BUILD" —
         // B is a physical-keyboard shortcut (raw_edge) and on a pad it
@@ -785,10 +809,14 @@ static void srct_draw_browser(int s, int x, int y, int w, int h){
         // The keyboard half now names the player's actual FIRE bind
         // instead of a hard-coded SPACE.
         { char fb[96]; char *q=fb;
+          // v1.36 fix: at scale 2 the fit budget is 30 chars on the
+          // full panel — the scale-1 strings ellipsized their own
+          // tails off ("B - .."), so the hints are composed short
+          // enough to land whole.
           if (hint_dev()==DEV_PAD) q=sappend(q, "D-PAD + A - OPEN");
-          else if (hint_dev()==DEV_TOUCH) q=sappend(q, "TAP - OPEN    SWIPE - SCROLL");
-          else { q=sappend(q, "ARROWS + "); q=sappend(q, key_name(G.bind[ACT_FIRE])); q=sappend(q, " - OPEN    B - BUILD    R - RESET"); }
-          *q=0; draw_text_center_fit(x+w/2, y+h-20, w-16, fb, 1, COL(140,170,150)); }
+          else if (hint_dev()==DEV_TOUCH) q=sappend(q, "TAP OPEN  SWIPE SCROLL");
+          else { q=sappend(q, key_name(G.bind[ACT_FIRE])); q=sappend(q, " OPEN  B BUILD  R RESET"); }
+          *q=0; draw_text_center_fit(x+w/2, y+h-SRCT_FOOT, w-16, fb, SRCT_SC, COL(140,170,150)); }
 }
 static void srct_draw_editor(int s, int x, int y, int w, int h){
     const char *p = srct_file[s]>=0? src_path(srct_file[s]) : "";
@@ -797,11 +825,11 @@ static void srct_draw_editor(int s, int x, int y, int w, int h){
       if (srct_dirty[s]) q=sappend(q, " *");
       if (srct_file[s]>=0 && livedata_file_has(p)) q=sappend(q, "  [LIVE]");
       if (src_file_differs(p)) q=sappend(q, "  LIVE VALUE DIFFERS FROM TEXT");
-      *q=0; draw_text_center_fit(x+w/2, y+20, w-16, b, 1, COL(190,240,205)); }
-    int tx = x+10, ty = y+40;
-    int cols = (w-20)/8;
+      *q=0; draw_text_center_fit(x+w/2, y+SRCT_HDRY, w-16, b, SRCT_SC, COL(190,240,205)); }
+    int tx = x+10, ty = y+SRCT_BODY;
+    int cols = (w-20)/SRCT_CW;
     int mob = mobile_ui();
-    int lines = mob? (h-40-52)/16 : (h-40-24)/16;
+    int lines = mob? (h-168)/SRCT_GH : (h-154)/SRCT_GH;
     int total_lines = srct_total_lines(s);
     int total_drows = srct_total_drows(s, cols);
     if (srct_top[s] > total_drows-lines) srct_top[s] = total_drows-lines;
@@ -827,30 +855,34 @@ static void srct_draw_editor(int s, int x, int y, int w, int h){
             seg[dn++] = (c=='\t')? ' ' : c;
         }
         seg[dn]=0;
-        draw_text(tx, ty+vi*16, seg, 1, COL(205,235,212));
+        draw_text(tx, ty+vi*SRCT_GH, seg, SRCT_SC, COL(205,235,212));
         if (++segi >= srct_line_segs(llen, cols)){ segi=0; ln++; lstart += llen+1; }
     }
     int line, col, ls; srct_cursor_lc(s, &line, &col, &ls);
     if (srct_can_edit(G.store_pi)){
         int drow, doff; srct_cursor_display(s, cols, &drow, &doff);
         if (drow>=srct_top[s] && drow<srct_top[s]+lines && doff<=cols){
-            int cx = tx + doff*8, cy = ty + (drow-srct_top[s])*16;
-            rect_fill(cx, cy, 8, 16, COL(110,230,160));
+            int cx = tx + doff*SRCT_CW, cy = ty + (drow-srct_top[s])*SRCT_GH;
+            rect_fill(cx, cy, SRCT_CW, SRCT_GH, COL(110,230,160));
             if (srct_cur[s]<srct_elen[s] && src_edit_buf[s][srct_cur[s]]!='\n'){
                 char one[2]; one[0]=src_edit_buf[s][srct_cur[s]]; one[1]=0;
-                draw_text(cx, cy, one, 1, COL(8,20,12));
+                draw_text(cx, cy, one, SRCT_SC, COL(8,20,12));
             }
         }
         if (!mob){
             { char b[96]; char *q=b;
+              // v1.36 fix: composed to the scale-2 budget (30
+              // chars, worst-case line/col numbers included) —
+              // the scale-1 line ellipsized ESC BACK and, on LIVE
+              // files, the TUNE hint itself off the panel.
               q=sappend(q, "LN "); q=sapp_int(q, line+1); q=sappend(q, " COL "); q=sapp_int(q, col+1);
-              q=sappend(q, "    CTRL+S SAVE");
-              if (srct_file[s]>=0 && livedata_file_has(p)) q=sappend(q, "    CTRL+T TUNE");
-              q=sappend(q, "    ESC BACK"); *q=0;
-              draw_text_center_fit(x+w/2, y+h-20, w-16, b, 1, COL(140,170,150)); }
+              q=sappend(q, "  ^S SAVE");
+              if (srct_file[s]>=0 && livedata_file_has(p)) q=sappend(q, "  ^T TUNE");
+              *q=0;
+              draw_text_center_fit(x+w/2, y+h-SRCT_FOOT, w-16, b, SRCT_SC, COL(140,170,150)); }
         }
     } else if (!mob) {
-        draw_text_center_fit(x+w/2, y+h-20, w-16, "EDITING NEEDS A KEYBOARD - VIEW ONLY", 1, COL(255,214,130));
+        draw_text_center_fit(x+w/2, y+h-SRCT_FOOT, w-16, "NO KEYBOARD - VIEW ONLY", SRCT_SC, COL(255,214,130));
     }
     if (mob){
         // the status row (LN/COL, or the note when one is up) and the
@@ -861,72 +893,86 @@ static void srct_draw_editor(int s, int x, int y, int w, int h){
             q=sappend(q, "LN "); q=sapp_int(q, line+1); q=sappend(q, " COL "); q=sapp_int(q, col+1);
             if (srct_dirty[s]) q=sappend(q, "  * UNSAVED");
             *q=0;
-            draw_text_center_fit(x+w/2, y+h-48, w-16, b, 1, COL(140,170,150));
+            draw_text_center_fit(x+w/2, y+h-86, w-16, b, SRCT_SC, COL(140,170,150));
         }
         static const char *FL[4] = { "SAVE", "NEW LINE", "TUNE", "BACK" };
-        int fy = y+h-26, zw = w/4;
+        int fy = y+h-46, zw = w/4;
         for (int i=0;i<4;i++){
             int bx = x + i*zw, bw2 = (i==3)? (x+w)-bx : zw;
             int dim = (i==2 && !(srct_file[s]>=0 && livedata_file_has(p)));
-            rect_fill(bx+2, fy, bw2-4, 22, dim? COL(24,30,26) : COL(26,54,36));
-            rect_line(bx+2, fy, bw2-4, 22, COL(90,220,150));
-            draw_text_center(bx+bw2/2, fy+7, FL[i], 1, dim? COL(120,140,125) : COL(230,245,232));
+            rect_fill(bx+2, fy, bw2-4, 42, dim? COL(24,30,26) : COL(26,54,36));
+            rect_line(bx+2, fy, bw2-4, 42, COL(90,220,150));
+            draw_text_center(bx+bw2/2, fy+5, FL[i], SRCT_SC, dim? COL(120,140,125) : COL(230,245,232));
         }
     }
-    srct_draw_note(s, x, mob? y+h-48 : y+h-36, w);
+    srct_draw_note(s, x, mob? y+h-86 : y+h-74, w);
     (void)ls;
 }
 static void srct_draw_prompt(int s, int x, int y, int w, int h){
     srct_draw_editor(s, x, y, w, h);
-    // v1.27: the box fits INSIDE the compact panel (340px never did)
-    int bw = (w-16<340)? w-16 : 340, bh = 110, bx = x + (w-bw)/2, by = y + (h-bh)/2;
+    // v1.27: the box fits INSIDE the compact panel (340px never did);
+    // v1.36: it grew with the font — 380 wide, 178 tall, rows on a
+    // 40px step under a scale-2 title (the input mirrors this math)
+    int bw = (w-16<380)? w-16 : 380, bh = 178, bx = x + (w-bw)/2, by = y + (h-bh)/2;
     rect_fill(bx-4, by-4, bw+8, bh+8, OUTLINE);
     rect_fill(bx, by, bw, bh, COL(20,26,22));
     rect_line(bx+3, by+3, bw-6, bh-6, COL(90,220,150));
     if (srct_prompt[s]==0){
-        draw_text_center_fit(bx+bw/2, by+12, bw-16, "UNSAVED CHANGES", 2, COL(255,226,150));
+        draw_text_center_fit(bx+bw/2, by+10, bw-16, "UNSAVED CHANGES", SRCT_SC, COL(255,226,150));
         static const char *PR[3] = { "SAVE AND CLOSE FILE", "DISCARD CHANGES", "KEEP EDITING" };
         for (int i=0;i<3;i++){
-            int ry = by+44+i*20;
-            if (i==srct_psel[s]){ rect_fill(bx+16, ry-2, bw-32, 17, COL(26,54,36)); rect_fill(bx+16, ry-2, 3, 17, COL(120,255,170)); }
-            draw_text_center_fit(bx+bw/2, ry, bw-32, PR[i], 1, COL(230,245,232));
+            int ry = by+54+i*40;
+            if (i==srct_psel[s]){ rect_fill(bx+16, ry-3, bw-32, 36, COL(26,54,36)); rect_fill(bx+16, ry-3, 3, 36, COL(120,255,170)); }
+            draw_text_center_fit(bx+bw/2, ry, bw-32, PR[i], SRCT_SC, COL(230,245,232));
         }
     } else {
-        draw_text_center_fit(bx+bw/2, by+12, bw-16, "RESET TO STOCK?", 2, COL(255,226,150));
-        draw_text_center_fit(bx+bw/2, by+36, bw-16, "EVERY EDIT AND TUNING OVERRIDE GOES.", 1, COL(200,220,205));
+        draw_text_center_fit(bx+bw/2, by+10, bw-16, "RESET TO STOCK?", SRCT_SC, COL(255,226,150));
+        draw_text_center_fit(bx+bw/2, by+48, bw-16, "EDITS + TUNING ALL GO.", SRCT_SC, COL(200,220,205));
         static const char *PR2[2] = { "RESET EVERYTHING", "KEEP MY EDITS" };
         for (int i=0;i<2;i++){
-            int ry = by+58+i*20;
-            if (i==srct_psel[s]){ rect_fill(bx+16, ry-2, bw-32, 17, COL(26,54,36)); rect_fill(bx+16, ry-2, 3, 17, COL(120,255,170)); }
-            draw_text_center_fit(bx+bw/2, ry, bw-32, PR2[i], 1, COL(230,245,232));
+            int ry = by+92+i*40;
+            if (i==srct_psel[s]){ rect_fill(bx+16, ry-3, bw-32, 36, COL(26,54,36)); rect_fill(bx+16, ry-3, 3, 36, COL(120,255,170)); }
+            draw_text_center_fit(bx+bw/2, ry, bw-32, PR2[i], SRCT_SC, COL(230,245,232));
         }
     }
 }
 static void srct_draw_build(int s, int x, int y, int w, int h){
-    draw_text_center(x+w/2, y+20, "BUILD", 1, COL(190,240,205));
+    draw_text_center(x+w/2, y+SRCT_HDRY, "BUILD", SRCT_SC, COL(190,240,205));
     if (!plat_srcbuild_available()){
-        draw_text_center_fit(x+w/2, y+90, w-16, "BUILD NEEDS THE HOST APP", 2, COL(255,226,150));
-        draw_text_center_fit(x+w/2, y+130, w-16, "YOUR EDITS ARE SAVED AND WILL BUILD THERE.", 1, COL(215,240,220));
-        draw_text_center_fit(x+w/2, y+150, w-16, "RUN THE DESKTOP APP, OPEN THIS TERMINAL,", 1, COL(215,240,220));
-        draw_text_center_fit(x+w/2, y+166, w-16, "AND CHOOSE BUILD - IT COMPILES AND SERVES", 1, COL(215,240,220));
-        draw_text_center_fit(x+w/2, y+182, w-16, "YOUR PAGE FROM ITS OWN WINDOW.", 1, COL(215,240,220));
-        draw_text_center_fit(x+w/2, y+h-20, w-16, hint_dev()==DEV_PAD? "BACK - BACK" : hint_dev()==DEV_TOUCH? "TAP - BACK" : "ESC - BACK", 1, COL(140,170,150));
+        // v1.36 fix: the message is re-broken into lines that fit
+        // the scale-2 budget whole — at scale 1's line breaks the
+        // fit-ellipsis ate every line's ending ("...AND WIL..").
+        draw_text_center_fit(x+w/2, y+104, w-16, "BUILD NEEDS THE HOST APP", SRCT_SC, COL(255,226,150));
+        draw_text_center_fit(x+w/2, y+138, w-16, "YOUR EDITS ARE SAVED HERE.", SRCT_SC, COL(215,240,220));
+        draw_text_center_fit(x+w/2, y+172, w-16, "RUN THE DESKTOP APP, OPEN", SRCT_SC, COL(215,240,220));
+        draw_text_center_fit(x+w/2, y+206, w-16, "THIS TERMINAL, CHOOSE BUILD", SRCT_SC, COL(215,240,220));
+        draw_text_center_fit(x+w/2, y+240, w-16, "- IT COMPILES YOUR PAGE AND", SRCT_SC, COL(215,240,220));
+        draw_text_center_fit(x+w/2, y+274, w-16, "SERVES IT FROM ITS WINDOW.", SRCT_SC, COL(215,240,220));
+        draw_text_center_fit(x+w/2, y+h-SRCT_FOOT, w-16, hint_dev()==DEV_PAD? "BACK - BACK" : hint_dev()==DEV_TOUCH? "TAP - BACK" : "ESC - BACK", SRCT_SC, COL(140,170,150));
         return;
     }
     int st = plat_srcbuild_state();
-    const char *sl = st==1? "BUILDING..." : st==2? "DONE - YOUR BUILD IS LIVE" : st==3? "BUILD FAILED - THE LAST GOOD PAGE STAYS SERVED" : "IDLE";
-    draw_text_center_fit(x+w/2, y+44, w-16, sl, 1, st==3? COL(255,150,120) : COL(170,255,200));
+    // v1.36 fix: the status lines are broken to the scale-2
+    // budget like the no-host message above (the FAILED line and
+    // both DONE lines ellipsized at their old lengths).
+    const char *sl = st==1? "BUILDING..." : st==2? "DONE - YOUR BUILD IS LIVE" : st==3? "BUILD FAILED" : "IDLE";
+    draw_text_center_fit(x+w/2, y+84, w-16, sl, SRCT_SC, st==3? COL(255,150,120) : COL(170,255,200));
+    if (st==3){
+        draw_text_center_fit(x+w/2, y+116, w-16, "LAST GOOD PAGE STAYS UP", SRCT_SC, COL(215,240,220));
+    }
     if (st==2){
-        draw_text_center_fit(x+w/2, y+62, w-16, "THE HOST NOW SERVES YOUR PAGE AT ITS USUAL ADDRESS.", 1, COL(215,240,220));
-        draw_text_center_fit(x+w/2, y+76, w-16, "THIS WINDOW STILL RUNS STOCK CODE - ONLY THE", 1, COL(215,240,220));
-        draw_text_center_fit(x+w/2, y+90, w-16, "SERVED WEB PAGE CHANGED.", 1, COL(215,240,220));
+        draw_text_center_fit(x+w/2, y+108, w-16, "THE HOST NOW SERVES YOUR", SRCT_SC, COL(215,240,220));
+        draw_text_center_fit(x+w/2, y+138, w-16, "PAGE AT ITS USUAL ADDRESS.", SRCT_SC, COL(215,240,220));
+        draw_text_center_fit(x+w/2, y+168, w-16, "THIS WINDOW RUNS STOCK -", SRCT_SC, COL(215,240,220));
+        draw_text_center_fit(x+w/2, y+198, w-16, "ONLY THE PAGE CHANGED.", SRCT_SC, COL(215,240,220));
     }
     static char logbuf[8192];
     plat_srcbuild_log(logbuf, (int)sizeof(logbuf));
-    int lines = (h-120-22)/16;
+    int logtop = st==2? y+228 : st==3? y+148 : y+128;   // v1.36: the log starts under the status block at the new metrics (st 2 and 3 carry an extra broken-out line)
+    int lines = (h-(logtop-y)-46)/SRCT_GH;
     // v1.27: log lines soft-wrap like the editor's (a 79-char line
     // never fit even the full-width panel); scroll counts display rows
-    int cols = (w-24)/8; if (cols<8) cols=8;
+    int cols = (w-24)/SRCT_CW; if (cols<8) cols=8;
     int total=0;
     { const char *c = logbuf;
       while (*c){ int ll=0; while (*c && *c!='\n'){ ll++; c++; } if (*c=='\n') c++; total += ll<=0? 1 : (ll+cols-1)/cols; } }
@@ -946,19 +992,19 @@ static void srct_draw_build(int s, int x, int y, int w, int h){
                   char sb[512]; int dn=0;
                   for (int ci=sg*cols; ci<ll && ci<(sg+1)*cols && dn<511; ci++) sb[dn++]=lb[ci];
                   sb[dn]=0;
-                  draw_text(x+12, y+110+vi*16, sb, 1, COL(180,215,190));
+                  draw_text(x+12, logtop+vi*SRCT_GH, sb, SRCT_SC, COL(180,215,190));
                   vi++;
               }
           }
           drow += segs;
       } }
-    draw_text_center_fit(x+w/2, y+h-20, w-16, hint_dev()==DEV_PAD? "D-PAD - SCROLL LOG    BACK - BACK" : hint_dev()==DEV_TOUCH? "SWIPE - SCROLL LOG    TAP - BACK" : "UP/DOWN - SCROLL LOG    ESC - BACK", 1, COL(140,170,150));
+    draw_text_center_fit(x+w/2, y+h-SRCT_FOOT, w-16, hint_dev()==DEV_PAD? "D-PAD - SCROLL  BACK - BACK" : hint_dev()==DEV_TOUCH? "SWIPE SCROLL  TAP BACK" : "UP/DOWN SCROLL  ESC BACK", SRCT_SC, COL(140,170,150));
 }
 static void srct_draw_tune(int s, int x, int y, int w, int h){
     const char *p = srct_file[s]>=0? src_path(srct_file[s]) : "";
     { char b[128]; char *q=b; q=sappend(q, "LIVE TUNING - "); q=sappend(q, p); *q=0;
-      draw_text_center_fit(x+w/2, y+20, w-16, b, 1, COL(190,240,205)); }
-    int vis = (h-40-38)/17;
+      draw_text_center_fit(x+w/2, y+SRCT_HDRY, w-16, b, SRCT_SC, COL(190,240,205)); }
+    int vis = (h-SRCT_BODY-80)/SRCT_LROW;
     int rows = srct_tn[s]+2;
     if (srct_tsel[s] < srct_tscroll[s]) srct_tscroll[s] = srct_tsel[s];
     if (srct_tsel[s] > srct_tscroll[s]+vis-1) srct_tscroll[s] = srct_tsel[s]-vis+1;
@@ -967,10 +1013,10 @@ static void srct_draw_tune(int s, int x, int y, int w, int h){
     for (int vi=0; vi<vis; vi++){
         int ri = srct_tscroll[s]+vi;
         if (ri>=rows) break;
-        int ry = y+40 + vi*17;
+        int ry = y+SRCT_BODY + vi*SRCT_LROW;
         if (ri==srct_tsel[s]){
-            rect_fill(x+8, ry-1, w-16, 16, COL(26,54,36));
-            rect_fill(x+8, ry-1, 3, 16, COL(120,255,170));
+            rect_fill(x+8, ry-1, w-16, SRCT_GH, COL(26,54,36));
+            rect_fill(x+8, ry-1, 3, SRCT_GH, COL(120,255,170));
         }
         if (ri<srct_tn[s]){
             const TuneEntry *e = livedata_entry(srct_tidx[s][ri]);
@@ -979,19 +1025,19 @@ static void srct_draw_tune(int s, int x, int y, int w, int h){
             else tune_fmt_num(livedata_get(srct_tidx[s][ri]), vb);
             if (livedata_is_over(srct_tidx[s][ri])){ char *q=vb; while (*q) q++; q=sappend(q, " *"); }
             // v1.27: the name fit-trims into the space the value leaves
-            draw_text_fit(x+22, ry+2, (w-36-text_w(vb,1))>0? (w-36-text_w(vb,1)) : 8, e->name, 1, COL(215,240,220));
-            draw_text(x+w-14-text_w(vb,1), ry+2, vb, 1, srct_pend[s][ri][0]? COL(255,226,150) : COL(190,240,205));
+            draw_text_fit(x+22, ry+1, (w-36-text_w(vb,SRCT_SC))>0? (w-36-text_w(vb,SRCT_SC)) : 8, e->name, SRCT_SC, COL(215,240,220));
+            draw_text(x+w-14-text_w(vb,SRCT_SC), ry+1, vb, SRCT_SC, srct_pend[s][ri][0]? COL(255,226,150) : COL(190,240,205));
         } else {
-            draw_text(x+22, ry+2, ri==srct_tn[s]? "[ APPLY ]" : "[ BACK ]", 1, COL(255,226,150));
+            draw_text(x+22, ry+1, ri==srct_tn[s]? "[ APPLY ]" : "[ BACK ]", SRCT_SC, COL(255,226,150));
         }
     }
     if (!srct_can_edit(G.store_pi))
-        draw_text_center_fit(x+w/2, y+h-36, w-16, "EDITING NEEDS A KEYBOARD - VIEW ONLY", 1, COL(255,214,130));
-    srct_draw_note(s, x, y+h-20, w);
+        draw_text_center_fit(x+w/2, y+h-74, w-16, "NO KEYBOARD - VIEW ONLY", SRCT_SC, COL(255,214,130));
+    srct_draw_note(s, x, y+h-SRCT_FOOT, w);
     // v1.30 (audit F3): the type-a-value instruction only makes sense for
     // a viewer who can edit — a view-only pad player was told to type.
     if (!srct_note[s][0] && srct_can_edit(G.store_pi))
-        draw_text_center_fit(x+w/2, y+h-20, w-16, "TYPE A NEW VALUE, THEN APPLY - IT GOES LIVE AT ONCE", 1, COL(140,170,150));
+        draw_text_center_fit(x+w/2, y+h-SRCT_FOOT, w-16, "TYPE VALUE, APPLY - LIVE NOW", SRCT_SC, COL(140,170,150));
 }
 static void draw_srcterm_panel(void){
     int s = whale_slot_of(G.store_pi);

@@ -5,6 +5,14 @@
 // EASY/NORMAL/HARD paying Buddy XP 30/50/80, the HARD Trophy Case
 // plaque, and hot-seat 2P for glory only.
 //
+// v1.36 (Daniel): the FIREWALL shield (80 bits, strength 100 —
+// eats blasts, never falls; carries across rounds; a re-buy is a
+// full recharge), 100 starting bits a side, and the shop opening
+// BEFORE round 1 (the battery shops silently first, both hot-seat
+// players in turn). The pre-shop flows, the absorption / overflow /
+// fall-bypass proofs and the AI's shield priorities are covered
+// below; the v1.35 checks stand at their updated expectations.
+//
 // The player path is walked for real throughout: the cabinet
 // panel (once by a HUMAN-TIMED touch tap — the v1.34 lesson),
 // keyboard aiming, touch gauge drags, touch and mouse FIRE presses
@@ -13,6 +21,12 @@
 // tedious (a bug's HP before a solver-aimed kill, a top-up for the
 // player) — every shot asserted on is flown by the game's own
 // ballistics, aimed by a JS mirror of the battery's own solver.
+// One more seam joined in the v1.36 fix pass: dbg_scrregen restores
+// the round's generated field at the ballistic proofs' doors —
+// the self-shot proofs dig the player's own column toward the
+// world floor by design, and from the bottom of that pit no honest
+// arc reaches the far hill, so the later proofs would be aiming
+// out of a hole the round never dug.
 const { chromium } = require('playwright-core');
 const EXE = process.env.HOME + '/.cache/ms-playwright/chromium-1248/chrome-linux64/chrome';
 const URL = 'http://localhost:8903/the-survival-game.html';
@@ -168,9 +182,21 @@ function T(name, cond, extra) { if (cond) { pass++; } else { fail++; console.log
   T('cabinet panel opened', (await poll('dbg_arcgate', v => v === 1, 3000)) === 1, await call('dbg_arcgate'));
   await touch(320, 139, 180);
   T('a held touch tap on PLAY - EASY launched the cabinet (bw_mode 10)', (await poll('dbg_bwmode', v => v === 10, 4000)) === 10, await call('dbg_bwmode'));
+  // v1.36: the shop opens BEFORE round 1 — exactly 100 bits a side,
+  // and the battery has already shopped silently (on EASY it never
+  // shields, so its gunner stands bare)
+  T('the pre-round shop opens before round 1', (await poll('dbg_scrphase', v => v === 3, 6000)) === 3, await call('dbg_scrphase'));
+  T('the opening purse is exactly 100 bits', (await call('dbg_scrbits', 0)) === 100, await call('dbg_scrbits', 0));
+  T('EASY battery never shields (its silent pre-shop bought no dome)', (await call('dbg_scrshield', 1)) === 0, await call('dbg_scrshield', 1));
+  for (let i = 0; i < 6; i++) await key('ArrowDown', 130);   // row 6: FIREWALL
+  await key('Space', 250);
+  T('buying the FIREWALL deducted exactly 80', (await call('dbg_scrbits', 0)) === 20, await call('dbg_scrbits', 0));
+  T('the shield stands at full strength 100', (await call('dbg_scrshield', 0)) === 100, await call('dbg_scrshield', 0));
+  await key('ArrowDown', 140);   // row 7: TO BATTLE
+  await key('Space', 300);
   T('the round banner gives way to AIM', (await waitAim()) === 0, await call('dbg_scrphase'));
   T('EASY fields one bug (2 units)', (await call('dbg_scrunits')) === 2, await call('dbg_scrunits'));
-  T('the starting purse is 50 bits', (await call('dbg_scrbits', 0)) === 50, await call('dbg_scrbits', 0));
+  T('the shield rode into round 1 at 100', (await call('dbg_scrshield', 0)) === 100, await call('dbg_scrshield', 0));
   T('round 1, player to open', (await call('dbg_scrround')) === 1 && (await call('dbg_scrturn')) === 0,
     (await call('dbg_scrround')) + '/' + (await call('dbg_scrturn')));
   T('the wind is on the table (-30..30)', Math.abs(await call('dbg_scrwind')) <= 30, await call('dbg_scrwind'));
@@ -183,11 +209,17 @@ function T(name, cond, extra) { if (cond) { pass++; } else { fail++; console.log
   await call('dbg_scrsetangle', 85); await call('dbg_scrsetpower', 18);   // a harmless steep lob: the input checks must not wound anyone
   const shots0 = await call('dbg_scrshots');
   await touch(604, 337, 220);   // the FIRE disc, held like a finger
-  await call('dbg_scrhurt', 0, 100);   // staging: the battery's answer must not end the round mid-suite (it hits for ~50 a pop, even on EASY)
   T('a held touch on FIRE fired exactly once', (await call('dbg_scrshots')) === shots0 + 1, await call('dbg_scrshots'));
   T('the shell flew (phase left AIM)', (await poll('dbg_scrphase', v => v !== 0, 3000)) !== 0, await call('dbg_scrphase'));
-  T('the turn came back after the battery answered', (await poll2(async () =>
-    (await call('dbg_scrphase')) === 0 && (await call('dbg_scrturn')) === 0 ? 1 : null, 45000)) === 1, await call('dbg_scrturn'));
+  // staging: the battery's answer is live fire — since v1.36's
+  // 100-bit purse it owns Big Carcasses, and a point-blank Big
+  // plus its fall can deal ~134 — so the wait tops the player up
+  // (the waitPlayerTurn idiom) and the exchange cannot end the
+  // round mid-suite
+  T('the turn came back after the battery answered', (await poll2(async () => {
+    await call('dbg_scrhurt', 0, 150);
+    return (await call('dbg_scrphase')) === 0 && (await call('dbg_scrturn')) === 0 ? 1 : null;
+  }, 45000)) === 1, await call('dbg_scrturn'));
 
   // ---- mouse: a real press on FIRE (the shell forwards the mouse
   // as a touch point; the press is held, never same-frame) ----
@@ -196,10 +228,11 @@ function T(name, cond, extra) { if (cond) { pass++; } else { fail++; console.log
   const box = await page.locator('canvas').boundingBox();
   await page.mouse.move(box.x + 604 / 640 * box.width, box.y + 337 / 360 * box.height);
   await page.mouse.down(); await sleep(200); await page.mouse.up(); await sleep(250);
-  await call('dbg_scrhurt', 0, 100);   // staging, same reason as the touch shot
   T('a held mouse press on FIRE fired exactly once', (await call('dbg_scrshots')) === shots1 + 1, await call('dbg_scrshots'));
-  T('the turn came back again', (await poll2(async () =>
-    (await call('dbg_scrphase')) === 0 && (await call('dbg_scrturn')) === 0 ? 1 : null, 45000)) === 1, await call('dbg_scrturn'));
+  T('the turn came back again', (await poll2(async () => {
+    await call('dbg_scrhurt', 0, 150);   // staging, same topped wait as the touch shot
+    return (await call('dbg_scrphase')) === 0 && (await call('dbg_scrturn')) === 0 ? 1 : null;
+  }, 45000)) === 1, await call('dbg_scrturn'));
 
   // ---- keyboard aiming sweeps both gauges ----
   await call('dbg_scrsetangle', 45); await call('dbg_scrsetpower', 60);
@@ -212,7 +245,136 @@ function T(name, cond, extra) { if (cond) { pass++; } else { fail++; console.log
   await hold('ArrowDown', 200);
   T('holding DOWN eased the power off', (await call('dbg_scrpower')) < 80, await call('dbg_scrpower'));
 
+  // ---- v1.36: the FIREWALL eats blasts, not falls ----
+  // A carcass fired at OUR OWN column dies on our own disc (or in
+  // the dirt at our tracks — the crater opens under us either
+  // way); the blast is read at the moment SETTLE opens (blast
+  // damage applied, falls not yet), so the dome's share and the
+  // HP's share can never blur together.
+  async function solveSelf() {
+    const wind = await call('dbg_scrwind');
+    const H = await page.evaluate(() => { const a = []; for (let x = 0; x < 640; x++) a.push(window.__TSG.dbg_scrh(x)); return a; });
+    const units = [{ x: 84, y: H[84] - 9 }, { x: 556, y: H[556] - 9 }];
+    const tgt = units[0];
+    let best = null, bestScore = 1e18;
+    // The scan runs past 90 degrees on purpose: the gauge (and
+    // scr_fire) honestly aim to 180, and with a strong tailwind a
+    // forward lob can never come back down on our own column —
+    // the shot that lands the self-hit then aims back over our
+    // own head and lets the wind carry it home.
+    for (let a = 10; a <= 170; a += 0.5) for (let p = 20; p <= 100; p += 1) {
+      const th = a * Math.PI / 180, v = 60 + 3.4 * p;
+      let x = 84 + Math.cos(th) * 18, y = (H[84] - 12) - Math.sin(th) * 18;
+      let vx = v * Math.cos(th), vy = -v * Math.sin(th);
+      let dead = null, minD = 1e18;
+      for (let st = 0; st < 900; st++) {
+        const h2 = 1 / 120;
+        vy += 260 * h2; vx += wind * 1.15 * h2; x += vx * h2; y += vy * h2;
+        const dx = x - tgt.x, dy = y - tgt.y, d = dx * dx + dy * dy;
+        if (d < minD) minD = d;
+        let hit = false;
+        for (const u of units) { const ux2 = x - u.x, uy2 = y - u.y; if (ux2 * ux2 + uy2 * uy2 < 196) { hit = true; break; } }
+        if (hit || (x >= 0 && x < 640 && y >= H[Math.floor(x)]) || x < -24 || x > 664 || y < -80) { dead = { x, y, disc: hit }; break; }
+      }
+      if (!dead) continue;
+      const dx = dead.x - tgt.x, dy = dead.y - tgt.y;
+      const cand = { a, p, minDist: Math.sqrt(minD), deathDist: Math.sqrt(dx * dx + dy * dy), disc: dead.disc ? 1 : 0 };
+      const score = (cand.disc ? 0 : 1000) + cand.minDist + cand.deathDist * 0.25;   // disc deaths rank first (point-blank), then closeness
+      if (cand.deathDist <= 34 && score < bestScore) { best = cand; bestScore = score; }
+    }
+    return best;
+  }
+  async function selfShot() {
+    await call('dbg_scrhurt', 0, 150);   // staging, the solverShot idiom
+    const sol = await solveSelf();
+    T('solver found a firing solution for the self-shot', !!sol, sol ? sol.minDist.toFixed(1) : 'none');
+    if (!sol) return null;
+    await call('dbg_scrsetangle', sol.a);
+    await call('dbg_scrsetpower', sol.p);
+    // Sample densely from BEFORE the press: the blast lands inside
+    // FLY and SETTLE follows within a second — the first phase-2
+    // sample is the blast's own ledger, taken before the battery
+    // can answer and muddy it. (A plain poll after the press
+    // missed that window under load and read the battery's settle
+    // instead: shield 0, HP 140, both true and both useless.)
+    let read = null;
+    const t0 = Date.now();
+    const sampler = (async () => {
+      while (Date.now() - t0 < 20000 && !read) {
+        if ((await call('dbg_scrphase')) === 2) { read = { sh: await call('dbg_scrshield', 0), hp: await call('dbg_scrhp', 0) }; break; }
+        await sleep(25);
+      }
+    })();
+    await key('Space', 200);
+    await sampler;
+    return read;
+  }
+  const waitTurnTopped = () => poll2(async () => {
+    await call('dbg_scrhurt', 0, 150);
+    return (await call('dbg_scrphase')) === 0 && (await call('dbg_scrturn')) === 0 ? 1 : null;
+  }, 45000);
+  // Staging (v1.36 fix): the dome goes into this shot FULL, set
+  // explicitly like the sliver and fall stagings below — the
+  // bought dome has been eating the battery's live return fire
+  // (Big Carcasses since the 100-bit purse) all through the input
+  // checks above, and an absorption proof cannot ride on how much
+  // of it the battery happened to leave standing.
+  await call('dbg_scrsetshield', 0, 100);
+  const abs1 = await selfShot();
+  T('blast absorbed: the dome ate the whole hit (HP untouched at 150)', !!abs1 && abs1.hp === 150 && abs1.sh > 0 && abs1.sh < 100,
+    abs1 ? abs1.sh + '/' + abs1.hp : 'no read');
+  T('the turn came back after the absorbed self-shot', (await waitTurnTopped()) === 1, await call('dbg_scrturn'));
+  // Overflow: the dome staged to a sliver — the same blast must
+  // burn through it and reach the HP underneath.
+  await call('dbg_scrsetshield', 0, 5);
+  const abs2 = await selfShot();
+  T('overflow reaches HP: a 5-strength dome burns through', !!abs2 && abs2.sh === 0 && abs2.hp < 150 && abs2.hp > 60,
+    abs2 ? abs2.sh + '/' + abs2.hp : 'no read');
+  T('the turn came back after the overflow self-shot', (await waitTurnTopped()) === 1, await call('dbg_scrturn'));
+  // Fall bypass: a full dome, a pit dug under our own catapult,
+  // and a solver shot at the bug purely to run the settle. The
+  // carve drops the ground exactly 30 at our column, so the fall
+  // must cost (30-14)*1.2 = 19 HP and the dome nothing. (The pit
+  // is dug AFTER the solve: until the settle runs, the unit still
+  // stands at the old height the solver aimed from.)
+  // Staging: the proof's arithmetic (an exact 30-carve, an exact
+  // 19 HP) only holds on the field the round generated — by now
+  // the self-shots and the return fire have dug our column most
+  // of the way to the world floor, where the carve clamps and the
+  // floor itself kills. Restore the round's field first.
+  await call('dbg_scrregen');
+  await call('dbg_scrsetshield', 0, 100);
+  await call('dbg_scrhurt', 0, 150);
+  await call('dbg_scrhurt', 1, 500);   // staging: the bug must survive the shot that runs the settle
+  // The shot's only job is to run a settle — what it lands on is
+  // immaterial to the fall's arithmetic (an exact 30-carve under
+  // our own tracks). Aim at the bug first; if the self-dug pit at
+  // our column has eaten every arc that reaches it (it happens —
+  // the pit's depth rides on where the return fire landed), fall
+  // back to a solver shot at the mid-field valley, just as real
+  // and just as far from both units.
+  let solF = await solveFor(556, [84, 556]);
+  if (!solF) solF = await solveFor(320, [84, 556]);
+  T('solver found the fall-test shot', !!solF, solF ? solF.minDist.toFixed(1) : 'none');
+  if (!solF) { console.log(`scorchtest: ${pass} passed, ${fail} failed (aborted at the fall test — no solver shot)`); await browser.close(); process.exit(1); }
+  await call('dbg_scrsetangle', solF.a); await call('dbg_scrsetpower', solF.p);
+  await call('dbg_scrdig', 84);
+  await key('Space', 200);
+  const fallRead = await poll2(async () => (await call('dbg_scrphase')) === 0 && (await call('dbg_scrturn')) === 1
+    ? { hp: await call('dbg_scrhp', 0), sh: await call('dbg_scrshield', 0) } : null, 30000);
+  T('the fall hurt HP through the full shield (150 -> 131)', !!fallRead && fallRead.hp === 131, fallRead ? fallRead.hp : 'no read');
+  T('the shield never felt the fall (still 100)', !!fallRead && fallRead.sh === 100, fallRead ? fallRead.sh : 'no read');
+  T('the turn came back after the fall test', (await poll2(async () => {
+    await call('dbg_scrhurt', 0, 150); await call('dbg_scrhurt', 1, 150);
+    return (await call('dbg_scrphase')) === 0 && (await call('dbg_scrturn')) === 0 ? 1 : null;
+  }, 45000)) === 1, await call('dbg_scrturn'));
+
   // ---- a direct hit: blast, crater, and the hit bounty ----
+  // Staging: the round's field restored (see the fall proof) —
+  // the solver aims from the launch hill the round generated,
+  // not from the bottom of the self-dug pit, out of which no
+  // honest arc reaches the far hill at all.
+  await call('dbg_scrregen');
   await call('dbg_scrhurt', 1, 100);   // staging: the bug starts this exchange whole, whatever the lob practice cost it
   const hBugBefore = await call('dbg_scrh', 556);
   const sumBefore = await sumH(0, 639);
@@ -227,25 +389,41 @@ function T(name, cond, extra) { if (cond) { pass++; } else { fail++; console.log
   T('the hit bounty paid (+10 bits)', (await call('dbg_scrbits', 0)) >= bitsBefore + 10, await call('dbg_scrbits', 0));
 
   // ---- the kill, the round, and the shop's exact prices ----
+  await call('dbg_scrregen');   // staging: the round's field restored, same as the direct-hit proof
   await call('dbg_scrhurt', 1, 30);   // staging: the kill shot's verdict must not ride on splash arithmetic
+  await call('dbg_scrsetshield', 0, 53);   // staging (v1.36): the round's wear on the dome, so the carry into the shop is a number worth asserting
+  const bitsKillBefore = await call('dbg_scrbits', 0);
   const r2 = await solverShot(556, [84, 556]);
   T('the killing shot ended the round into the shop', r2 === 'shop', r2);
   T('round 1 is the player\'s', (await call('dbg_scrwins', 0)) === 1, await call('dbg_scrwins', 0));
   T('the bug is dead', (await call('dbg_scralive', 1)) === 0, await call('dbg_scralive', 1));
   const shopBits = await call('dbg_scrbits', 0);
-  T('kill + round purses landed (bits >= 200)', shopBits >= 200, shopBits);
-  await key('ArrowDown', 160);   // row 1: BIG CARCASS, 40 bits
+  // The two purses, measured against the purse the section
+  // started with (v1.36: the pre-shop FIREWALL spend makes any
+  // absolute total ride on which earlier shots happened to clip
+  // the bug — the kill's +50 and the round's +100 are the claim)
+  T('kill + round purses landed (+150 or more)', shopBits >= bitsKillBefore + 150, bitsKillBefore + ' -> ' + shopBits);
+  // v1.36: the dome carried across the round break at its worn
+  // strength — and the FIREWALL row recharges it, exactly
+  T('the worn shield carried into the shop at 53', (await call('dbg_scrshield', 0)) === 53, await call('dbg_scrshield', 0));
+  for (let i = 0; i < 6; i++) await key('ArrowDown', 130);   // row 6: FIREWALL
+  await key('Space', 250);
+  T('recharging the FIREWALL restored exactly 100', (await call('dbg_scrshield', 0)) === 100, await call('dbg_scrshield', 0));
+  T('the recharge cost exactly 80', (await call('dbg_scrbits', 0)) === shopBits - 80, await call('dbg_scrbits', 0));
+  const bitsFW = await call('dbg_scrbits', 0);
+  for (let i = 0; i < 5; i++) await key('ArrowUp', 130);   // back up to row 1: BIG CARCASS, 40 bits
   await key('Space', 250);
   T('buying a Big Carcass stocked it', (await call('dbg_scrinv', 0, 2)) === 1, await call('dbg_scrinv', 0, 2));
-  T('the Big Carcass cost exactly 40', (await call('dbg_scrbits', 0)) === shopBits - 40, (await call('dbg_scrbits', 0)));
+  T('the Big Carcass cost exactly 40', (await call('dbg_scrbits', 0)) === bitsFW - 40, (await call('dbg_scrbits', 0)));
   const bits2 = await call('dbg_scrbits', 0);
   await key('ArrowDown', 160);   // row 2: DIRT CLOD, 30 bits
   await key('Space', 250);
   T('buying a Dirt Clod stocked it', (await call('dbg_scrinv', 0, 3)) === 1, await call('dbg_scrinv', 0, 3));
   T('the Dirt Clod cost exactly 30', (await call('dbg_scrbits', 0)) === bits2 - 30, await call('dbg_scrbits', 0));
-  for (let i = 0; i < 4; i++) await key('ArrowDown', 140);   // row 6: TO BATTLE
+  for (let i = 0; i < 5; i++) await key('ArrowDown', 140);   // row 7: TO BATTLE
   await key('Space', 300);
   T('TO BATTLE opened round 2', (await poll('dbg_scrround', v => v === 2, 6000)) === 2, await call('dbg_scrround'));
+  T('round 2 opens under the recharged dome (100)', (await call('dbg_scrshield', 0)) === 100, await call('dbg_scrshield', 0));
   T('round 2 reaches the player\'s turn on fresh hills', (await waitPlayerTurn()) === 1, await call('dbg_scrturn'));
   await call('dbg_scrhurt', 1, 100);   // undo the wait's protective top-up: the freshness assertion wants the honest number
   T('fresh hills, fresh bug (100 HP)', (await call('dbg_scrhp', 1)) === 100, await call('dbg_scrhp', 1));
@@ -313,6 +491,13 @@ function T(name, cond, extra) { if (cond) { pass++; } else { fail++; console.log
   T('the digit key selected the plain Carcass back', (await call('dbg_scrweap')) === 0, await call('dbg_scrweap'));
 
   // ---- win the match on EASY: XP pays exactly 30, once ----
+  // Staging: the round's field restored — the Dirt Clod proof
+  // just heaped a mound over the bug's column, and a unit buried
+  // under its own hill is honestly hard to hit (the mirror aims
+  // at the surface; the bug stands underneath it). The claim here
+  // is the match end and the XP, not splash arithmetic through
+  // twenty feet of fresh dirt.
+  await call('dbg_scrregen');
   await call('dbg_scrhurt', 1, 20);
   const xpBefore = await call('dbg_buddyxp');
   const r3 = await solverShot(556, [84, 556]);
@@ -327,8 +512,30 @@ function T(name, cond, extra) { if (cond) { pass++; } else { fail++; console.log
   // ---- hot-seat 2P: turns alternate, and glory pays no XP ----
   T('panel reopens for 2P', await openPanel(), await call('dbg_arcgate'));
   T('2P HOT-SEAT launched', await pickRow(3), await call('dbg_bwmode'));
+  // v1.36: both players shop before round 1, in turn, 100 each —
+  // P1 stocks a Big Carcass, P2 raises a dome, and neither
+  // purchase may touch the other side's purse or stock
+  T('the 2P pre-round shop opens (P1 first)', (await poll('dbg_scrphase', v => v === 3, 6000)) === 3, await call('dbg_scrphase'));
+  T('both purses start at exactly 100', (await call('dbg_scrbits', 0)) === 100 && (await call('dbg_scrbits', 1)) === 100,
+    (await call('dbg_scrbits', 0)) + '/' + (await call('dbg_scrbits', 1)));
+  await key('ArrowDown', 140);   // P1 -> row 1: BIG CARCASS
+  await key('Space', 250);
+  T('P1 bought a Big Carcass in the pre-shop (100 -> 60, stocked)', (await call('dbg_scrbits', 0)) === 60 && (await call('dbg_scrinv', 0, 2)) === 1,
+    (await call('dbg_scrbits', 0)) + '/' + (await call('dbg_scrinv', 0, 2)));
+  for (let i = 0; i < 6; i++) await key('ArrowDown', 130);   // row 7: TO BATTLE -> P2 shops
+  await key('Space', 250);
+  T('the pre-round shop passes to P2 (still shopping)', (await call('dbg_scrphase')) === 3, await call('dbg_scrphase'));
+  for (let i = 0; i < 6; i++) await key('ArrowDown', 130);   // P2 -> row 6: FIREWALL
+  await key('Space', 250);
+  T('P2 bought the FIREWALL (100 -> 20, dome up at 100)', (await call('dbg_scrbits', 1)) === 20 && (await call('dbg_scrshield', 1)) === 100,
+    (await call('dbg_scrbits', 1)) + '/' + (await call('dbg_scrshield', 1)));
+  T('P2\'s purchase left P1 untouched (purse 60, Big stocked, no dome)', (await call('dbg_scrbits', 0)) === 60 && (await call('dbg_scrinv', 0, 2)) === 1 && (await call('dbg_scrshield', 0)) === 0,
+    (await call('dbg_scrbits', 0)) + '/' + (await call('dbg_scrshield', 0)));
+  await key('ArrowDown', 140);   // row 7: TO BATTLE
+  await key('Space', 300);
   T('2P gives way to AIM', (await waitAim()) === 0, await call('dbg_scrphase'));
   T('2P fields two catapults', (await call('dbg_scrunits')) === 2, await call('dbg_scrunits'));
+  T('the pre-bought Big Carcass is still stocked as round 1 begins', (await call('dbg_scrinv', 0, 2)) === 1, await call('dbg_scrinv', 0, 2));
   const xp2p = await call('dbg_buddyxp');
   await call('dbg_scrhurt', 0, 100);
   const s2p = await solveFor(556, [84, 556]);
@@ -337,8 +544,9 @@ function T(name, cond, extra) { if (cond) { pass++; } else { fail++; console.log
   await key('Space', 200);
   T('P1\'s shot passed the turn to P2', (await poll2(async () =>
     (await call('dbg_scrphase')) === 0 && (await call('dbg_scrturn')) === 1 ? 1 : null, 30000)) === 1, await call('dbg_scrturn'));
-  T('P2\'s catapult took the hit and lived', (await call('dbg_scrhp', 1)) < 60 && (await call('dbg_scralive', 1)) === 1,
-    await call('dbg_scrhp', 1));
+  // v1.36: P2's dome took the opening hit — HP whole, shield spent down
+  T('P2\'s dome took the hit and P2 lived whole', (await call('dbg_scrhp', 1)) === 100 && (await call('dbg_scrshield', 1)) > 0 && (await call('dbg_scrshield', 1)) < 100 && (await call('dbg_scralive', 1)) === 1,
+    (await call('dbg_scrhp', 1)) + '/' + (await call('dbg_scrshield', 1)));
   await call('dbg_scrhurt', 0, 100);   // staging: P2's answer must not end the round either
   await call('dbg_scrsetangle', 45); await call('dbg_scrsetpower', 62);
   await key('Space', 200);
@@ -347,13 +555,14 @@ function T(name, cond, extra) { if (cond) { pass++; } else { fail++; console.log
   // finish the 2P match in two staged rounds
   for (let round = 0; round < 2; round++) {
     await call('dbg_scrhurt', 1, 5);
+    await call('dbg_scrsetshield', 1, 0);   // staging (v1.36): the kill must not ride on whatever dome P2 has left
     const rr = await solverShot(556, [84, 556]);
     if (round === 0) {
       T('2P round 1 ended into the shop', rr === 'shop', rr);
-      for (let i = 0; i < 6; i++) await key('ArrowDown', 130);
+      for (let i = 0; i < 7; i++) await key('ArrowDown', 130);
       await key('Space', 250);   // P1: TO BATTLE -> P2 shops
       T('the 2P shop passes to P2 (still shopping)', (await call('dbg_scrphase')) === 3, await call('dbg_scrphase'));
-      for (let i = 0; i < 6; i++) await key('ArrowDown', 130);
+      for (let i = 0; i < 7; i++) await key('ArrowDown', 130);
       await key('Space', 250);   // P2: TO BATTLE -> round 2
       T('2P round 2 opened', (await poll('dbg_scrround', v => v === 2, 6000)) === 2, await call('dbg_scrround'));
       // Round 2 opens with P2 (the opener alternates): P2 lobs a
@@ -375,19 +584,26 @@ function T(name, cond, extra) { if (cond) { pass++; } else { fail++; console.log
   // ---- HARD: three bugs, and the plaque ----
   T('panel reopens for HARD', await openPanel(), await call('dbg_arcgate'));
   T('PLAY - HARD launched', await pickRow(2), await call('dbg_bwmode'));
+  // v1.36: the battery shopped silently before round 1 — on HARD
+  // the Firewall is its first buy, so its gunner opens domed
+  T('the HARD pre-round shop opens', (await poll('dbg_scrphase', v => v === 3, 6000)) === 3, await call('dbg_scrphase'));
+  T('HARD battery opens round 1 shielded (gunner dome at 100)', (await call('dbg_scrshield', 1)) === 100, await call('dbg_scrshield', 1));
+  for (let i = 0; i < 7; i++) await key('ArrowDown', 130);   // buy nothing: TO BATTLE
+  await key('Space', 300);
   T('HARD gives way to AIM', (await waitAim()) === 0, await call('dbg_scrphase'));
   T('HARD fields three bugs (4 units)', (await call('dbg_scrunits')) === 4, await call('dbg_scrunits'));
   const BUGX = [556, 492, 436];
   for (let round = 0; round < 2; round++) {
     for (let bi = 0; bi < 3; bi++) {
       await call('dbg_scrhurt', bi + 1, 1);
+      await call('dbg_scrsetshield', bi + 1, 0);   // staging (v1.36): the staged kill must not ride on the battery's domes (it re-shields between rounds)
       const rr = await solverShot(BUGX[bi], [84, 556, 492, 436]);
       T('HARD round ' + (round + 1) + ': bug ' + (bi + 1) + ' down', (await call('dbg_scralive', bi + 1)) === 0,
         await call('dbg_scralive', bi + 1));
       if (bi < 2) T('HARD round ' + (round + 1) + ': the fight goes on', rr === 'turn', rr);
       else if (round === 0) {
         T('HARD round 1 ended into the shop', rr === 'shop', rr);
-        for (let i = 0; i < 6; i++) await key('ArrowDown', 130);
+        for (let i = 0; i < 7; i++) await key('ArrowDown', 130);
         await key('Space', 250);
         T('HARD round 2 opened', (await poll('dbg_scrround', v => v === 2, 6000)) === 2, await call('dbg_scrround'));
         T('HARD round 2 reaches the player\'s turn', (await waitPlayerTurn()) === 1, await call('dbg_scrturn'));
@@ -403,19 +619,32 @@ function T(name, cond, extra) { if (cond) { pass++; } else { fail++; console.log
   T('back in the arcade after HARD', (await poll('dbg_bwmode', v => v === -1, 4000)) === -1, await call('dbg_bwmode'));
 
   // ---- leaving mid-match forfeits; re-entry starts clean ----
+  // (v1.36: every entry lands in the pre-round shop first — the
+  // skip helper walks straight to TO BATTLE, buying nothing)
+  async function skipPreShop() {
+    if ((await poll('dbg_scrphase', v => v === 3, 6000)) !== 3) return false;
+    for (let i = 0; i < 7; i++) await key('ArrowDown', 130);
+    await key('Space', 300);
+    return true;
+  }
   T('panel reopens for the forfeit check', await openPanel(), await call('dbg_arcgate'));
   T('EASY launched again', await pickRow(0), await call('dbg_bwmode'));
+  T('the pre-round shop opens for the forfeit check', await skipPreShop(), await call('dbg_scrphase'));
   T('AIM again', (await waitAim()) === 0, await call('dbg_scrphase'));
   await call('dbg_scrgivebits', 0, 500);
-  T('staging purse in place', (await call('dbg_scrbits', 0)) === 550, await call('dbg_scrbits', 0));
+  T('staging purse in place', (await call('dbg_scrbits', 0)) === 600, await call('dbg_scrbits', 0));
   await key('Escape', 250);
   T('one Esc only arms the forfeit (still in the match)', (await call('dbg_bwmode')) === 10, await call('dbg_bwmode'));
   await key('Escape', 250);
   T('the second Esc forfeits back to the arcade', (await poll('dbg_bwmode', v => v === -1, 4000)) === -1, await call('dbg_bwmode'));
   T('panel reopens after the forfeit', await openPanel(), await call('dbg_arcgate'));
   T('EASY relaunched', await pickRow(0), await call('dbg_bwmode'));
+  T('the pre-round shop opens after re-entry', await skipPreShop(), await call('dbg_scrphase'));
   T('AIM after re-entry', (await waitAim()) === 0, await call('dbg_scrphase'));
-  T('re-entry reset the purse to 50', (await call('dbg_scrbits', 0)) === 50, await call('dbg_scrbits', 0));
+  T('re-entry reset the purse to 100', (await call('dbg_scrbits', 0)) === 100, await call('dbg_scrbits', 0));
+  T('leaving the pre-shop with no purchase started round 1 clean (no stock, no dome)',
+    (await call('dbg_scrinv', 0, 2)) === 0 && (await call('dbg_scrshield', 0)) === 0,
+    (await call('dbg_scrinv', 0, 2)) + '/' + (await call('dbg_scrshield', 0)));
   T('re-entry reset the match (round 1, no wins)', (await call('dbg_scrround')) === 1 && (await call('dbg_scrwins', 0)) === 0,
     (await call('dbg_scrround')) + '/' + (await call('dbg_scrwins', 0)));
   await page.screenshot({ path: 'scorch-aim.png' });

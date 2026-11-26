@@ -61,6 +61,7 @@ function srcFiles() {
   await call('dbg_tp', 0, -18100); await sleep(200);
   await key('KeyE', 300);
   T('terminal opens to the browser', (await poll('dbg_srcterm', v => v === 1)) === 1, await call('dbg_srcterm'));
+  T('v1.36: the terminal text scale is 2 (one step up from v1.35\'s 1)', (await call('dbg_srctscale')) === 2, await call('dbg_srctscale'));
 
   // browse to game/update.c and open it
   const files = srcFiles();
@@ -121,10 +122,12 @@ function srcFiles() {
   T('back at the browser after reset', (await call('dbg_srcterm')) === 1, await call('dbg_srcterm'));
 
   // v1.27 wrap check: open the file whose lines wrap the most at the
-  // editor's full-width cols (60). The expected display-row count is
-  // computed here from the raw BYTES on disk (the editor counts
-  // bytes), independently of the game's own wrap math.
-  const COLS = 60;
+  // editor's full-width cols (30 since v1.36's scale-2 font — the
+  // panel fits half as many characters across). The expected
+  // display-row count is computed here from the raw BYTES on disk
+  // (the editor counts bytes), independently of the game's own
+  // wrap math.
+  const COLS = 30;
   let wrapFile = null, wrapExpect = 0;
   for (const f of files) {
     const buf = fs.readFileSync(path.join(__dirname, '..', 'src', f));
@@ -155,7 +158,7 @@ function srcFiles() {
   for (let i = 0; i < 3; i++) await key('PageDown', 150);
   const drow1 = await call('dbg_srcdrow'), top1 = await call('dbg_srctop');
   T('wrap: PageDown lands the cursor on display row 30', drow1 === 30, drow1);
-  T('wrap: the window scrolled and the cursor is inside it', top1 > 0 && top1 <= drow1 && drow1 < top1 + 18, 'top=' + top1 + ' drow=' + drow1);
+  T('wrap: the window scrolled and the cursor is inside it', top1 > 0 && top1 <= drow1 && drow1 < top1 + 6, 'top=' + top1 + ' drow=' + drow1);
   await key('ArrowUp', 150);
   T('wrap: ArrowUp steps one DISPLAY row (not one logical line)', (await call('dbg_srcdrow')) === 29, await call('dbg_srcdrow'));
   await key('Escape', 300);

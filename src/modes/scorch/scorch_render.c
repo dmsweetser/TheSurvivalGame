@@ -49,6 +49,25 @@ static void scr_draw_unit(int pi, BwSim *S, ScrUnit *u){
         line_thick(X, Y-(int)(6*sc), ex, ey, (int)(3*sc)+1, COL(110,84,160));
         disc_fill(ex, ey, (int)(2*sc)+1, COL(200,170,240));
     }
+    if (u->alive && u->sh>0){
+        // v1.36: the FIREWALL dome — an arc of firewall sparks over
+        // the unit, in the main game's shield language (the orbiting
+        // spark ring of render/players_draw.c, bent into a dome).
+        // Whole while the shield is strong; at half or under, gaps
+        // crawl along the arc and the colour dims. The strength
+        // number rides above it — never colour alone.
+        int cx2 = X, cy2 = Y-(int)(6*sc);
+        int rx2 = (int)(19*sc), ry2 = (int)(17*sc);
+        u32 dc = u->sh>50? COL(120,190,255) : COL(90,140,200);
+        for (int a=0;a<=12;a++){
+            if (u->sh<=50 && ((a + (int)(G.anim_t*6))%3)==0) continue;   // the flicker: gaps crawl the arc
+            float t = 3.14159f * a/12.0f;
+            int px2 = cx2 + (int)(fcos(t)*rx2), py2 = cy2 - (int)(fsin(t)*ry2);
+            disc_fill(px2, py2, sc>=1.0f? 2 : 1, (a%3==0)? COL(170,220,255) : dc);
+        }
+        char nb[8]; char *q=nb; q=sapp_int(q, u->sh); *q=0;
+        draw_text_center(X, Y-(int)(62*sc), nb, 1, COL(190,230,255));
+    }
     if (u->alive && u->hp<100){
         int bw2 = 28, bx = X-bw2/2, by = Y-(int)(34*sc);
         rect_fill(bx, by, bw2, 4, COL(24,24,30));
@@ -204,6 +223,14 @@ static void scr_render(int pi){
         disc_fill(fx+22, fy+22, 20, live? COL(216,64,54) : COL(90,50,48));
         draw_text_center(fx+22, fy+18, "FIRE", 1, COL(255,240,235));
     }
+    {   // v1.36: the aiming side's shield strength rides the control
+        // bar's free bottom strip while its gunner's FIREWALL is up
+        ScrUnit *gu = &S->scr_u[scr_unit_of(S, S->scr_turn)];
+        if ((S->scr_phase==SP_AIM || S->scr_phase==SP_FLY) && gu->alive && gu->sh>0){
+            char nb[20]; char *q=nb; q=sappend(q, "SHIELD "); q=sapp_int(q, gu->sh); *q=0;
+            draw_text(vx+8, bar_y+33, nb, 1, COL(170,220,255));
+        }
+    }
     // ---- phase panels.
     if (S->scr_phase==SP_BANNER){
         blend_rect(vx, vy+vh2/2-44, vw2, 76, COL(10,10,18), 170);
@@ -229,8 +256,9 @@ static void scr_render(int pi){
         draw_text(sx0+12, sy0+10, who, 2, COL(255,220,130));
         { char bb[40]; char *q=bb; q=sappend(q, "BITS "); q=sapp_int(q, S->scr_bits[S->scr_shop_side]); *q=0;
           draw_text(sx0+sw-text_w(bb,1)-12, sy0+16, bb, 1, COL(255,220,120)); }
-        draw_text(sx0+12, sy0+36, S->scr_2p? "STOCK UP - THE NEXT HILLS ARE FRESH." : "THE BATTERY HAS RESTOCKED. YOUR TURN.", 1, COL(190,190,205));
-        for (int r=0;r<7;r++){
+        draw_text(sx0+12, sy0+36, S->scr_preshop? (S->scr_2p? "STOCK UP - OPENING PURSES, 100 BITS EACH." : "OPENING STOCK - THE BATTERY DIGS IN TOO.")
+                                                 : (S->scr_2p? "STOCK UP - THE NEXT HILLS ARE FRESH." : "THE BATTERY HAS RESTOCKED. YOUR TURN."), 1, COL(190,190,205));
+        for (int r=0;r<8;r++){
             int rx, ry, rw, rh; scr_shop_row_rect(vx,vy,vw2,vh2, r, &rx,&ry,&rw,&rh);
             int sel = S->scr_shop_sel==r;
             if (sel){ rect_fill(rx, ry, rw, rh, COL(52,46,24)); rect_line(rx, ry, rw, rh, COL(255,214,80)); }
@@ -241,13 +269,22 @@ static void scr_render(int pi){
                 if (S->scr_inv[S->scr_shop_side][w]>0){ q=sappend(q, "OWN "); q=sapp_int(q, S->scr_inv[S->scr_shop_side][w]); q=sappend(q, " - "); }
                 q=sapp_int(q, SCR_PRICE[w]); q=sappend(q, " BITS"); *q=0;
                 draw_text(rx+rw-text_w(rb,1)-6, ry+5, rb, 1, S->scr_bits[S->scr_shop_side]>=SCR_PRICE[w]? COL(200,220,160) : COL(150,110,100));
+            } else if (r==6){
+                // v1.36: the FIREWALL row — a recharge, not a stock
+                // item, so its right side reports the dome's state
+                draw_text(rx+6, ry+5, SCR_WNAME[SW_FW], 1, COL(240,240,230));
+                ScrUnit *gu = &S->scr_u[scr_unit_of(S, S->scr_shop_side)];
+                char rb[28]; char *q=rb;
+                if (gu->sh>0){ q=sappend(q, "UP "); q=sapp_int(q, gu->sh); q=sappend(q, " - "); }
+                q=sapp_int(q, SCR_PRICE[SW_FW]); q=sappend(q, " BITS"); *q=0;
+                draw_text(rx+rw-text_w(rb,1)-6, ry+5, rb, 1, S->scr_bits[S->scr_shop_side]>=SCR_PRICE[SW_FW]? COL(200,220,160) : COL(150,110,100));
             } else {
                 draw_text(rx+6, ry+5, "TO BATTLE", 1, COL(255,220,130));
                 draw_text(rx+rw-text_w(">",1)-6, ry+5, ">", 1, COL(255,220,130));
             }
         }
         { int sel = S->scr_shop_sel;
-          if (sel<6) draw_text_center(vx+vw2/2, sy0+sh-16, SCR_WDESC[sel+1], 1, COL(170,220,255)); }
+          if (sel<7) draw_text_center(vx+vw2/2, sy0+sh-16, SCR_WDESC[sel+1], 1, COL(170,220,255)); }
     }
     if (S->scr_phase==SP_END){
         int pw2 = vw2<380? vw2-16 : 360, ph2 = 148;
